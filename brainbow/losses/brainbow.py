@@ -54,6 +54,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange, reduce, repeat
+from monai.losses import DiceLoss
 
 from brainbow.losses._common import canonical_regression_name, regression_loss_fn
 
@@ -323,10 +324,11 @@ class BrainbowLoss(nn.Module):
             target is zero on background, so averaging everywhere would
             down-weight instance gradients proportionally to foreground
             fraction).  Default ``True``.
-        aff_eps: Numerical stabiliser in the soft-Dice denominator.  The
-            affinity sub-loss is ``1 - (2 Σ p t + ε) / (Σ p + Σ t + ε)``
-            where ``p = sigmoid(logits)``, averaged across the 6
-            direction channels (and batch).
+        aff_eps: Numerical stabiliser passed as both ``smooth_nr`` and
+            ``smooth_dr`` to :class:`monai.losses.DiceLoss`.  The affinity
+            sub-loss is ``1 - (2 Σ p t + ε) / (Σ p + Σ t + ε)`` where
+            ``p = sigmoid(logits)``, summed over batch + spatial per
+            channel and averaged across the 6 direction channels.
     """
 
     num_channels: int = _BRAINBOW_CHANNELS
@@ -341,7 +343,7 @@ class BrainbowLoss(nn.Module):
         weight_raw: float = 1.0,
         weight_aff: float = 1.0,
         foreground_only_loc: bool = True,
-        aff_eps: float = 1.0,
+        aff_eps: float = 1e-5,
     ) -> None:
         super().__init__()
         self.loss_loc = canonical_regression_name(loss_loc)
@@ -355,6 +357,14 @@ class BrainbowLoss(nn.Module):
         self.weight_aff = float(weight_aff)
         self.foreground_only_loc = bool(foreground_only_loc)
         self.aff_eps = float(aff_eps)
+        self._aff_dice = DiceLoss(
+            sigmoid=True,
+            include_background=True,
+            reduction="mean",
+            batch=True,                       # aggregate over B + spatial per channel
+            smooth_nr=self.aff_eps,
+            smooth_dr=self.aff_eps,
+        )
 
     @property
     def task_channels(self) -> int:
@@ -451,22 +461,19 @@ class BrainbowLoss(nn.Module):
         pred: torch.Tensor,
         target: torch.Tensor,
     ) -> torch.Tensor:
-        """Soft-Dice loss on sigmoid affinities (ch 10-15).
+        """Soft-Dice loss on sigmoid affinities (ch 10-15) via MONAI.
 
-        ``1 - mean_c [ (2 Σ p t + ε) / (Σ p + Σ t + ε) ]`` where
-        ``p = sigmoid(logits)``, summed over every voxel of every batch
-        element, and the mean is taken across the 6 direction channels.
+        Delegates to :class:`monai.losses.DiceLoss` with ``sigmoid=True``
+        and ``batch=True`` so intersections / unions are summed over
+        batch + spatial per channel, and the final ``1 - dice`` is
+        averaged across the 6 direction channels.  ``aff_eps`` is wired
+        in as both ``smooth_nr`` and ``smooth_dr``.
 
         No mask: SAME-pad guarantees every voxel has a valid target
         (boundary voxels supervise ``aff == 1`` -- self-connected), so
         the Dice score is well-defined on the full volume.
         """
-        p = pred.sigmoid()
-        intersection = reduce(p * target, "b c ... -> c", "sum")
-        p_sum = reduce(p, "b c ... -> c", "sum")
-        t_sum = reduce(target, "b c ... -> c", "sum")
-        dice = (2.0 * intersection + self.aff_eps) / (p_sum + t_sum + self.aff_eps)
-        return 1.0 - dice.mean()
+        return self._aff_dice(pred, target)
 
     # ------------------------------------------------------------------
     # Forward

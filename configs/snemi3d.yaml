@@ -75,7 +75,7 @@ model:
   freeze_vae_encoder: true
   freeze_dit_backbone: 1
   freeze_vae_decoder: true
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   dropout: 0.2
 
 callbacks:
@@ -229,4 +229,4 @@ loss:
   brainbow_weight_raw: 1.0         # sub-weight for raw channel  (ch 0)
   brainbow_weight_aff: 1.0         # sub-weight for affinity soft-Dice (ch 10-15, T/B/U/D/L/R, Z-Y-X, sigmoid)
   brainbow_foreground_only_loc: true  # apply location loss on foreground voxels only (bg has no instance)
-  brainbow_aff_eps: 1.0            # smoothing term in the soft-Dice denominator
+  brainbow_aff_eps: 1.0e-5         # MONAI DiceLoss smoothing (smooth_nr=smooth_dr); MONAI default is 1e-5

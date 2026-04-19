@@ -87,7 +87,7 @@ class CombinedLoss(nn.Module):
         brainbow_weight_raw: float = 1.0,
         brainbow_weight_aff: float = 1.0,
         brainbow_foreground_only_loc: bool = True,
-        brainbow_aff_eps: float = 1.0,
+        brainbow_aff_eps: float = 1e-5,
         # GeometryLoss kwargs (forwarded via **geom_kwargs)
         **geom_kwargs,
     ) -> None:

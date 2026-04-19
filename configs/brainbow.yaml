@@ -40,4 +40,4 @@ loss:
   brainbow_weight_raw: 1.0
   brainbow_weight_aff: 1.0
   brainbow_foreground_only_loc: true
-  brainbow_aff_eps: 1.0
+  brainbow_aff_eps: 1.0e-5
