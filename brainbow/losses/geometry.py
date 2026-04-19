@@ -1,65 +1,85 @@
 """
-Geometry head regression loss: direction + covariance + raw reconstruction.
+Geometry head regression loss: raw + direction + covariance.
 
-Dimension-agnostic — parameterized by ``spatial_dims``.
+Dimension-agnostic -- parameterized by ``spatial_dims``.
 
-Supervises three groups of channels predicted by the geometry head:
+Channel layout (deliberately aligned with :class:`BrainbowLoss`, whose
+``ch 0`` is also ``rawval``)::
 
-* **direction** -- first ``S`` channels: unit vectors toward instance centroid.
-* **covariance** -- next ``S*S`` channels: full symmetric spatial covariance.
-* **raw** -- last 4 channels: RGBA reconstruction of the input image.
+    ch 0                          := raw  (image intensity, dense)
+    ch 1 .. 1+S                   := dir  (unit direction vectors, FG-only)
+    ch 1+S .. 1+S + S*(S+1)//2    := cov  (upper-triangle covariance, FG-only)
 
-Direction and covariance sub-losses are foreground-only.  The raw
-reconstruction sub-loss is computed over ALL pixels (the alpha channel
-encodes the foreground mask, so the model learns both regions).
-All sub-losses support configurable loss type: ``mse``, ``l1``, or
-``smooth_l1``.
-
-Expected geometry head output has ``S + S*S + 4`` channels:
-  2-D:  2 + 4 + 4 = 10
-  3-D:  3 + 9 + 4 = 16
+Expected geometry head output has ``1 + S + S*(S+1)//2`` channels:
+  2-D:  1 + 2 + 3 =  6
+  3-D:  1 + 3 + 6 = 10
 """
+
+from __future__ import annotations
 
 from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, reduce, repeat
+from einops import rearrange, reduce
+
+from brainbow.losses._common import canonical_regression_name
 
 
-_LOSS_FN_REGISTRY = {
-    "mse": "mse",
-    "l2": "mse",
-    "l1": "l1",
-    "mae": "l1",
-    "smooth_l1": "smooth_l1",
-    "huber": "smooth_l1",
-}
+def upper_tri_channels_to_matrix(
+    cov_tri: torch.Tensor,
+    spatial_dims: int,
+) -> torch.Tensor:
+    """Expand an upper-triangle covariance channel stack to full matrices.
 
+    The channel order produced by
+    :func:`brainbow.transforms.covariance.compute_covariance_field` is
+    row-major upper-triangle::
 
-def _resolve_loss_fn(name: str) -> str:
-    key = name.lower().replace("-", "_")
-    if key not in _LOSS_FN_REGISTRY:
-        raise ValueError(
-            f"Unknown loss type '{name}'. "
-            f"Choose from: {sorted(set(_LOSS_FN_REGISTRY.values()))}"
-        )
-    return _LOSS_FN_REGISTRY[key]
+        (i, j) for i in range(S) for j in range(i, S)
+
+    i.e. 2-D: ``(Cyy, Cyx, Cxx)``  ->  channels ``(0,0), (0,1), (1,1)``;
+         3-D: ``(Czz, Czy, Czx, Cyy, Cyx, Cxx)``.
+
+    Args:
+        cov_tri: ``[B, T, *spatial]`` where ``T = S*(S+1)//2``.
+        spatial_dims: ``S`` (2 or 3).
+
+    Returns:
+        ``[B, *spatial, S, S]`` symmetric matrices.
+    """
+    S = spatial_dims
+    B = cov_tri.shape[0]
+    spatial_shape = cov_tri.shape[2:]
+    full = cov_tri.new_zeros(B, *spatial_shape, S, S)
+    ch = 0
+    for i in range(S):
+        for j in range(i, S):
+            full[..., i, j] = cov_tri[:, ch]
+            if i != j:
+                full[..., j, i] = cov_tri[:, ch]
+            ch += 1
+    return full
 
 
 class GeometryLoss(nn.Module):
     """Regression loss for the geometry head output.
 
+    Raw is an auxiliary autoencoder-style signal supervised across all
+    voxels.  Direction and covariance are foreground-only.  The three
+    sub-losses each pick an independent regression function (``mse``,
+    ``l1``, or ``smooth_l1``).
+
     Args:
         spatial_dims: 2 for images, 3 for volumes.
-        weight_dir: Weight for the direction sub-loss.
-        weight_cov: Weight for the covariance sub-loss.
-        weight_raw: Weight for the raw-reconstruction sub-loss.
-        loss_dir: Loss function for direction (``mse``, ``l1``, ``smooth_l1``).
-        loss_cov: Loss function for covariance.
-        loss_raw: Loss function for raw reconstruction.
-        smooth_l1_beta: Beta parameter for smooth-L1 when used.
+        weight_dir:  Weight for the direction sub-loss.
+        weight_cov:  Weight for the covariance sub-loss.
+        weight_raw:  Weight for the raw-reconstruction sub-loss.
+        loss_dir:    Regression loss name for direction.
+        loss_cov:    Regression loss name for covariance.
+        loss_raw:    Regression loss name for raw.
+        smooth_l1_beta: ``beta`` parameter of smooth-L1 when used.
     """
 
     def __init__(
@@ -72,234 +92,264 @@ class GeometryLoss(nn.Module):
         loss_cov: str = "l1",
         loss_raw: str = "l1",
         smooth_l1_beta: float = 1.0,
-        **kwargs,
+        **kwargs,  # ignored; keeps ``CombinedLoss`` kwargs forwarding flexible
     ) -> None:
         super().__init__()
         self.spatial_dims = spatial_dims
         self.weight_dir = weight_dir
         self.weight_cov = weight_cov
         self.weight_raw = weight_raw
-        self.loss_dir = _resolve_loss_fn(loss_dir)
-        self.loss_cov = _resolve_loss_fn(loss_cov)
-        self.loss_raw = _resolve_loss_fn(loss_raw)
+        self.loss_dir = canonical_regression_name(loss_dir)
+        self.loss_cov = canonical_regression_name(loss_cov)
+        self.loss_raw = canonical_regression_name(loss_raw)
         self.smooth_l1_beta = smooth_l1_beta
 
         S = spatial_dims
+        self._ch_raw = 1
         self._ch_dir = S
-        self._ch_cov = S * S
-        self._ch_raw = 4
-
-        tri_src, full_row = [], []
-        ch = 0
-        for i in range(S):
-            for j in range(i, S):
-                tri_src.append(ch)
-                full_row.append(i * S + j)
-                if i != j:
-                    tri_src.append(ch)
-                    full_row.append(j * S + i)
-                ch += 1
-        self.register_buffer("_tri_src", torch.tensor(tri_src, dtype=torch.long), persistent=False)
-        self.register_buffer("_tri_dst", torch.tensor(full_row, dtype=torch.long), persistent=False)
+        self._ch_cov = S * (S + 1) // 2
 
     @property
+    def task_channels(self) -> int:
+        """Expected width of the geometry head prediction tensor."""
+        return self._ch_raw + self._ch_dir + self._ch_cov
+
+    # Backwards-compat alias -- older code looked up ``geometry_channels``.
+    @property
     def geometry_channels(self) -> int:
-        """Total number of geometry head output channels."""
-        return self._ch_dir + self._ch_cov + self._ch_raw
-
-    # ------------------------------------------------------------------
-    # Foreground-masked regression loss
-    # ------------------------------------------------------------------
-
-    def _fg_loss(self, pred, target, fg, loss_type):
-        """Regression loss over foreground pixels only.
-
-        Args:
-            pred:      [C, N] predicted channels (flattened spatial).
-            target:    [C, N] target channels.
-            fg:        [N] boolean foreground mask.
-            loss_type: "mse" | "l1" | "smooth_l1".
-        """
-        n_fg = fg.sum().float().clamp(min=1.0)
-        numel = n_fg * pred.shape[0]
-
-        p, t = pred[:, fg], target[:, fg]
-
-        if loss_type == "mse":
-            diff = p - t
-            return (diff ** 2).sum() / numel
-        elif loss_type == "l1":
-            return (p - t).abs().sum() / numel
-        else:
-            return F.smooth_l1_loss(
-                p, t, beta=self.smooth_l1_beta, reduction="sum",
-            ) / numel
-
-    def _global_loss(self, pred, target, loss_type):
-        """Regression loss over ALL pixels (no foreground masking).
-
-        Args:
-            pred:      [C, N] predicted channels (flattened spatial).
-            target:    [C, N] target channels.
-            loss_type: "mse" | "l1" | "smooth_l1".
-        """
-        if loss_type == "mse":
-            return ((pred - target) ** 2).mean()
-        elif loss_type == "l1":
-            return (pred - target).abs().mean()
-        else:
-            return F.smooth_l1_loss(pred, target, beta=self.smooth_l1_beta)
+        return self.task_channels
 
     # ------------------------------------------------------------------
     # Target construction
     # ------------------------------------------------------------------
 
-    def _upper_tri_to_full(self, tri: torch.Tensor) -> torch.Tensor:
-        """Expand upper-triangle [S*(S+1)/2, N] -> full [S*S, N]."""
-        S = self.spatial_dims
-        full = torch.zeros(S * S, tri.shape[1], device=tri.device, dtype=tri.dtype)
-        full[self._tri_dst] = tri[self._tri_src]
-        return full
+    @torch.no_grad()
+    def _build_target_dir(self, ins_label_b: torch.Tensor) -> torch.Tensor:
+        """Unit direction field for a single batch element.
 
-    def targets_from_pipeline(
+        Returns a flattened ``[S, N]`` tensor on the same device as
+        ``ins_label_b``.  The underlying transform lives in NumPy, so
+        we materialise back to torch before returning.
+        """
+        from brainbow.transforms.direction import compute_direction_field
+        d = compute_direction_field(ins_label_b, normalize=True)
+        d_t = torch.as_tensor(d, device=ins_label_b.device, dtype=torch.float32)
+        return rearrange(d_t, "c ... -> c (...)")
+
+    @torch.no_grad()
+    def _build_target_cov(self, ins_label_b: torch.Tensor) -> torch.Tensor:
+        """Upper-triangle covariance field for a single batch element.
+
+        Returns a flattened ``[S*(S+1)//2, N]`` tensor on the same
+        device as ``ins_label_b``.
+        """
+        from brainbow.transforms.covariance import compute_covariance_field
+        c = compute_covariance_field(ins_label_b, normalized=True)
+        c_t = torch.as_tensor(c, device=ins_label_b.device, dtype=torch.float32)
+        return rearrange(c_t, "c ... -> c (...)")
+
+    @torch.no_grad()
+    def build_target(
+        self,
+        ins_label: torch.Tensor,
+        direction: Optional[torch.Tensor] = None,
+        covariance: Optional[torch.Tensor] = None,
+    ) -> Dict[str, List[Optional[torch.Tensor]]]:
+        """Build per-batch direction + covariance targets.
+
+        Fast path: ``direction`` / ``covariance`` are precomputed tensors
+        from the datamodule (shape ``[B, C, *spatial]``) -- we just
+        flatten them.  Fallback path: run the scalar transforms on the
+        fly per batch element.
+
+        Args:
+            ins_label:  ``[B, *spatial]`` integer instance ids.
+            direction:  optional ``[B, S, *spatial]`` unit vectors.
+            covariance: optional ``[B, S*(S+1)//2, *spatial]`` upper-tri.
+
+        Returns:
+            ``{"dir_targets": [B tensors or None],
+               "cov_targets": [B tensors or None]}``
+        """
+        if direction is not None and covariance is not None:
+            return self._build_target_from_pipeline(direction, covariance)
+
+        dir_targets: List[Optional[torch.Tensor]] = []
+        cov_targets: List[Optional[torch.Tensor]] = []
+        for b in range(ins_label.shape[0]):
+            lbl_b = ins_label[b]
+            if not (lbl_b > 0).any():
+                dir_targets.append(None)
+                cov_targets.append(None)
+                continue
+            dir_targets.append(
+                self._build_target_dir(lbl_b) if self.weight_dir > 0 else None
+            )
+            cov_targets.append(
+                self._build_target_cov(lbl_b) if self.weight_cov > 0 else None
+            )
+        return {"dir_targets": dir_targets, "cov_targets": cov_targets}
+
+    def _build_target_from_pipeline(
         self,
         direction: torch.Tensor,
         covariance: torch.Tensor,
-    ) -> dict:
-        """Build cached_targets from datamodule-precomputed tensors.
+    ) -> Dict[str, List[Optional[torch.Tensor]]]:
+        """Flatten pipeline-precomputed direction + covariance tensors.
 
-        Args:
-            direction:  [B, S, *spatial] unit direction vectors.
-            covariance: [B, S*(S+1)//2, *spatial] upper-triangle covariance.
+        Foreground presence is inferred from non-zero direction vectors
+        (background voxels have a zero direction by construction).
         """
-        B = direction.shape[0]
         dir_flat = rearrange(direction, "b c ... -> b c (...)")
         cov_flat = rearrange(covariance, "b c ... -> b c (...)")
-
         has_fg = reduce(dir_flat.abs(), "b c n -> b", "sum") > 0
 
         dir_targets: List[Optional[torch.Tensor]] = []
         cov_targets: List[Optional[torch.Tensor]] = []
-
-        if self.weight_cov > 0:
-            S = self.spatial_dims
-            N = cov_flat.shape[2]
-            cov_full = torch.zeros(B, S * S, N, device=cov_flat.device, dtype=cov_flat.dtype)
-            cov_full[:, self._tri_dst] = cov_flat[:, self._tri_src]
-
-        for b in range(B):
+        for b in range(dir_flat.shape[0]):
             if not has_fg[b]:
                 dir_targets.append(None)
                 cov_targets.append(None)
                 continue
             dir_targets.append(dir_flat[b] if self.weight_dir > 0 else None)
-            cov_targets.append(cov_full[b] if self.weight_cov > 0 else None)
-
+            cov_targets.append(cov_flat[b] if self.weight_cov > 0 else None)
         return {"dir_targets": dir_targets, "cov_targets": cov_targets}
 
-    @torch.no_grad()
-    def compute_targets(self, ins_label: torch.Tensor) -> dict:
-        """On-the-fly target computation from instance labels."""
-        from brainbow.transforms.direction import compute_direction_field
-        from brainbow.transforms.covariance import compute_covariance_field
+    # Backwards-compat shims for older call sites.
+    def targets_from_pipeline(
+        self, direction: torch.Tensor, covariance: torch.Tensor,
+    ) -> Dict[str, List[Optional[torch.Tensor]]]:
+        return self._build_target_from_pipeline(direction, covariance)
 
-        B = ins_label.shape[0]
-        dir_targets: List[Optional[torch.Tensor]] = []
-        cov_targets: List[Optional[torch.Tensor]] = []
+    def compute_targets(self, ins_label: torch.Tensor):
+        return self.build_target(ins_label)
 
-        for b in range(B):
-            lbl_b = ins_label[b]
-            has_fg = (lbl_b > 0).any()
-            if not has_fg:
-                dir_targets.append(None)
-                cov_targets.append(None)
-                continue
+    # ------------------------------------------------------------------
+    # Per-voxel weights (not used by this head)
+    # ------------------------------------------------------------------
 
-            if self.weight_dir > 0:
-                d = compute_direction_field(lbl_b, normalize=True)
-                dir_targets.append(rearrange(d, "c ... -> c (...)"))
-            else:
-                dir_targets.append(None)
+    def compute_weights(self, labels: torch.Tensor) -> None:
+        return None
 
-            if self.weight_cov > 0:
-                c = compute_covariance_field(lbl_b, normalized=True)
-                c_flat = rearrange(c, "c ... -> c (...)")
-                cov_targets.append(self._upper_tri_to_full(c_flat))
-            else:
-                cov_targets.append(None)
+    # ------------------------------------------------------------------
+    # Sub-losses
+    # ------------------------------------------------------------------
 
-        return {"dir_targets": dir_targets, "cov_targets": cov_targets}
+    def _regress(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        loss_type: str,
+        reduction: str = "mean",
+    ) -> torch.Tensor:
+        """Regression with the canonical name resolution and smooth-L1 beta."""
+        if loss_type == "mse":
+            return F.mse_loss(pred, target, reduction=reduction)
+        if loss_type == "l1":
+            return F.l1_loss(pred, target, reduction=reduction)
+        return F.smooth_l1_loss(
+            pred, target, beta=self.smooth_l1_beta, reduction=reduction,
+        )
+
+    def _compute_loss_fg(
+        self,
+        pred_b: torch.Tensor,
+        target_b: torch.Tensor,
+        fg_b: torch.Tensor,
+        loss_type: str,
+    ) -> torch.Tensor:
+        """Foreground-only regression loss for a single batch element.
+
+        Args:
+            pred_b:   ``[C, N]`` flattened prediction.
+            target_b: ``[C, N]`` flattened target.
+            fg_b:     ``[N]`` boolean foreground mask.
+            loss_type: canonical regression name ("mse" / "l1" / "smooth_l1").
+        """
+        n_fg = fg_b.sum().float().clamp(min=1.0)
+        denom = n_fg * pred_b.shape[0]
+        p, t = pred_b[:, fg_b], target_b[:, fg_b]
+        return self._regress(p, t, loss_type, reduction="sum") / denom
+
+    def _compute_loss_dir(self, pred_b, target_b, fg_b):
+        return self._compute_loss_fg(pred_b, target_b, fg_b, self.loss_dir)
+
+    def _compute_loss_cov(self, pred_b, target_b, fg_b):
+        return self._compute_loss_fg(pred_b, target_b, fg_b, self.loss_cov)
+
+    def _compute_loss_raw(
+        self,
+        pred: torch.Tensor,
+        raw_image: torch.Tensor,
+        geometry_ndim: int,
+    ) -> torch.Tensor:
+        """Dense raw-reconstruction loss over every voxel in the batch.
+
+        Matches :class:`BrainbowLoss` -- the raw channel is supervised
+        on all voxels (no FG mask, no batch-filter).
+        """
+        img = raw_image.detach().clamp(0.0, 1.0).to(torch.float32)
+        if img.dim() == geometry_ndim - 1:
+            img = img.unsqueeze(1)  # [B, *spatial] -> [B, 1, *spatial]
+        target = rearrange(img[:, :1], "b c ... -> b c (...)")
+        return self._regress(pred, target, self.loss_raw, reduction="mean")
 
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, geometry, ins_label, raw_image=None, cached_targets=None):
-        dev = geometry.device
-        zero = torch.tensor(0.0, device=dev, dtype=torch.float32)
+    def forward(
+        self,
+        geometry: torch.Tensor,
+        ins_label: torch.Tensor,
+        raw_image: Optional[torch.Tensor] = None,
+        cached_targets: Optional[Dict[str, List]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        zero = torch.zeros((), device=geometry.device)
 
         geom_flat = rearrange(geometry, "b c ... -> b c (...)")
-        c1 = self._ch_dir
-        c2 = c1 + self._ch_cov
-        c3 = c2 + self._ch_raw
-        pred_dir = geom_flat[:, :c1]
-        pred_cov = geom_flat[:, c1:c2]
-        pred_raw = geom_flat[:, c2:c3]
+        c_raw = self._ch_raw
+        c_dir = c_raw + self._ch_dir
+        c_cov = c_dir + self._ch_cov
+        pred_raw = geom_flat[:, :c_raw]
+        pred_dir = geom_flat[:, c_raw:c_dir]
+        pred_cov = geom_flat[:, c_dir:c_cov]
 
         lbl_flat = rearrange(ins_label, "b ... -> b (...)").long()
         fg = lbl_flat > 0
 
         if cached_targets is None:
-            cached_targets = self.compute_targets(ins_label)
+            cached_targets = self.build_target(ins_label)
+        dir_targets = cached_targets["dir_targets"]
+        cov_targets = cached_targets["cov_targets"]
 
-        B = geometry.shape[0]
         L_dir, L_cov, L_raw = zero.clone(), zero.clone(), zero.clone()
-        valid_b = 0
-
-        for b in range(B):
-            dir_tgt = cached_targets["dir_targets"][b]
-            cov_tgt = cached_targets["cov_targets"][b]
-            if dir_tgt is None and cov_tgt is None:
+        valid = 0
+        for b in range(geometry.shape[0]):
+            if dir_targets[b] is None and cov_targets[b] is None:
                 continue
-            valid_b += 1
-            fg_b = fg[b]
+            valid += 1
+            if self.weight_dir > 0 and dir_targets[b] is not None:
+                L_dir = L_dir + self._compute_loss_dir(pred_dir[b], dir_targets[b], fg[b])
+            if self.weight_cov > 0 and cov_targets[b] is not None:
+                L_cov = L_cov + self._compute_loss_cov(pred_cov[b], cov_targets[b], fg[b])
 
-            if self.weight_dir > 0 and dir_tgt is not None:
-                L_dir = L_dir + self._fg_loss(pred_dir[b], dir_tgt, fg_b, self.loss_dir)
+        denom = max(valid, 1)
+        L_dir = L_dir / denom
+        L_cov = L_cov / denom
 
-            if self.weight_cov > 0 and cov_tgt is not None:
-                L_cov = L_cov + self._fg_loss(pred_cov[b], cov_tgt, fg_b, self.loss_cov)
+        if self.weight_raw > 0 and raw_image is not None:
+            L_raw = self._compute_loss_raw(pred_raw, raw_image, geometry.dim())
 
-        if self.weight_raw > 0 and raw_image is not None and valid_b > 0:
-            img_flat = rearrange(raw_image.detach(), "b c ... -> b c (...)").clamp(0.0, 1.0)
-            c_in = img_flat.shape[1]
-            if c_in == 1:
-                rgb = repeat(img_flat, "b 1 n -> b 3 n")
-            elif c_in >= 3:
-                rgb = img_flat[:, :3]
-            else:
-                pad = repeat(img_flat[:, :1], "b 1 n -> b c n", c=3 - c_in)
-                rgb = torch.cat([img_flat, pad], dim=1)
-            rgba_tgt = torch.cat(
-                [rgb, rearrange(fg.float(), "b ... -> b 1 ...")], dim=1,
-            )
-            for b in range(B):
-                if cached_targets["dir_targets"][b] is None and cached_targets["cov_targets"][b] is None:
-                    continue
-                L_raw = L_raw + self._global_loss(pred_raw[b], rgba_tgt[b], self.loss_raw)
-
-        n = max(valid_b, 1)
-        L_dir, L_cov, L_raw = L_dir / n, L_cov / n, L_raw / n
         total = self.weight_dir * L_dir + self.weight_cov * L_cov + self.weight_raw * L_raw
-
         return {"loss": total, "dir": L_dir, "cov": L_cov, "raw": L_raw}
 
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}("
-            f"spatial_dims={self.spatial_dims}, "
-            f"channels={self.geometry_channels} "
-            f"(dir={self._ch_dir}+cov={self._ch_cov}+raw={self._ch_raw}), "
+            f"spatial_dims={self.spatial_dims}, channels={self.task_channels} "
+            f"(raw={self._ch_raw}+dir={self._ch_dir}+cov={self._ch_cov}), "
             f"loss_dir='{self.loss_dir}', loss_cov='{self.loss_cov}', loss_raw='{self.loss_raw}', "
-            f"weight_dir={self.weight_dir}, weight_cov={self.weight_cov}, weight_raw={self.weight_raw})"
+            f"weight_dir={self.weight_dir}, weight_cov={self.weight_cov}, "
+            f"weight_raw={self.weight_raw})"
         )

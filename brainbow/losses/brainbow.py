@@ -8,16 +8,16 @@ image statistics -- no learnable parameters:
   ====  =====================================================
   ch    meaning
   ====  =====================================================
-  0     *rawval*  := the raw (normalised) image intensity at that voxel
-  1-3   R,G,B  := normalised  z,y,x  of the instance's **minloc**
-  4-6   R,G,B  := normalised  z,y,x  of the instance's **avgloc** (centroid)
-  7-9   R,G,B  := normalised  z,y,x  of the instance's **maxloc**
+  0     *rawval*  := raw (normalised) image intensity at that voxel
+  1-3   R,G,B     := normalised  z,y,x  of the instance's **minloc**
+  4-6   R,G,B     := normalised  z,y,x  of the instance's **avgloc** (centroid)
+  7-9   R,G,B     := normalised  z,y,x  of the instance's **maxloc**
   ====  =====================================================
 
-Normalisation is done relative to the **patch size**, so every channel
-lives in ``[0, 1]`` regardless of anisotropy or patch resolution:
+Normalisation is relative to the **patch size**, so every channel lives
+in ``[0, 1]`` regardless of anisotropy or patch resolution:
 
-  .. math::  R = z / D, \\quad  G = y / H, \\quad  B = x / W
+    R = z / D, G = y / H, B = x / W
 
 Background voxels (``label == 0``) are zeroed on the 9 localisation
 channels; channel 0 carries the raw image value for every voxel so the
@@ -26,27 +26,27 @@ useful autoencoder-style auxiliary signal.
 
 The per-instance (min, centroid, max) statistics are computed with a
 single pass of :func:`scipy.ndimage.find_objects` + centroid-via-
-``np.bincount`` -- fully vectorised, no Python loops over voxels.  On
-GPU tensors the computation runs on-device via :func:`torch.bincount`
-and a single :func:`torch.scatter_reduce_` call.
-
-A regression loss (``l1``, ``mse``, or ``smooth_l1``) is then applied
-between the model's 10-channel "brainbow" head output and this target.
-Optional per-channel weights let you trade off localisation vs.
-reconstruction.
+``np.bincount`` (CPU path) or on-device :func:`torch.scatter_reduce_`
+(GPU path) -- fully vectorised, no Python loops over voxels.
 """
 
-from typing import Dict, Optional, Tuple
+from __future__ import annotations
+
+from typing import Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange, reduce, repeat
+
+from brainbow.losses._common import canonical_regression_name, regression_loss_fn
+
+
+_BRAINBOW_CHANNELS: int = 10
 
 
 # ---------------------------------------------------------------------------
-# Target construction
+# Low-level builders (used by BrainbowLoss._build_target_*)
 # ---------------------------------------------------------------------------
 
 
@@ -55,11 +55,11 @@ def _brainbow_target_torch(
     labels: torch.Tensor,
     image: torch.Tensor,
 ) -> torch.Tensor:
-    """Vectorised brainbow target on the same device as ``labels``.
+    """Vectorised 10-channel brainbow target on the same device as ``labels``.
 
     Args:
         labels: ``[B, D, H, W]`` integer instance ids (``0`` = background).
-        image: ``[B, D, H, W]`` raw (normalised) image intensities.
+        image:  ``[B, D, H, W]`` raw (normalised) image intensities.
 
     Returns:
         ``[B, 10, D, H, W]`` float target tensor.
@@ -67,16 +67,10 @@ def _brainbow_target_torch(
     B, D, H, W = labels.shape
     device = labels.device
     dims_t = labels.new_tensor([D, H, W], dtype=torch.float32)
+    norm = rearrange(dims_t, "c -> 1 c").clamp(min=1.0)
 
-    target = labels.new_zeros((B, 10, D, H, W), dtype=torch.float32)
+    target = labels.new_zeros((B, _BRAINBOW_CHANNELS, D, H, W), dtype=torch.float32)
     target[:, 0] = image.to(torch.float32)
-
-    # Precompute flat (z, y, x) coordinate grids once per call; both
-    # arrays are tiny compared to the label volume, and re-building
-    # them per-batch keeps the CUDA memory peak flat.
-    zz = torch.arange(D, device=device, dtype=torch.float32)
-    yy = torch.arange(H, device=device, dtype=torch.float32)
-    xx = torch.arange(W, device=device, dtype=torch.float32)
 
     for b in range(B):
         lbl_b = labels[b]
@@ -84,42 +78,32 @@ def _brainbow_target_torch(
         if not fg.any():
             continue
 
-        fg_labels = lbl_b[fg]
-        unique_ids, inverse = torch.unique(fg_labels, return_inverse=True)
+        unique_ids, inverse = torch.unique(lbl_b[fg], return_inverse=True)
         K = unique_ids.shape[0]
 
-        fg_idx = torch.nonzero(fg, as_tuple=False)  # [M, 3] in (z, y, x)
-        z = fg_idx[:, 0].to(torch.float32)
-        y = fg_idx[:, 1].to(torch.float32)
-        x = fg_idx[:, 2].to(torch.float32)
+        fg_idx = torch.nonzero(fg, as_tuple=False).to(torch.float32)  # [M, 3] (z, y, x)
 
-        # --- min / max / sum per-instance via scatter_reduce_ (fully on-device) ---
+        # Min / max / sum per-instance via scatter_reduce_ (fully on-device).
         INF = torch.finfo(torch.float32).max
-        min_coords = z.new_full((K, 3), INF)
-        max_coords = z.new_full((K, 3), -INF)
-        sum_coords = z.new_zeros((K, 3))
+        min_coords = fg_idx.new_full((K, 3), INF)
+        max_coords = fg_idx.new_full((K, 3), -INF)
+        sum_coords = fg_idx.new_zeros((K, 3))
 
-        coords = torch.stack([z, y, x], dim=1)  # [M, 3]
         inv3 = repeat(inverse, "m -> m c", c=3)
-        min_coords.scatter_reduce_(0, inv3, coords, reduce="amin", include_self=True)
-        max_coords.scatter_reduce_(0, inv3, coords, reduce="amax", include_self=True)
-        sum_coords.scatter_add_(0, inv3, coords)
+        min_coords.scatter_reduce_(0, inv3, fg_idx, reduce="amin", include_self=True)
+        max_coords.scatter_reduce_(0, inv3, fg_idx, reduce="amax", include_self=True)
+        sum_coords.scatter_add_(0, inv3, fg_idx)
         counts = torch.bincount(inverse, minlength=K).to(torch.float32).clamp_(min=1.0)
-        centroid_coords = sum_coords / rearrange(counts, "k -> k 1")
+        cen_coords = sum_coords / rearrange(counts, "k -> k 1")
 
-        # --- normalise by patch dims → [K, 3] each, all in [0, 1] ---
-        norm = rearrange(dims_t, "c -> 1 c").clamp(min=1.0)
-        min_rgb = min_coords / norm
-        cen_rgb = centroid_coords / norm
-        max_rgb = max_coords / norm
+        # Concat min|cen|max -> [K, 9] normalised RGB colours.
+        rgb9 = torch.cat(
+            [min_coords / norm, cen_coords / norm, max_coords / norm], dim=1,
+        )
 
-        # --- broadcast per-instance colour to every foreground voxel ---
-        # voxel-level RGBs: gather by `inverse` into [M, 9]
-        voxel_rgb = torch.cat([min_rgb, cen_rgb, max_rgb], dim=1)[inverse]  # [M, 9]
-
-        # scatter back into the dense target tensor; fancy-indexing on a
-        # 3-D boolean mask is the fastest way on both CPU and CUDA.
-        target[b, 1:10][:, fg] = rearrange(voxel_rgb, "m c -> c m")
+        # Broadcast per-instance colour to every foreground voxel.
+        voxel_rgb = rgb9[inverse]                                         # [M, 9]
+        target[b, 1:_BRAINBOW_CHANNELS][:, fg] = rearrange(voxel_rgb, "m c -> c m")
 
     return target
 
@@ -129,55 +113,52 @@ def _brainbow_target_scipy(
     labels_np: np.ndarray,
     image_np: np.ndarray,
 ) -> np.ndarray:
-    """Reference brainbow-target builder via ``scipy.ndimage``.
+    """Reference 10-channel brainbow-target builder via ``scipy.ndimage``.
 
-    Pure-NumPy path used when the input tensors live on CPU and SciPy
-    is available; avoids importing scipy when the GPU path is taken.
+    CPU fallback used when the input tensors live on CPU.  ``find_objects``
+    is a single O(N) pass over the label volume, which is faster than
+    iterating :func:`torch.unique` for very fragmented labels.
     """
-    from scipy.ndimage import find_objects  # local: only hit on CPU
+    from scipy.ndimage import find_objects
 
     B, D, H, W = labels_np.shape
-    target = np.zeros((B, 10, D, H, W), dtype=np.float32)
+    target = np.zeros((B, _BRAINBOW_CHANNELS, D, H, W), dtype=np.float32)
     target[:, 0] = image_np.astype(np.float32, copy=False)
     dims = np.array([D, H, W], dtype=np.float32).clip(min=1.0)
 
     for b in range(B):
         lbl = labels_np[b]
-        if not lbl.any():
+        fg = lbl > 0
+        if not fg.any():
             continue
 
-        fg = lbl > 0
-        fg_flat = lbl[fg]
-        unique_ids, inverse = np.unique(fg_flat, return_inverse=True)
+        unique_ids, inverse = np.unique(lbl[fg], return_inverse=True)
         K = unique_ids.shape[0]
 
-        # Bounding boxes via single O(N) pass
+        # Bounding boxes give min/max in a single pass.
         slices = find_objects(lbl.astype(np.int64))
         min_rgb = np.zeros((K, 3), dtype=np.float32)
         max_rgb = np.zeros((K, 3), dtype=np.float32)
         for k, uid in enumerate(unique_ids):
             sl = slices[int(uid) - 1]
-            if sl is None:       # id present but hole: treat as single voxel
+            if sl is None:
                 continue
             for a in range(3):
                 min_rgb[k, a] = sl[a].start
                 max_rgb[k, a] = sl[a].stop - 1
 
-        # Centroid via bincount (vectorised)
-        idx = np.nonzero(fg)                     # 3 × M  (z, y, x)
-        coords = np.stack(idx, axis=1).astype(np.float32)
+        # Vectorised centroids via np.bincount.
+        coords = np.stack(np.nonzero(fg), axis=1).astype(np.float32)      # [M, 3]
         counts = np.bincount(inverse, minlength=K).astype(np.float32).clip(min=1.0)
         cen_rgb = np.stack([
             np.bincount(inverse, weights=coords[:, a], minlength=K) / counts
             for a in range(3)
         ], axis=1).astype(np.float32)
 
-        min_rgb /= dims
-        cen_rgb /= dims
-        max_rgb /= dims
-
-        voxel_rgb = np.concatenate([min_rgb, cen_rgb, max_rgb], axis=1)[inverse]  # [M, 9]
-        target[b, 1:10][:, fg] = voxel_rgb.T                                       # [9, M]
+        voxel_rgb = np.concatenate(
+            [min_rgb / dims, cen_rgb / dims, max_rgb / dims], axis=1,
+        )[inverse]                                                        # [M, 9]
+        target[b, 1:_BRAINBOW_CHANNELS][:, fg] = voxel_rgb.T
 
     return target
 
@@ -190,8 +171,9 @@ def build_brainbow_target(
     """Build a ``[B, 10, D, H, W]`` brainbow target from labels + image.
 
     Picks the on-device torch path for CUDA tensors and the NumPy /
-    scipy path for CPU tensors, since ``find_objects`` is faster than
-    iterating ``torch.unique`` for very fragmented label volumes.
+    scipy path for CPU tensors.  Exposed as a module-level function so
+    callers outside :class:`BrainbowLoss` can pre-build the target (e.g.
+    the image-logger callback).
     """
     if labels.dim() != 4:
         raise ValueError(
@@ -218,44 +200,22 @@ def build_brainbow_target(
 # ---------------------------------------------------------------------------
 
 
-_LOSS_FN = {
-    "l1": F.l1_loss,
-    "mae": F.l1_loss,
-    "l2": F.mse_loss,
-    "mse": F.mse_loss,
-    "smooth_l1": F.smooth_l1_loss,
-    "huber": F.smooth_l1_loss,
-}
-
-
-def _resolve_loss(name: str):
-    key = name.lower().replace("-", "_")
-    if key not in _LOSS_FN:
-        raise ValueError(
-            f"Unknown loss type '{name}'. Choose from: {sorted(set(_LOSS_FN))}"
-        )
-    return _LOSS_FN[key]
-
-
-_BRAINBOW_CHANNELS: int = 10
-
-
 class BrainbowLoss(nn.Module):
     """Regression loss on a 10-channel brainbow target map.
 
     The target map is built on-the-fly from ``labels`` + ``image``:
 
-    - Channel  0:    ``rawval``  (per-voxel raw image intensity)
-    - Channels 1-3:  ``minloc``  normalised by (D, H, W)
-    - Channels 4-6:  ``avgloc``  (centroid) normalised by (D, H, W)
-    - Channels 7-9:  ``maxloc``  normalised by (D, H, W)
+    - Channel  0:   ``rawval``  (per-voxel raw image intensity)
+    - Channels 1-3: ``minloc``  normalised by (D, H, W)
+    - Channels 4-6: ``avgloc``  (centroid) normalised by (D, H, W)
+    - Channels 7-9: ``maxloc``  normalised by (D, H, W)
 
     The 9 localisation channels are foreground-only (background voxels
     are zero) while channel 0 is supervised everywhere.
 
     Args:
-        loss_loc:  Regression loss for the 9 localisation channels.
-        loss_raw:  Regression loss for the raw-intensity channel.
+        loss_loc:  Regression loss name for the 9 localisation channels.
+        loss_raw:  Regression loss name for the raw-intensity channel.
         weight_minloc:    Weight of the 3 minloc channels.
         weight_avgloc:    Weight of the 3 avgloc channels.
         weight_maxloc:    Weight of the 3 maxloc channels.
@@ -280,34 +240,105 @@ class BrainbowLoss(nn.Module):
         foreground_only_loc: bool = True,
     ) -> None:
         super().__init__()
-        self._loss_loc = _resolve_loss(loss_loc)
-        self._loss_raw = _resolve_loss(loss_raw)
+        self.loss_loc = canonical_regression_name(loss_loc)
+        self.loss_raw = canonical_regression_name(loss_raw)
+        self._loss_loc_fn = regression_loss_fn(loss_loc)
+        self._loss_raw_fn = regression_loss_fn(loss_raw)
         self.weight_minloc = float(weight_minloc)
         self.weight_avgloc = float(weight_avgloc)
         self.weight_maxloc = float(weight_maxloc)
         self.weight_rawval = float(weight_rawval)
         self.foreground_only_loc = bool(foreground_only_loc)
 
-        # Pre-register per-channel group weights as a buffer so ``.to()``
-        # moves them along with the module.
-        group_w = torch.tensor(
-            [weight_minloc] * 3 + [weight_avgloc] * 3 + [weight_maxloc] * 3,
-            dtype=torch.float32,
-        )
-        self.register_buffer("_loc_channel_weights", group_w, persistent=False)
+    @property
+    def task_channels(self) -> int:
+        """Expected width of the brainbow head prediction tensor (10)."""
+        return _BRAINBOW_CHANNELS
 
     # ------------------------------------------------------------------
-    # Target precomputation (for CombinedLoss._compute_targets hook)
+    # Target construction
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def compute_target(
+    def _build_target_rawval(self, image: torch.Tensor) -> torch.Tensor:
+        """Raw-intensity target (ch 0) -- identity on the input image."""
+        return rearrange(image.to(torch.float32), "b ... -> b 1 ...")
+
+    @torch.no_grad()
+    def _build_target_loc(
         self,
         labels: torch.Tensor,
         image: torch.Tensor,
     ) -> torch.Tensor:
-        """Deterministic, gradient-free target builder; see module docstring."""
+        """Per-instance localisation target (ch 1-9, min / avg / max).
+
+        Returned as a ``[B, 9, D, H, W]`` tensor -- the raw channel is
+        *not* concatenated here; :meth:`build_target` does that for us.
+        """
+        # The on-device kernels produce the full 10-channel stack (raw
+        # at ch 0 + localisation at ch 1-9) in one pass since that is
+        # the path they are most efficient on.  Slice off the raw
+        # channel when only the localisation part is asked for.
+        full = build_brainbow_target(labels, image)
+        return full[:, 1:_BRAINBOW_CHANNELS]
+
+    @torch.no_grad()
+    def build_target(
+        self,
+        labels: torch.Tensor,
+        image: torch.Tensor,
+    ) -> torch.Tensor:
+        """Full 10-channel brainbow target for ``(labels, image)``."""
         return build_brainbow_target(labels, image)
+
+    # Backwards-compat alias.
+    def compute_target(
+        self, labels: torch.Tensor, image: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.build_target(labels, image)
+
+    # ------------------------------------------------------------------
+    # Per-voxel weights (not used by this head)
+    # ------------------------------------------------------------------
+
+    def compute_weights(self, labels: torch.Tensor) -> None:
+        return None
+
+    # ------------------------------------------------------------------
+    # Sub-losses
+    # ------------------------------------------------------------------
+
+    def _compute_loss_rawval(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        """Dense raw-intensity loss on ch 0."""
+        return self._loss_raw_fn(pred, target)
+
+    def _compute_loss_loc(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """Grouped (min / avg / max) 3-RGB localisation loss on ch 1-9.
+
+        Args:
+            pred:   ``[B, 9, D, H, W]`` localisation prediction.
+            target: ``[B, 9, D, H, W]`` localisation target.
+            labels: ``[B, D, H, W]``   instance ids.
+        """
+        per_voxel = self._loss_loc_fn(pred, target, reduction="none")
+        if self.foreground_only_loc:
+            fg = rearrange(labels > 0, "b ... -> b 1 ...").expand_as(per_voxel)
+            n_fg = fg.sum().clamp(min=1)
+            per_group = reduce(per_voxel * fg, "b (g c) ... -> g", "sum", g=3) / n_fg
+        else:
+            per_group = reduce(per_voxel, "b (g c) ... -> g", "mean", g=3)
+
+        loss_min, loss_avg, loss_max = per_group.unbind(0)
+        return {"minloc": loss_min, "avgloc": loss_avg, "maxloc": loss_max}
 
     # ------------------------------------------------------------------
     # Forward
@@ -324,16 +355,15 @@ class BrainbowLoss(nn.Module):
 
         Args:
             prediction:     ``[B, 10, D, H, W]`` model output.
-            labels:         ``[B, D, H, W]`` instance ids.
-            image:          ``[B, D, H, W]`` normalised image.
+            labels:         ``[B, D, H, W]``    instance ids.
+            image:          ``[B, D, H, W]``    normalised image.
             cached_target:  Optional precomputed ``[B, 10, D, H, W]`` target
-                (see :meth:`compute_target`).  When supplied, the same
-                tensor is reused -- useful under DDP where each step
-                otherwise rebuilds it twice (loss + image logger).
+                (see :meth:`build_target`).  Useful under DDP where each
+                step otherwise rebuilds it twice (loss + image logger).
 
         Returns:
             Dict with keys ``loss``, ``minloc``, ``avgloc``, ``maxloc``,
-            and ``rawval``.
+            ``rawval``.
         """
         if prediction.shape[1] != _BRAINBOW_CHANNELS:
             raise ValueError(
@@ -346,41 +376,39 @@ class BrainbowLoss(nn.Module):
             image = rearrange(image, "b 1 d h w -> b d h w")
 
         target = (
-            cached_target
-            if cached_target is not None
-            else self.compute_target(labels, image)
+            cached_target if cached_target is not None
+            else self.build_target(labels, image)
         )
         target = target.to(dtype=prediction.dtype, device=prediction.device)
 
-        # --- localisation sub-losses (per channel group, channels 1-9) ---
-        pred_loc = prediction[:, 1:10]
-        true_loc = target[:, 1:10]
-
-        if self.foreground_only_loc:
-            fg = rearrange(labels > 0, "b d h w -> b 1 d h w").expand_as(pred_loc)
-            n_fg = fg.sum().clamp(min=1)
-            per_voxel = self._loss_loc(pred_loc, true_loc, reduction="none") * fg
-            per_group = reduce(per_voxel, "b (g c) d h w -> g", "sum", g=3) / n_fg
-        else:
-            per_voxel = self._loss_loc(pred_loc, true_loc, reduction="none")
-            per_group = reduce(per_voxel, "b (g c) d h w -> g", "mean", g=3)
-
-        loss_min, loss_avg, loss_max = per_group.unbind(0)
-
-        # --- raw-intensity sub-loss (channel 0; dense, fg + bg) ---
-        loss_raw = self._loss_raw(prediction[:, 0], target[:, 0])
+        loss_raw = self._compute_loss_rawval(prediction[:, 0], target[:, 0])
+        loc_losses = self._compute_loss_loc(
+            prediction[:, 1:_BRAINBOW_CHANNELS],
+            target[:, 1:_BRAINBOW_CHANNELS],
+            labels,
+        )
 
         total = (
             self.weight_rawval * loss_raw
-            + self.weight_minloc * loss_min
-            + self.weight_avgloc * loss_avg
-            + self.weight_maxloc * loss_max
+            + self.weight_minloc * loc_losses["minloc"]
+            + self.weight_avgloc * loc_losses["avgloc"]
+            + self.weight_maxloc * loc_losses["maxloc"]
         )
 
         return {
             "loss": total,
-            "minloc": loss_min,
-            "avgloc": loss_avg,
-            "maxloc": loss_max,
             "rawval": loss_raw,
+            **loc_losses,
         }
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"channels={self.task_channels}, "
+            f"loss_loc='{self.loss_loc}', loss_raw='{self.loss_raw}', "
+            f"weight_rawval={self.weight_rawval}, "
+            f"weight_minloc={self.weight_minloc}, "
+            f"weight_avgloc={self.weight_avgloc}, "
+            f"weight_maxloc={self.weight_maxloc}, "
+            f"foreground_only_loc={self.foreground_only_loc})"
+        )

@@ -172,7 +172,7 @@ loss:
   active_classes: 1                # only foreground is learnt for SNEMI3D
   class_weights: [0.2]             # per-class CE weighting (down-weights FG to fight imbalance)
   label_smoothing: 0.0
-  weight_semantic: 0.0             # head weight; 0 -> semantic head disabled (instance carries FG info)
+  weight_semantic: 1.0             # head weight; 0 -> semantic head disabled (instance carries FG info)
   weight_ce: 1.0                   # cross-entropy sub-loss
   weight_iou: 0.0                  # IoU sub-loss (0 -> skipped)
   weight_dice: 1.0                 # Dice sub-loss (helps on heavily imbalanced FG)
@@ -196,7 +196,7 @@ loss:
   # -----------------------------------------------------------------
   # Geometry head -- direction field + covariance + raw reconstruction
   # -----------------------------------------------------------------
-  weight_geometry: 0.0             # head weight; 0 -> geometry head disabled
+  weight_geometry: 1.0             # head weight; 0 -> geometry head disabled
   dir_target: centroid             # direction-field target: "centroid" or "skeleton"
   weight_dir: 1.0                  # direction sub-loss
   weight_cov: 1.0                  # covariance sub-loss (shape/anisotropy)

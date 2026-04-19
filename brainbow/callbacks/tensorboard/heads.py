@@ -16,6 +16,7 @@ from brainbow.callbacks.tensorboard.geometry import (
     _render_dir_quiver,
 )
 from brainbow.callbacks.tensorboard.tags import TagContext
+from brainbow.losses.geometry import upper_tri_channels_to_matrix
 from brainbow.callbacks.tensorboard.viz import (
     _label_to_rgb,
     _normalise,
@@ -139,36 +140,50 @@ def _log_geometry(
 ) -> None:
     """Log the three geometry panels under ``{stage}/{mode}/geometry/``:
 
+    * ``raw``                     -- raw-intensity reconstruction (ch 0, grayscale)
     * ``dir_{centroid|skeleton}`` -- direction quiver overlay
-    * ``cov``                     -- covariance ellipse glyphs
-    * ``raw``                     -- raw EDT / distance-transform RGB
+    * ``cov``                     -- covariance ellipse glyphs (from
+      the upper-triangle channels, expanded to full matrices here
+      only for rendering)
 
     Uses predicted semantic foreground (``sem_ids``) when available,
     otherwise falls back to an all-ones mask so the visualisation
     reflects what the deployed model would see at inference time.
+
+    Channel layout matches :class:`brainbow.losses.geometry.GeometryLoss`::
+
+        ch 0                         := raw   (1 channel, grayscale)
+        ch 1 .. 1+S                  := dir   (S channels)
+        ch 1+S .. 1+S + S*(S+1)//2   := cov   (upper-triangle covariance)
     """
     if "geometry" not in preds:
         return
     head = ctx.for_head("geometry")
     S = spatial_dims
+    ch_raw = 1
     ch_dir = S
-    ch_cov = S * S
+    ch_cov_tri = S * (S + 1) // 2
     geom = _to_2d(preds["geometry"][:n])
     if sem_ids is not None:
         fg_mask_pred = (sem_ids > 0).long()
     else:
         fg_mask_pred = torch.ones_like(labels, dtype=torch.long)
+
+    g_raw = geom[:, :ch_raw].clamp(0.0, 1.0)
+    g_raw_rgb = repeat(g_raw, "b 1 h w -> b 3 h w")
+
     g_dir_rgb = _render_dir_quiver(
-        geom[:, :ch_dir], img_gray, fg_mask_pred, S, dir_target=dir_target,
+        geom[:, ch_raw:ch_raw + ch_dir], img_gray, fg_mask_pred, S,
+        dir_target=dir_target,
     )
-    cov_val = geom[:, ch_dir:ch_dir + ch_cov]
-    cov_mat = rearrange(cov_val, "b (s1 s2) h w -> b h w s1 s2", s1=S, s2=S)
+
+    cov_tri = geom[:, ch_raw + ch_dir:ch_raw + ch_dir + ch_cov_tri]
+    cov_mat = upper_tri_channels_to_matrix(cov_tri, S)
     g_cov_rgb = _render_cov_glyphs(cov_mat, img_gray, fg_mask_pred, S)
-    g_raw = geom[:, ch_dir + ch_cov:]
-    g_raw_rgb = g_raw[:, :3].clamp(0.0, 1.0)
+
+    tb.add_images(head.tag("raw"), g_raw_rgb, global_step=epoch)
     tb.add_images(head.tag(f"dir_{dir_target}"), g_dir_rgb, global_step=epoch)
     tb.add_images(head.tag("cov"), g_cov_rgb, global_step=epoch)
-    tb.add_images(head.tag("raw"), g_raw_rgb, global_step=epoch)
 
 
 def _log_brainbow(

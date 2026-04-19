@@ -1,147 +1,259 @@
-brainbow
+# Brainbow — File Structure
+
+What lives where.  For the *why* behind the layout (design patterns,
+conventions, adding-new-X checklists), see
+[`ORGANIZATION.md`](./ORGANIZATION.md).
+
+---
+
+## Top-level
+
+```
+brainbow/
 ├── LICENSE
 ├── README.md
-├── configs
-│   ├── brainbow.yaml
-│   ├── default.yaml
-│   └── snemi3d.yaml
-├── data
-│   ├── MICRONS
-│   │   ├── minnie65_mip0_4096x4096x800_x110000_y60000_z18000_v1300_segmentation.h5
-│   │   ├── minnie65_mip0_4096x4096x800_x110000_y60000_z18000_volume.h5
-│   │   ├── minnie65_mip0_4096x4096x800_x110000_y60000_z18000_volume.h5.norm.json
-│   │   ├── minnie65_mip0_4096x4096x800_x140000_y80000_z17500_v1300_segmentation.h5
-│   │   ├── minnie65_mip0_4096x4096x800_x140000_y80000_z17500_volume.h5
-│   │   ├── minnie65_mip0_4096x4096x800_x140000_y80000_z17500_volume.h5.norm.json
-│   │   ├── minnie65_mip0_4096x4096x800_x50000_y60000_z16000_v1300_segmentation.h5
-│   │   ├── minnie65_mip0_4096x4096x800_x50000_y60000_z16000_volume.h5
-│   │   ├── minnie65_mip0_4096x4096x800_x50000_y60000_z16000_volume.h5.norm.json
-│   │   ├── minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation.h5
-│   │   ├── minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume.h5
-│   │   ├── minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume.h5.norm.json
-│   │   ├── minnie65_mip0_4096x4096x800_x80000_y70000_z16500_v1300_segmentation.h5
-│   │   ├── minnie65_mip0_4096x4096x800_x80000_y70000_z16500_volume.h5
-│   │   └── minnie65_mip0_4096x4096x800_x80000_y70000_z16500_volume.h5.norm.json
-│   └── SNEMI3D
-│       ├── AC3_inputs.h5
-│       ├── AC4_inputs.h5
-│       ├── AC4_inputs.h5.norm.json
-│       ├── AC4_labels.h5
-│       ├── neurons_5000x2900x300_x3000_y7200_z950_segmentation.h5
-│       ├── neurons_5000x2900x300_x3000_y7200_z950_volume.h5
-│       └── neurons_5000x2900x300_x3000_y7200_z950_volume.h5.norm.json
-├── doc
-│   └── STRUCTURE.md
-├── brainbow
-│   ├── __init__.py
-│   ├── callbacks
-│   │   ├── __init__.py
-│   │   ├── memory.py
-│   │   └── tensorboard.py
-│   ├── datamodules
-│   │   ├── __init__.py
-│   │   ├── base.py
-│   │   ├── microns.py
-│   │   ├── neurons.py
-│   │   └── snemi3d.py
-│   ├── datasets
-│   │   ├── __init__.py
-│   │   ├── base.py
-│   │   ├── lazy.py
-│   │   ├── microns.py
-│   │   ├── neurons.py
-│   │   └── snemi3d.py
-│   ├── inference
-│   │   ├── __init__.py
-│   │   ├── clusterer.py
-│   │   └── sliding_window.py
-│   ├── losses
-│   │   ├── __init__.py
-│   │   ├── brainbow.py        # 10-ch (min/avg/max)loc-RGB + rawval
-│   │   ├── combined.py
-│   │   ├── geometry.py
-│   │   ├── instance.py
-│   │   └── semantic.py
-│   ├── metrics
-│   │   ├── __init__.py
-│   │   ├── instance.py
-│   │   └── semantic.py
-│   ├── models
-│   │   ├── __init__.py
-│   │   ├── base.py
-│   │   ├── cosmos_transfer_2_5/        # Cosmos-Transfer 2.5 3-D wrapper (split)
-│   │   │   ├── __init__.py             # re-exports CosmosTransfer3DWrapper
-│   │   │   ├── decoder.py              # feature projector + VAE decoder adapter
-│   │   │   ├── hf_loader.py            # rank-aware HF snapshot download
-│   │   │   ├── layers.py               # shared primitives
-│   │   │   ├── standalone_dit.py       # random-init DiT fallback
-│   │   │   ├── variants.py             # 2B / 14B variant registry
-│   │   │   └── wrapper.py              # CosmosTransfer3DWrapper
-│   │   └── vista/                      # Vista3D wrapper + shared head + prompt I/O
-│   │       ├── __init__.py             # re-exports Vista3DWrapper, VistaTaskHead3D, PointPromptEncoder, sample_point_prompts
-│   │       ├── heads.py                # VistaTaskHead3D (MONAI UnetrBasicBlock)
-│   │       ├── hf_loader.py            # MONAI/VISTA3D-HF encoder download + partial-load
-│   │       ├── point_prompt_encoder.py # PointPromptEncoder (proofread/interactive conditioning)
-│   │       ├── point_sampling.py       # sample_point_prompts (GT masks -> click-point dict)
-│   │       └── wrapper.py              # Vista3DWrapper
-│   ├── modules
-│   │   ├── __init__.py
-│   │   ├── base.py                          # BaseCircuitModule (shared loop + logging)
-│   │   ├── cosmos_transfer_2_5/             # Cosmos-Transfer 2.5 Lightning modules
-│   │   │   ├── __init__.py                  # re-exports Base/Concrete modules
-│   │   │   ├── base.py                      # BaseCosmosModule (freeze + optim split)
-│   │   │   └── module.py                    # CosmosTransfer3DModule
-│   │   └── vista/                           # Vista3D Lightning modules
-│   │       ├── __init__.py                  # re-exports Base/Concrete modules
-│   │       ├── base.py                      # BaseVistaModule
-│   │       └── module.py                    # Vista3DModule
-│   ├── preprocessors
-│   │   ├── __init__.py
-│   │   ├── base.py
-│   │   ├── hdf5.py
-│   │   ├── nfty.py
-│   │   ├── nrrd.py
-│   │   └── tiff.py
-│   ├── transforms
-│   │   ├── __init__.py
-│   │   ├── covariance.py
-│   │   ├── defect.py
-│   │   ├── direction.py
-│   │   ├── edt.py
-│   │   ├── find_boundaries.py
-│   │   ├── label.py
-│   │   ├── missing_section.py
-│   │   ├── rand_crop_foreground.py
-│   │   ├── rand_transpose_xy.py
-│   │   └── resolution_zoom.py
-│   ├── utils
-│   │   ├── __init__.py
-│   │   ├── clustering.py
-│   │   ├── io.py
-│   │   ├── manifold.py
-│   │   └── parallel.py
-│   └── visualizer
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── app.py
-│       ├── static
-│       │   ├── app.js
-│       │   ├── index.html
-│       │   ├── style.css
-│       │   └── volume_renderer.js
-│       └── volume_loader.py
-├── pyproject.toml
-├── requirements.txt
-├── scripts
-│   ├── download_microns.py
-│   ├── download_snemi3d.py
-│   ├── download_zenodo_582636.py
-│   └── train.py
-└── tests
-    ├── __init__.py
-    ├── test_brainbow_loss.py
-    ├── test_datamodules.py
-    ├── test_datasets.py
-    ├── test_losses.py
-    ├── test_preprocessors.py
-    └── test_utils.py
+├── pyproject.toml          # package metadata
+├── requirements.txt        # pinned runtime dependencies
+├── configs/                # Hydra YAMLs (§ Configuration)
+├── data/                   # (gitignored) raw volumes
+├── outputs/                # (gitignored) training artefacts
+├── logs/                   # (gitignored) TensorBoard / wandb logs
+├── doc/                    # this folder
+├── scripts/                # CLI entrypoints (§ Scripts)
+├── tests/                  # pytest suite (§ Tests)
+└── brainbow/               # importable Python package (§ Package)
+```
+
+---
+
+## Configuration
+
+`configs/` is composed via Hydra's `defaults:` list.  The inheritance
+chain is `default → <dataset> → <project>`.
+
+| File                  | Purpose                                                                     |
+| --------------------- | --------------------------------------------------------------------------- |
+| `default.yaml`        | Every knob with a sensible default.  Base for every experiment.             |
+| `snemi3d.yaml`        | SNEMI3D dataset overrides + shared **model/loss** hyperparameters.          |
+| `combine.yaml`        | Multi-dataset training (SNEMI3D + neurons + MICrONS).                       |
+| `brainbow.yaml`       | Project-level entry: selects which dataset base to inherit from.            |
+
+---
+
+## Scripts
+
+CLI entry points.  Run with `python -m brainbow.<module>` where
+applicable or directly: `python scripts/<name>.py`.
+
+| Script                         | Purpose                                           |
+| ------------------------------ | ------------------------------------------------- |
+| `scripts/train.py`             | Hydra-driven training loop (Lightning Trainer).   |
+| `scripts/download_snemi3d.py`  | Fetch SNEMI3D volumes via cloudvolume.            |
+| `scripts/download_microns.py`  | Fetch MICrONS volumes + segmentations.            |
+| `scripts/download_zenodo_582636.py` | Fetch the Kasthuri / SNEMI legacy raw.       |
+
+---
+
+## Tests
+
+| File                               | Covers                                              |
+| ---------------------------------- | --------------------------------------------------- |
+| `tests/test_losses.py`             | Semantic / Instance / Geometry / Combined.          |
+| `tests/test_brainbow_loss.py`      | BrainbowLoss + `build_brainbow_target`.             |
+| `tests/test_datasets.py`           | `CircuitDataset` leaves (volume loading, splits).   |
+| `tests/test_datamodules.py`        | `CircuitDataModule` leaves (augmentation pipeline). |
+| `tests/test_preprocessors.py`      | HDF5 / NRRD / TIFF / NfTy converters.               |
+| `tests/test_utils.py`              | label / io / parallel helpers.                      |
+
+---
+
+## Package: `brainbow/`
+
+Top-level `brainbow/__init__.py` re-exports the most common symbols
+(wrappers, Lightning modules, losses, datamodules).
+
+Subpackages, in the order a new contributor would typically explore:
+
+### `brainbow/transforms/` — deterministic ops
+
+Pure functions and MONAI `Transformd` wrappers used by the datamodules
+and the loss targets.  No learnable state.
+
+| File                       | Purpose                                                                |
+| -------------------------- | ---------------------------------------------------------------------- |
+| `direction.py`             | Per-voxel unit vectors pointing at the instance centroid.              |
+| `covariance.py`            | Per-voxel upper-triangle covariance field for each instance.           |
+| `edt.py`                   | Exact Euclidean distance transform (scipy-backed).                     |
+| `find_boundaries.py`       | Connectivity-1 inner/outer boundary masks (cucim / skimage / torch).   |
+| `label.py`                 | Relabel / remap / consolidate instance ids.                            |
+| `defect.py`                | Simulated acquisition defects (scratches, fold-overs).                 |
+| `missing_section.py`       | Drop random z-slices to simulate missing sections.                     |
+| `rand_crop_foreground.py`  | Random crop biased toward foreground voxels.                           |
+| `rand_transpose_xy.py`     | Random xy-transpose augmentation.                                      |
+| `resolution_zoom.py`       | Per-axis resolution scaling for multi-resolution training.             |
+
+### `brainbow/datasets/` — MONAI `CacheDataset`s
+
+| File            | Purpose                                                                         |
+| --------------- | ------------------------------------------------------------------------------- |
+| `base.py`       | `CircuitDataset` abstract base — declares `paper`, `resolution`, `labels`, etc. |
+| `snemi3d.py`    | SNEMI3D dataset leaf.                                                           |
+| `microns.py`    | MICrONS dataset leaf.                                                           |
+| `neurons.py`    | Internal "neurons" volume leaf.                                                 |
+| `lazy.py`       | `LazyVolDataset` — on-demand loading for very large volumes.                    |
+
+### `brainbow/datamodules/` — Lightning `DataModule`s
+
+| File            | Purpose                                                             |
+| --------------- | ------------------------------------------------------------------- |
+| `base.py`       | `CircuitDataModule` — MONAI augmentation pipeline + split logic.    |
+| `snemi3d.py`    | SNEMI3D datamodule leaf.                                            |
+| `microns.py`    | MICrONS datamodule leaf.                                            |
+| `neurons.py`    | Internal neurons datamodule leaf.                                   |
+
+### `brainbow/losses/` — task losses + combiner
+
+All task losses follow a uniform skeleton (see `ORGANIZATION.md` §5).
+
+| File            | Purpose                                                                        |
+| --------------- | ------------------------------------------------------------------------------ |
+| `_common.py`    | Shared regression-loss name resolution (`l1` / `mse` / `smooth_l1` + aliases). |
+| `semantic.py`   | `SemanticLoss` — CE + IoU + Dice (sigmoid or softmax mode).                    |
+| `instance.py`   | `InstanceLoss` — pull / push / norm discriminative embedding loss.             |
+| `geometry.py`   | `GeometryLoss` — raw(1) + dir(S) + cov upper-tri(S·(S+1)/2) regression.        |
+| `brainbow.py`   | `BrainbowLoss` — 10-ch (min/avg/max)loc RGB + raw-intensity reconstruction.    |
+| `combined.py`   | `CombinedLoss` — weighted sum with head-oriented output key hierarchy.         |
+
+### `brainbow/metrics/` — per-head eval metrics
+
+| File            | Purpose                                                             |
+| --------------- | ------------------------------------------------------------------- |
+| `semantic.py`   | Per-class IoU, Dice, pixel accuracy.                                |
+| `instance.py`   | Adapted Rand Error, Variation of Information, optimal split/merge. |
+
+### `brainbow/models/` — backbone wrappers
+
+`models/base.py::BaseModel` is the abstract contract (forward →
+dict with `logits`, `get_output_channels()`).
+
+#### `models/cosmos_transfer_2_5/` — Cosmos-Transfer 2.5 3-D wrapper
+
+Split into a package because the wrapper needs HF auto-pull, a
+standalone-DiT fallback, and a variant registry.
+
+| File                  | Purpose                                                               |
+| --------------------- | --------------------------------------------------------------------- |
+| `__init__.py`         | Re-exports `CosmosTransfer3DWrapper`.                                 |
+| `wrapper.py`          | `CosmosTransfer3DWrapper` — the public class.                         |
+| `variants.py`         | 2B / 14B variant registry (+ sanity for unreleased variants).         |
+| `layers.py`           | Shared primitives (conv blocks, normalisation wrappers).              |
+| `decoder.py`          | Feature projector + VAE decoder adapter.                              |
+| `standalone_dit.py`   | Random-init DiT fallback for `pretrained=False`.                      |
+| `hf_loader.py`        | Rank-aware HF snapshot download (ignores `text_encoder/*`).           |
+
+#### `models/vista/` — Vista3D wrapper + head + prompt I/O
+
+| File                       | Purpose                                                             |
+| -------------------------- | ------------------------------------------------------------------- |
+| `__init__.py`              | Re-exports `Vista3DWrapper`, `VistaTaskHead3D`, prompt utils.       |
+| `wrapper.py`               | `Vista3DWrapper` — the public class.                                |
+| `heads.py`                 | `VistaTaskHead3D` (MONAI `UnetrBasicBlock`).                        |
+| `hf_loader.py`             | MONAI `VISTA3D-HF` encoder download + partial-load.                 |
+| `point_prompt_encoder.py`  | `PointPromptEncoder` (proofread / interactive conditioning).        |
+| `point_sampling.py`        | `sample_point_prompts` — GT mask → click-point dict.                |
+
+### `brainbow/modules/` — Lightning modules
+
+`modules/base.py::BaseCircuitModule` captures the full training /
+validation / test loop shared by every architecture.  Each arch gets
+its own package with a freeze-/optim-aware `base.py` and a
+concrete `module.py`.
+
+| Path                                  | Purpose                                                      |
+| ------------------------------------- | ------------------------------------------------------------ |
+| `modules/base.py`                     | `BaseCircuitModule` — loop + head-oriented scalar logging.   |
+| `modules/cosmos_transfer_2_5/base.py` | `BaseCosmosModule` — freeze schedule + optim parameter split.|
+| `modules/cosmos_transfer_2_5/module.py` | `CosmosTransfer3DModule` — the concrete Lightning class.   |
+| `modules/vista/base.py`               | `BaseVistaModule` — Vista-specific freeze schedule.          |
+| `modules/vista/module.py`             | `Vista3DModule` — the concrete Lightning class.              |
+
+### `brainbow/callbacks/` — Lightning callbacks
+
+| Path                              | Purpose                                                                 |
+| --------------------------------- | ----------------------------------------------------------------------- |
+| `callbacks/memory.py`             | Per-epoch GPU/CPU memory logger.                                        |
+| `callbacks/tensorboard/`          | `ImageLogger` — hierarchical TB visualisation (package).                |
+| `callbacks/tensorboard/image_logger.py` | `ImageLogger` callback (the public class).                        |
+| `callbacks/tensorboard/tags.py`   | `TagContext` — single source of `{stage}/{mode}/[{head}/]{panel}`.      |
+| `callbacks/tensorboard/heads.py`  | `_log_semantic` / `_log_instance` / `_log_geometry` / `_log_brainbow`.  |
+| `callbacks/tensorboard/geometry.py` | Direction-quiver + covariance-glyph rendering helpers.                |
+| `callbacks/tensorboard/viz.py`    | Colour-map, overlay, tile builders.                                     |
+
+### `brainbow/inference/` — sliding-window + clustering
+
+| File                    | Purpose                                                             |
+| ----------------------- | ------------------------------------------------------------------- |
+| `sliding_window.py`     | Blended sliding-window inference over arbitrarily large volumes.    |
+| `clusterer.py`          | Discriminative-embedding → instance-id clustering (meanshift / BFS).|
+
+### `brainbow/preprocessors/` — format converters
+
+`preprocessors/base.py::BasePreprocessor` declares the `save` / `load`
+/ `validate` / `get_shape` / `get_metadata` interface.
+
+| File         | Purpose                                     |
+| ------------ | ------------------------------------------- |
+| `hdf5.py`    | HDF5 preprocessor (primary format).         |
+| `nrrd.py`    | NRRD preprocessor (medical imaging format). |
+| `tiff.py`    | Multi-page TIFF preprocessor.               |
+| `nfty.py`    | NfTy / neurofitty volumetric format.        |
+
+### `brainbow/utils/` — miscellaneous helpers
+
+| File            | Purpose                                                 |
+| --------------- | ------------------------------------------------------- |
+| `io.py`         | Volume read/write + norm-stat caching.                  |
+| `parallel.py`   | `pmap` — forkserver-based parallel map for CPU work.    |
+| `clustering.py` | Scalar post-processing for inference (CC, watershed).   |
+| `manifold.py`   | UMAP / t-SNE helpers for embedding-space diagnostics.   |
+
+### `brainbow/visualizer/` — interactive web volume renderer
+
+| Path                      | Purpose                                            |
+| ------------------------- | -------------------------------------------------- |
+| `app.py`                  | FastAPI server exposing volume tiles.              |
+| `__main__.py`             | `python -m brainbow.visualizer` entrypoint.        |
+| `volume_loader.py`        | Lazy chunked HDF5 loader for the server.           |
+| `static/index.html`       | Single-page UI.                                    |
+| `static/app.js`           | UI wiring + camera controls.                       |
+| `static/volume_renderer.js` | WebGL 3-D volume raymarcher.                     |
+| `static/style.css`        | Dark-mode layout.                                  |
+
+---
+
+## File count per subsystem (informational)
+
+| Subsystem                               | .py files  |
+| --------------------------------------- | ---------- |
+| `brainbow/transforms/`                  | 11         |
+| `brainbow/models/cosmos_transfer_2_5/`  |  7         |
+| `brainbow/models/vista/`                |  6         |
+| `brainbow/callbacks/tensorboard/`       |  5 (+ pkg) |
+| `brainbow/losses/`                      |  7         |
+| `brainbow/datamodules/` + `datasets/`   |  5 + 6     |
+| `brainbow/preprocessors/`               |  5         |
+| `brainbow/modules/`                     |  7         |
+| `brainbow/metrics/`                     |  3         |
+| `brainbow/inference/`                   |  3         |
+| `brainbow/utils/`                       |  5         |
+| `brainbow/visualizer/`                  |  4 py + 4 static |
+
+---
+
+## See also
+
+- [`ORGANIZATION.md`](./ORGANIZATION.md) — design patterns, conventions, and
+  "how to add a new …" checklists.
+- `configs/*.yaml` — every knob is documented inline.
+- `brainbow/losses/combined.py` — the canonical consumer of every
+  task-loss's head-oriented output dict.

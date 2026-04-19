@@ -49,7 +49,9 @@ class CosmosTransfer3DWrapper(nn.Module):
 
     - ``semantic``  [B, num_classes, D, H, W]
     - ``instance``  [B, instance_channels, D, H, W]
-    - ``geometry``  [B, G, D, H, W]  where G = 3 + 9 + 4 = 16
+    - ``geometry``  [B, G, D, H, W]  where G = 1 + S + S*(S+1)//2
+                                     = 1 (raw) + 3 (dir) + 6 (cov upper-tri) = 10
+                                     (3-D; layout matches BrainbowLoss ch 0 = rawval)
     - ``brainbow``  [B, brainbow_channels, D, H, W]
       (9 localisation + 1 raw-intensity channel by default)
 
@@ -80,7 +82,7 @@ class CosmosTransfer3DWrapper(nn.Module):
         >>> out = model(x)
         >>> out["semantic"].shape   # [1, 16, 32, 64, 64]
         >>> out["instance"].shape   # [1, 16, 32, 64, 64]
-        >>> out["geometry"].shape   # [1, 16, 32, 64, 64]
+        >>> out["geometry"].shape   # [1, 10, 32, 64, 64]  (raw=1 + dir=3 + cov_tri=6)
     """
 
     def __init__(
@@ -125,7 +127,9 @@ class CosmosTransfer3DWrapper(nn.Module):
         self.dropout = dropout
 
         S = _SPATIAL_DIMS
-        self.geom_channels = S + S * S + 4
+        # Geometry head layout: raw (1) + dir (S) + cov upper-tri (S*(S+1)/2).
+        # Matches BrainbowLoss channel convention with rawval at ch 0.
+        self.geom_channels = 1 + S + S * (S + 1) // 2
 
         self._dtype = {
             "bf16": torch.bfloat16,
