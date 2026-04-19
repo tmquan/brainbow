@@ -14,8 +14,9 @@ Provides:
     * 3 channels  -- RGB of the instance's centroid (*avg* location)
     * 3 channels  -- RGB of the instance's bounding-box *max* location
     * 6 channels  -- *aff*, binary face-affinity to the 6 neighbours
-                    (U, D, L, R, T, B) with SAME / replicate padding;
-                    supervised via soft-Dice on the sigmoid of the logits.
+                    in Z-Y-X order (T, B, U, D, L, R) with SAME /
+                    replicate padding; supervised via soft-Dice on the
+                    sigmoid of the logits.
 """
 
 import warnings

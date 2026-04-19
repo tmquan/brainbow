@@ -297,7 +297,7 @@ Brainbow-head sub-weights are prefixed (`brainbow_weight_raw`,
 `brainbow_weight_min|avg|max|aff`) to keep them disambiguated from
 GeometryLoss's own `weight_raw` inside `CombinedLoss.__init__`.  The
 ``aff`` sub-loss (soft-Dice on sigmoid face-affinity logits for the 6
-neighbours U/D/L/R/T/B) is tuned via `brainbow_weight_aff` and
+neighbours in Z-Y-X order T/B/U/D/L/R) is tuned via `brainbow_weight_aff` and
 `brainbow_aff_eps`.
 
 ---

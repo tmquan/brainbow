@@ -204,7 +204,8 @@ def _log_brainbow(
       - ch 1-3   : ``min`` RGB (foreground-only; zero on background)
       - ch 4-6   : ``avg`` RGB
       - ch 7-9   : ``max`` RGB
-      - ch 10-15 : ``aff`` (U / D / L / R / T / B face affinities; grayscale)
+      - ch 10-15 : ``aff`` (T / B / U / D / L / R face affinities, Z-Y-X
+                   order; grayscale)
 
     Predictions are raw logits; the affinity channels are passed through
     sigmoid before visualisation.  Panels are written under
@@ -222,7 +223,7 @@ def _log_brainbow(
         _add_brainbow_panels(tb, head, "gt", bb_gt, epoch, is_pred=False)
 
 
-_AFF_TAG_NAMES: Tuple[str, ...] = ("u", "d", "l", "r", "t", "b")
+_AFF_TAG_NAMES: Tuple[str, ...] = ("t", "b", "u", "d", "l", "r")
 
 
 def _add_brainbow_panels(
@@ -302,9 +303,9 @@ def _log_predictions(
         {ctx.prefix}/geometry/cov
         {ctx.prefix}/geometry/raw
         {ctx.prefix}/brainbow/pred/{raw,min,avg,max}
-        {ctx.prefix}/brainbow/pred/aff/{u,d,l,r,t,b}
+        {ctx.prefix}/brainbow/pred/aff/{t,b,u,d,l,r}     (Z-Y-X order)
         {ctx.prefix}/brainbow/gt/{raw,min,avg,max}       (if target)
-        {ctx.prefix}/brainbow/gt/aff/{u,d,l,r,t,b}       (if target)
+        {ctx.prefix}/brainbow/gt/aff/{t,b,u,d,l,r}       (if target)
 
     Args:
         tb: TensorBoard SummaryWriter.

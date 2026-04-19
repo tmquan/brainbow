@@ -7,8 +7,9 @@
 #   - 3 RGB channels  := normalised min  (bbox-min (z, y, x)) / (D, H, W)
 #   - 3 RGB channels  := normalised avg  (centroid) / (D, H, W)
 #   - 3 RGB channels  := normalised max  (bbox-max (z, y, x)) / (D, H, W)
-#   - 6 aff  channels := binary face-affinity to 6 neighbours (U,D,L,R,T,B)
-#                         with SAME-pad (boundary voxels self-connected).
+#   - 6 aff  channels := binary face-affinity to 6 neighbours in Z-Y-X
+#                         order (T,B,U,D,L,R) with SAME-pad (boundary
+#                         voxels self-connected).
 #
 # Usage:
 #   python scripts/train.py --config-name brainbow

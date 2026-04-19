@@ -6,8 +6,9 @@ The target map encodes, per voxel:
   - channels 1-3   : normalised min (bbox-min (z, y, x)) of the instance
   - channels 4-6   : normalised avg (centroid) of the instance
   - channels 7-9   : normalised max (bbox-max (z, y, x)) of the instance
-  - channels 10-15 : binary face-affinity to 6 neighbours (U,D,L,R,T,B)
-                    with SAME / replicate padding at the volume boundary.
+  - channels 10-15 : binary face-affinity to 6 neighbours in Z-Y-X order
+                    (T, B, U, D, L, R) with SAME / replicate padding at
+                    the volume boundary.
 """
 
 import pytest
@@ -110,16 +111,16 @@ class TestBuildBrainbowTarget:
         target = build_brainbow_target(labels, image)
         aff = target[0, 10:16]          # [6, D, H, W]
 
-        # Direction layout: (U, D, L, R, T, B) with
-        # U <-> (axis=H, shift=+1), D <-> (axis=H, shift=-1),
-        # L <-> (axis=W, shift=+1), R <-> (axis=W, shift=-1),
-        # T <-> (axis=D, shift=+1), B <-> (axis=D, shift=-1).
-        assert torch.all(aff[0, :, 0, :] == 1.0)          # U: top row of H
-        assert torch.all(aff[1, :, -1, :] == 1.0)         # D: bottom row of H
-        assert torch.all(aff[2, :, :, 0] == 1.0)          # L: left col of W
-        assert torch.all(aff[3, :, :, -1] == 1.0)         # R: right col of W
-        assert torch.all(aff[4, 0, :, :] == 1.0)          # T: first slice of D
-        assert torch.all(aff[5, -1, :, :] == 1.0)         # B: last slice of D
+        # Channel layout is Z-Y-X:
+        #   ch 0 T (z-1)  ch 1 B (z+1)
+        #   ch 2 U (y-1)  ch 3 D (y+1)
+        #   ch 4 L (x-1)  ch 5 R (x+1)
+        assert torch.all(aff[0, 0, :, :] == 1.0)          # T: first slice of D
+        assert torch.all(aff[1, -1, :, :] == 1.0)         # B: last slice of D
+        assert torch.all(aff[2, :, 0, :] == 1.0)          # U: top row of H
+        assert torch.all(aff[3, :, -1, :] == 1.0)         # D: bottom row of H
+        assert torch.all(aff[4, :, :, 0] == 1.0)          # L: left col of W
+        assert torch.all(aff[5, :, :, -1] == 1.0)         # R: right col of W
 
     def test_affinity_interior_matches_label_eq(self) -> None:
         """Interior aff[dir] == (labels == shift(labels, dir))."""
@@ -128,27 +129,26 @@ class TestBuildBrainbowTarget:
         aff = target[0, 10:16]
         lbl = labels[0]
 
-        # U: aff[0, z, y, x] == (lbl[z, y, x] == lbl[z, y-1, x])
+        # T / B on the D axis (Z).
         assert torch.all(
-            aff[0, :, 1:, :] == (lbl[:, 1:, :] == lbl[:, :-1, :]).float()
-        )
-        # D: aff[1, z, y, x] == (lbl[z, y, x] == lbl[z, y+1, x])
-        assert torch.all(
-            aff[1, :, :-1, :] == (lbl[:, :-1, :] == lbl[:, 1:, :]).float()
-        )
-        # L / R mirror on the W axis.
-        assert torch.all(
-            aff[2, :, :, 1:] == (lbl[:, :, 1:] == lbl[:, :, :-1]).float()
+            aff[0, 1:, :, :] == (lbl[1:, :, :] == lbl[:-1, :, :]).float()
         )
         assert torch.all(
-            aff[3, :, :, :-1] == (lbl[:, :, :-1] == lbl[:, :, 1:]).float()
+            aff[1, :-1, :, :] == (lbl[:-1, :, :] == lbl[1:, :, :]).float()
         )
-        # T / B on the D axis.
+        # U / D on the H axis (Y).
         assert torch.all(
-            aff[4, 1:, :, :] == (lbl[1:, :, :] == lbl[:-1, :, :]).float()
+            aff[2, :, 1:, :] == (lbl[:, 1:, :] == lbl[:, :-1, :]).float()
         )
         assert torch.all(
-            aff[5, :-1, :, :] == (lbl[:-1, :, :] == lbl[1:, :, :]).float()
+            aff[3, :, :-1, :] == (lbl[:, :-1, :] == lbl[:, 1:, :]).float()
+        )
+        # L / R on the W axis (X).
+        assert torch.all(
+            aff[4, :, :, 1:] == (lbl[:, :, 1:] == lbl[:, :, :-1]).float()
+        )
+        assert torch.all(
+            aff[5, :, :, :-1] == (lbl[:, :, :-1] == lbl[:, :, 1:]).float()
         )
 
     def test_shape_mismatch_raises(self) -> None:

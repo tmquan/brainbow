@@ -17,7 +17,7 @@ label volume + raw EM image -- no learnable target parameters:
 |    1 - 3    | RGB := normalised (z, y, x) of the instance's **min** (bounding-box min)  |
 |    4 - 6    | RGB := normalised (z, y, x) of the instance's **avg** (centroid)          |
 |    7 - 9    | RGB := normalised (z, y, x) of the instance's **max** (bounding-box max)  |
-|   10 - 15   | **aff** := binary face-affinity to 6 neighbours (U, D, L, R, T, B)        |
+|   10 - 15   | **aff** := binary face-affinity to 6 neighbours in Z-Y-X order (T, B, U, D, L, R) |
 
 Each coordinate is divided by the patch dimensions `(D, H, W)` so the
 nine localisation channels live in `[0, 1]` regardless of anisotropy

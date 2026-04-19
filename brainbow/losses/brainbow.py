@@ -12,7 +12,7 @@ image statistics -- no learnable parameters:
   1-3    R,G,B  := normalised  z,y,x  of the instance's **min**  (bbox min)
   4-6    R,G,B  := normalised  z,y,x  of the instance's **avg**  (centroid)
   7-9    R,G,B  := normalised  z,y,x  of the instance's **max**  (bbox max)
-  10-15  *aff*  := binary face-affinity to 6 neighbours (U,D,L,R,T,B)
+  10-15  *aff*  := binary face-affinity to 6 neighbours (T,B,U,D,L,R; Z-Y-X)
   =====  ========================================================
 
 Normalisation is relative to the **patch size**, so the 9 localisation
@@ -25,14 +25,15 @@ channels; channel 0 carries the raw image value for every voxel.
 
 The 6 affinity channels encode, for every voxel ``v``, whether it shares
 its instance label with each of its 6 face neighbours (same-label = 1,
-different-label = 0).  Direction order::
+different-label = 0).  Direction order is **Z → Y → X** (slowest to
+fastest axis), each axis taken in (``-1``, ``+1``) order::
 
-    ch 10 : U  (up    = y - 1)
-    ch 11 : D  (down  = y + 1)
-    ch 12 : L  (left  = x - 1)
-    ch 13 : R  (right = x + 1)
-    ch 14 : T  (top   = z - 1)
-    ch 15 : B  (bottom= z + 1)
+    ch 10 : T  (top    = z - 1)
+    ch 11 : B  (bottom = z + 1)
+    ch 12 : U  (up     = y - 1)
+    ch 13 : D  (down   = y + 1)
+    ch 14 : L  (left   = x - 1)
+    ch 15 : R  (right  = x + 1)
 
 Boundary voxels (where the neighbour would fall outside the crop) use
 **SAME padding** (replicate) so the voxel is compared to itself -- the
@@ -59,20 +60,21 @@ from brainbow.losses._common import canonical_regression_name, regression_loss_f
 
 _BRAINBOW_CHANNELS: int = 16
 _N_LOC: int = 10          # ch 0..9 : raw + min/avg/max (10 channels)
-_N_AFF: int = 6           # ch 10..15 : U, D, L, R, T, B
+_N_AFF: int = 6           # ch 10..15 : T, B, U, D, L, R  (Z-Y-X)
 
 # (name, axis_in_[B,D,H,W], shift).  ``shift == +1`` means: the shifted
 # tensor at position ``i`` equals the input at position ``i-1`` (i.e. the
 # neighbour one voxel *earlier* along ``axis``); shift -1 is the mirror.
 # Axis indexing is relative to the 4-D ``[B, D, H, W]`` layout -- axis 1
-# is Z, axis 2 is Y, axis 3 is X.
+# is Z, axis 2 is Y, axis 3 is X.  Channel order is **Z, Y, X** (slowest
+# to fastest axis); each axis contributes (-1, +1) in that order.
 _DIRECTIONS: tuple[tuple[str, int, int], ...] = (
+    ("T", 1, +1),   # top    : z - 1
+    ("B", 1, -1),   # bottom : z + 1
     ("U", 2, +1),   # up     : y - 1
     ("D", 2, -1),   # down   : y + 1
     ("L", 3, +1),   # left   : x - 1
     ("R", 3, -1),   # right  : x + 1
-    ("T", 1, +1),   # top    : z - 1
-    ("B", 1, -1),   # bottom : z + 1
 )
 _AFF_NAMES: tuple[str, ...] = tuple(name for name, _, _ in _DIRECTIONS)
 
@@ -300,7 +302,8 @@ class BrainbowLoss(nn.Module):
     - Channels 1-3:  ``min``  (per-instance bbox-min xyz / (D,H,W))
     - Channels 4-6:  ``avg``  (per-instance centroid     / (D,H,W))
     - Channels 7-9:  ``max``  (per-instance bbox-max xyz / (D,H,W))
-    - Channels 10-15: ``aff`` (6 face-neighbour affinities U,D,L,R,T,B)
+    - Channels 10-15: ``aff`` (6 face-neighbour affinities in Z-Y-X
+                     order: T, B, U, D, L, R)
 
     Channel 0 is supervised everywhere.  Channels 1-9 are foreground-only.
     Channels 10-15 are supervised everywhere -- boundary voxels use

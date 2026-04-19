@@ -11,7 +11,7 @@ extractor for the four-head volumetric segmentation task:
   upper-triangle (S*(S+1)/2 channels), then dir (S channels).
 - **Brainbow**: per-voxel raw-intensity + per-instance colouring +
   face-affinity (``brainbow_channels`` = 16: 1 raw, 9 min/avg/max RGB,
-  6 face-affinity neighbours (U/D/L/R/T/B); see
+  6 face-affinity neighbours in Z-Y-X order (T/B/U/D/L/R); see
   :class:`brainbow.losses.BrainbowLoss`).
 
 Cosmos-Transfer2.5 is natively a video model with temporal + spatial
