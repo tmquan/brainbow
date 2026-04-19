@@ -1,0 +1,89 @@
+# Combined SNEMI3D + Neurons + MICrONS Configuration
+# Inherits everything from snemi3d.yaml, adds the full neurons cylinder
+# and MICrONS volumes, and harmonises native resolutions via resolution
+# zoom.
+#
+# Native resolutions (all share 5:1 Z:XY anisotropy):
+#   SNEMI3D / neurons: 30x6x6 nm    MICrONS: 40x8x8 nm
+#
+# Each dataset is zoomed from its native resolution into the 30-40 nm Z,
+# 6-8 nm XY target range via resolution_map (prefix -> [Z, Y, X] nm):
+#   SNEMI3D/neurons (30x6x6) -> zooms out (0.75-1.0x)
+#   MICrONS         (40x8x8) -> zooms in  (1.0-1.33x)
+#
+# Volumes (download_snemi3d.py --source all, download_microns.py --split):
+#   train: neurons cylinder + MICrONS train01-04
+#   val:   SNEMI3D AC4       + MICrONS test01
+#   test:  SNEMI3D AC4       + MICrONS test01
+#
+# Usage:
+#   python scripts/train.py --config-name combine
+
+defaults:
+  - snemi3d
+
+experiment_name: combine
+project_name: brainbow
+
+# Post-processing override: SNEMI3D + MICrONS are both ~5:1 anisotropic
+# (30-40 nm Z, 6-8 nm XY).  Neurons routinely touch across Z slices
+# while being genuinely distinct cells (by design of the dataset), so
+# the embedding threshold in Z needs to be well under the XY one --
+# otherwise a single borderline-similar Z neighbour leaks two cells
+# into the same connected component.  The `self` backend runs our
+# self-contained CuPy union-find kernel (no pylibcugraph dependency).
+# training:
+#   clusterer:
+#     name: spatial_cc
+#     backend: self
+#     min_cluster_size: 50
+#     connectivity: 1
+#     bandwidth: [0.2, 0.5, 0.5]   # [Z, Y, X]; Z tighter to respect anisotropy
+
+data:
+  resolution_zoom_prob: 1.0
+  resolution_zoom_range: [[30, 40], [6, 8], [6, 8]]
+  resolution_map:
+    minnie65: [40, 8, 8]
+    AC: [30, 6, 6]
+    neurons: [30, 6, 6]
+
+  train_volumes:
+    - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
+      seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
+      root: data/SNEMI3D
+
+    # --- MICrONS (40x8x8 nm, 4096x4096x800 crops) ---
+    - vol: minnie65_mip0_4096x4096x800_x50000_y60000_z16000_volume
+      seg: minnie65_mip0_4096x4096x800_x50000_y60000_z16000_v1300_segmentation
+      root: data/MICRONS
+
+    - vol: minnie65_mip0_4096x4096x800_x110000_y60000_z18000_volume
+      seg: minnie65_mip0_4096x4096x800_x110000_y60000_z18000_v1300_segmentation
+      root: data/MICRONS
+
+    - vol: minnie65_mip0_4096x4096x800_x80000_y70000_z16500_volume
+      seg: minnie65_mip0_4096x4096x800_x80000_y70000_z16500_v1300_segmentation
+      root: data/MICRONS
+
+    - vol: minnie65_mip0_4096x4096x800_x140000_y80000_z17500_volume
+      seg: minnie65_mip0_4096x4096x800_x140000_y80000_z17500_v1300_segmentation
+      root: data/MICRONS
+
+  val_volumes:
+    - vol: AC4_inputs
+      seg: AC4_labels
+      root: data/SNEMI3D
+
+    - vol: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume
+      seg: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation
+      root: data/MICRONS
+
+  test_volumes:
+    - vol: AC4_inputs
+      seg: AC4_labels
+      root: data/SNEMI3D
+
+    - vol: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume
+      seg: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation
+      root: data/MICRONS

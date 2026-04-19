@@ -67,6 +67,7 @@ model:
   in_channels: 1
   num_classes: 16
   instance_channels: 10
+  brainbow_channels: 10
   feature_size: 64
   variant: "2B"
   dtype: "bf16"
@@ -159,45 +160,67 @@ optimizer:
     eta_min: 1.0e-6
 
 loss:
-  semantic_mode: sigmoid
-  active_classes: 1
-  class_weights: [0.2]
+  # CombinedLoss = weight_semantic * semantic + weight_instance * instance
+  #              + weight_geometry * geometry + weight_brainbow * brainbow
+  # Each head has its own sub-weights below.  Setting a head weight to 0
+  # disables that head entirely (the sub-module is not instantiated).
+
+  # -----------------------------------------------------------------
+  # Semantic head -- binary foreground / background (sigmoid, 1 class)
+  # -----------------------------------------------------------------
+  semantic_mode: sigmoid           # sigmoid (multi-label) | softmax (exclusive)
+  active_classes: 1                # only foreground is learnt for SNEMI3D
+  class_weights: [0.2]             # per-class CE weighting (down-weights FG to fight imbalance)
   label_smoothing: 0.0
-  weight_semantic: 0.0
-  weight_ce: 1.0
-  weight_iou: 0.0
-  weight_dice: 1.0
-  weight_instance: 1.0
-  weight_pull: 1.0
-  weight_push: 1.0
-  weight_norm: 0.001
-  delta_v: 0.5
-  delta_d: 1.5
-  normalize_embeddings: false
-  anchor_to_centroid: false
-  learned_task_weights: false
-  max_hard_pairs: 0
-  weight_edge: 1.0
-  weight_bone: 1.0
-  weight_geometry: 0.0
-  dir_target: centroid
-  weight_dir: 1.0
-  weight_cov: 1.0
-  weight_raw: 1.0
-  loss_dir: smooth_l1
-  loss_cov: smooth_l1
-  loss_raw: smooth_l1
-  ignore_index: -100
+  weight_semantic: 0.0             # head weight; 0 -> semantic head disabled (instance carries FG info)
+  weight_ce: 1.0                   # cross-entropy sub-loss
+  weight_iou: 0.0                  # IoU sub-loss (0 -> skipped)
+  weight_dice: 1.0                 # Dice sub-loss (helps on heavily imbalanced FG)
+
   # -----------------------------------------------------------------
-  # Brainbow head — per-instance (minloc, avgloc, maxloc) RGB
+  # Instance head -- discriminative embedding (pull / push / norm)
+  # -----------------------------------------------------------------
+  weight_instance: 1.0             # head weight for the embedding loss
+  weight_pull: 1.0                 # intra-cluster pull (voxels -> their centroid, hinge at delta_v)
+  weight_push: 1.0                 # inter-cluster push (centroid <-> centroid, hinge at delta_d)
+  weight_norm: 0.001               # mild centroid-norm regulariser (prevents blowup)
+  delta_v: 0.5                     # pull margin: allowed intra-cluster radius
+  delta_d: 1.5                     # push margin: half the minimum centroid separation
+  normalize_embeddings: false      # L2-normalise embeddings before loss (cosine-like)
+  anchor_to_centroid: false        # anchor pull to running centroid instead of batch centroid
+  learned_task_weights: false      # Kendall-style uncertainty weighting across heads
+  max_hard_pairs: 0                # 0 = all pairs; >0 = hard-negative mining budget
+  weight_edge: 1.0                 # per-voxel multiplier on boundary voxels (1.0 = off)
+  weight_bone: 1.0                 # per-voxel multiplier on medial-axis voxels (1.0 = off)
+
+  # -----------------------------------------------------------------
+  # Geometry head -- direction field + covariance + raw reconstruction
+  # -----------------------------------------------------------------
+  weight_geometry: 0.0             # head weight; 0 -> geometry head disabled
+  dir_target: centroid             # direction-field target: "centroid" or "skeleton"
+  weight_dir: 1.0                  # direction sub-loss
+  weight_cov: 1.0                  # covariance sub-loss (shape/anisotropy)
+  weight_raw: 1.0                  # raw-image reconstruction sub-loss (autoencoder-ish)
+  loss_dir: smooth_l1              # regression loss for direction   (mse | l1 | smooth_l1)
+  loss_cov: smooth_l1              # regression loss for covariance
+  loss_raw: smooth_l1              # regression loss for raw-intensity reconstruction
+
+  ignore_index: -100               # label value excluded from every loss term
+
+  # -----------------------------------------------------------------
+  # Brainbow head -- per-instance (minloc, avgloc, maxloc) RGB
   # colouring + per-voxel raw-intensity reconstruction (10 channels).
-  # See brainbow/losses/brainbow.py for the target construction.
+  # Channel layout (see brainbow/losses/brainbow.py):
+  #   ch 0      := rawval   (raw image intensity, per voxel)
+  #   ch 1-3    := minloc   (normalised (z, y, x) of each instance's min)
+  #   ch 4-6    := avgloc   (normalised (z, y, x) centroid)
+  #   ch 7-9    := maxloc   (normalised (z, y, x) of each instance's max)
   # -----------------------------------------------------------------
-  weight_brainbow: 0.0
-  brainbow_loss_loc: smooth_l1
-  brainbow_loss_raw: l1
-  weight_minloc: 1.0
-  weight_avgloc: 1.0
-  weight_maxloc: 1.0
-  weight_rawval: 1.0
-  brainbow_foreground_only_loc: true
+  weight_brainbow: 1.0             # head weight; 0 -> brainbow head disabled
+  brainbow_loss_loc: smooth_l1     # regression loss for the 9 location channels
+  brainbow_loss_raw: l1            # regression loss for the rawval channel
+  weight_minloc: 1.0               # sub-weight for minloc channels (ch 1-3)
+  weight_avgloc: 1.0               # sub-weight for avgloc channels (ch 4-6)
+  weight_maxloc: 1.0               # sub-weight for maxloc channels (ch 7-9)
+  weight_rawval: 1.0               # sub-weight for rawval channel  (ch 0)
+  brainbow_foreground_only_loc: true  # apply location loss on foreground voxels only (bg has no instance)
