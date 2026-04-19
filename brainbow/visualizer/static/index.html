@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Neurons Volume Visualizer</title>
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+
+<div id="viewer">
+  <!-- 2x2 panel grid -->
+  <div class="panel" id="panel-axial">
+    <div class="panel-label">Axial (XY) <span class="slice-info" id="info-axial"></span></div>
+    <canvas id="canvas-axial"></canvas>
+  </div>
+  <div class="panel" id="panel-sagittal">
+    <div class="panel-label">Sagittal (YZ) <span class="slice-info" id="info-sagittal"></span></div>
+    <canvas id="canvas-sagittal"></canvas>
+  </div>
+  <div class="panel" id="panel-coronal">
+    <div class="panel-label">Coronal (XZ) <span class="slice-info" id="info-coronal"></span></div>
+    <canvas id="canvas-coronal"></canvas>
+  </div>
+  <div class="panel" id="panel-3d">
+    <div class="panel-label">3D Volume</div>
+    <canvas id="canvas-3d"></canvas>
+  </div>
+</div>
+
+<div id="toolbar">
+  <label class="tb-item">
+    <input type="checkbox" id="cb-overlay" checked/>
+    Overlay
+  </label>
+  <label class="tb-item">
+    Opacity
+    <input type="range" id="sl-opacity" min="0" max="100" value="40"/>
+    <span id="val-opacity">0.40</span>
+  </label>
+  <label class="tb-item">
+    Colormap
+    <select id="sel-cmap">
+      <option value="random" selected>random</option>
+      <option value="tab20">tab20</option>
+      <option value="viridis">viridis</option>
+    </select>
+  </label>
+  <label class="tb-item">
+    <input type="checkbox" id="cb-filled" checked/>
+    Filled
+  </label>
+  <label class="tb-item">
+    <input type="checkbox" id="cb-slicing"/>
+    Slicing
+  </label>
+  <label class="tb-item">
+    <input type="checkbox" id="cb-cutting" checked/>
+    Cutting
+  </label>
+  <span class="tb-item" id="tb-instance">Instance: --</span>
+  <span class="tb-item" id="tb-selected"></span>
+  <span class="tb-item" id="tb-coord">Z:-- Y:-- X:--</span>
+  <span class="tb-item" id="tb-spacing">Spacing: --</span>
+  <button class="tb-item" id="btn-clear-cache" title="Clear cached volume data and reload">Clear cache</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+<script src="app.js?v=3"></script>
+<script src="volume_renderer.js?v=3"></script>
+</body>
+</html>

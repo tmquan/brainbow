@@ -1,0 +1,203 @@
+# SNEMI3D Configuration
+# Trains CosmosTransfer3D on the SNEMI3D neuron EM dataset.
+#
+# Usage:
+#   python scripts/train.py --config-name snemi3d
+#   python scripts/train.py --config-name snemi3d data.batch_size=8
+#
+# Full resume (optimizer + epoch) after interruption:
+#   python scripts/train.py --config-name snemi3d \
+#     training.resume_from_checkpoint=outputs/checkpoints/last.ckpt
+
+defaults:
+  - default
+
+experiment_name: snemi3d
+project_name: brainbow
+output_dir: outputs
+
+data:
+  dataset: snemi3d
+  data_root: data/SNEMI3D
+  batch_size: 4
+  num_workers: 16
+  persistent_workers: true
+  cache_rate: 0.0
+  pin_memory: true
+  slice_mode: false
+  num_samples: 16000
+  patch_size: [80, 256, 256]
+  find_boundaries: 1.0
+  pixel_size: [30, 6, 6]   # z, y, x in nm — SNEMI3D resolution
+  min_foreground: 0.80
+  resolution_zoom_prob: 0.00
+  resolution_zoom_range: [[30, 30], [6, 6], [6, 6]]
+  # elastic_prob: 0.00
+  # elastic_sigma_range: [5, 8]
+  # elastic_magnitude_range: [50, 150]
+
+  train_volumes:
+    # AC4 (SNEMI3D train, 1024×1024×100, 401 instance IDs)
+    # Download: python scripts/download_snemi3d.py --source snemi
+    # Neurons full annotated cylinder (same 6×6×30 nm resolution)
+    # Download: python scripts/download_snemi3d.py --source neurons
+    - vol: AC4_inputs
+      seg: AC4_labels
+      root: data/SNEMI3D
+    - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
+      seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
+      root: data/SNEMI3D
+  val_volumes:
+    - vol: AC4_inputs
+      seg: AC4_labels
+      root: data/SNEMI3D
+    - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
+      seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
+      root: data/SNEMI3D
+  test_volumes:
+    - vol: AC4_inputs
+      seg: AC4_labels
+      root: data/SNEMI3D
+    - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
+      seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
+      root: data/SNEMI3D
+
+model:
+  type: cosmostransfer3d
+  in_channels: 1
+  num_classes: 16
+  instance_channels: 10
+  feature_size: 64
+  variant: "2B"
+  dtype: "bf16"
+  pretrained: true              # auto-pull nvidia/Cosmos-Transfer2.5-2B from HF
+  freeze_vae_encoder: true
+  freeze_dit_backbone: false
+  freeze_vae_decoder: false
+  gradient_checkpointing: false
+  dropout: 0.2
+
+callbacks:
+  cuda_empty_cache_before_val: true
+  image_logger:
+    max_images: 8
+
+training:
+  max_epochs: 100
+  accelerator: auto
+  devices: auto
+  strategy: ddp
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  limit_val_batches: 100
+  num_sanity_val_steps: 2
+  log_every_n_steps: 50
+  benchmark: true
+  # torch.compile on DiT backbone. false/null disables; true uses
+  # "reduce-overhead" (~1 min compile, good runtime); "max-autotune"
+  # gives best runtime but 5-15 min first-run compile.
+  compile: "max-autotune"
+  compile_fullgraph: true
+  training_modes:
+    - automatic
+  # Validation-time clusterer.  `bandwidth` and `normalize_embeddings`
+  # default to loss.delta_v / loss.normalize_embeddings.
+  #
+  # Options (fastest & most neuron-appropriate last):
+  #   - soft_meanshift : differentiable, mode-based; over-segments
+  #                      random embeddings early in training → pretty
+  #                      but misleading panels before ~2 k steps.
+  #   - hdbscan        : density-based, auto-K; honest but silent until
+  #                      the embedding separates.  Ignores spatial
+  #                      connectivity so two disconnected cells with
+  #                      similar mean embedding can merge.
+  #   - spatial_cc     : connected components on the per-voxel
+  #                      embedding-affinity graph (6-connectivity).
+  #                      Respects spatial connectivity, runs at full
+  #                      resolution, and accepts **per-axis** embedding
+  #                      thresholds (a list instead of a scalar) for
+  #                      anisotropic EM.  On 5:1 Z:XY stacks like
+  #                      SNEMI3D, neurons routinely touch across Z
+  #                      slices while being distinct cells; a tighter
+  #                      Z entry stops them from merging through one
+  #                      borderline-similar Z neighbour — the dominant
+  #                      failure mode of isotropic spatial_cc/HDBSCAN
+  #                      on this data.
+  #
+  # Backend picker (`backend: auto`) prefers:
+  #   1. self    : our self-contained CuPy RawKernel union-find
+  #                (Shiloach-Vishkin hook + pointer-jumping).  No
+  #                pylibcugraph / cusparse CSC<->CSR round-trip, so
+  #                it is both faster than option 2 and robust to cuML
+  #                installs missing pylibcugraph.
+  #   2. cupy    : cupyx.scipy.sparse.csgraph.connected_components
+  #                (needs pylibcugraph — kept for debugging parity).
+  #   3. scipy   : CPU round-trip.
+  # Use `backend: self` to force the kernel path (e.g. for DDP
+  # reproducibility).
+  clusterer:
+    name: soft_meanshift #spatial_cc
+    min_cluster_size: 50
+    connectivity: 1            # 1 → 6-neighbour; else → 26-neighbour
+    backend: auto              # auto → self on CUDA, scipy on CPU
+    # name: spatial_cc
+    # backend: self
+    # min_cluster_size: 50
+    # connectivity: 1
+    # bandwidth: [0.1, 0.5, 0.5]   # [Z, Y, X]; Z tighter to respect anisotropy
+
+optimizer:
+  type: adamw
+  lr: 2e-5
+  dit_backbone_lr: 2e-4
+  weight_decay: 1.0e-4
+  scheduler:
+    type: cosine_warmup
+    warmup_epochs: 2
+    T_max: 50
+    eta_min: 1.0e-6
+
+loss:
+  semantic_mode: sigmoid
+  active_classes: 1
+  class_weights: [0.2]
+  label_smoothing: 0.0
+  weight_semantic: 0.0
+  weight_ce: 1.0
+  weight_iou: 0.0
+  weight_dice: 1.0
+  weight_instance: 1.0
+  weight_pull: 1.0
+  weight_push: 1.0
+  weight_norm: 0.001
+  delta_v: 0.5
+  delta_d: 1.5
+  normalize_embeddings: false
+  anchor_to_centroid: false
+  learned_task_weights: false
+  max_hard_pairs: 0
+  weight_edge: 1.0
+  weight_bone: 1.0
+  weight_geometry: 0.0
+  dir_target: centroid
+  weight_dir: 1.0
+  weight_cov: 1.0
+  weight_raw: 1.0
+  loss_dir: smooth_l1
+  loss_cov: smooth_l1
+  loss_raw: smooth_l1
+  ignore_index: -100
+  # -----------------------------------------------------------------
+  # Brainbow head — per-instance (minloc, avgloc, maxloc) RGB
+  # colouring + per-voxel raw-intensity reconstruction (10 channels).
+  # See brainbow/losses/brainbow.py for the target construction.
+  # -----------------------------------------------------------------
+  weight_brainbow: 0.0
+  brainbow_loss_loc: smooth_l1
+  brainbow_loss_raw: l1
+  weight_minloc: 1.0
+  weight_avgloc: 1.0
+  weight_maxloc: 1.0
+  weight_rawval: 1.0
+  brainbow_foreground_only_loc: true

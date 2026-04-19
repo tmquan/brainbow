@@ -1,0 +1,48 @@
+# Brainbow Configuration
+# Trains CosmosTransfer3D with the 10-channel Brainbow head active.
+#
+# The target map is built on-the-fly from the label volume + raw image:
+#   - 3 RGB channels  := normalised minloc  (z, y, x) / (D, H, W)
+#   - 3 RGB channels  := normalised avgloc  (centroid) / (D, H, W)
+#   - 3 RGB channels  := normalised maxloc  / (D, H, W)
+#   - 1 channel       := raw image intensity
+#
+# Usage:
+#   python scripts/train.py --config-name brainbow
+#   python scripts/train.py --config-name brainbow data.batch_size=2
+#
+# Full resume (optimizer + epoch) after interruption:
+#   python scripts/train.py --config-name brainbow \
+#     training.resume_from_checkpoint=outputs/checkpoints/last.ckpt
+
+defaults:
+  - snemi3d
+
+experiment_name: brainbow
+project_name: brainbow
+
+model:
+  type: cosmostransfer3d
+  brainbow_channels: 10
+  instance_channels: 10
+  pretrained: true
+  freeze_vae_encoder: true
+  freeze_dit_backbone: false
+  freeze_vae_decoder: false
+  gradient_checkpointing: false
+  dropout: 0.2
+
+loss:
+  # Turn off the dense instance-embedding head; the Brainbow head now
+  # carries the instance-colouring signal.
+  weight_semantic: 0.0
+  weight_instance: 0.0
+  weight_geometry: 0.0
+  weight_brainbow: 1.0
+  brainbow_loss_loc: smooth_l1
+  brainbow_loss_raw: l1
+  weight_minloc: 1.0
+  weight_avgloc: 1.0
+  weight_maxloc: 1.0
+  weight_rawval: 1.0
+  brainbow_foreground_only_loc: true

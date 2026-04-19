@@ -1,0 +1,183 @@
+# Brainbow Default Configuration
+# Base configuration for all connectomics training tasks.
+
+# Experiment metadata
+experiment_name: brainbow
+project_name: brainbow
+seed: 42
+
+# Logging configuration
+logger: tensorboard  # Options: tensorboard, wandb
+log_dir: logs
+
+# Data configuration
+data:
+  dataset: snemi3d  # Options: snemi3d, microns
+  data_root: data
+  batch_size: 4
+  num_workers: 16
+  cache_rate: 0.5
+  pin_memory: true
+  image_size: null
+  slice_mode: true
+  num_samples: null
+  find_boundaries: 0.0
+  elastic_prob: 0.0            # probability of 3-D elastic deformation (0 = off)
+  elastic_sigma_range: [35, 50]       # Gaussian smoothing σ — high = sparse, smooth warp
+  elastic_magnitude_range: [10, 40]   # displacement magnitude range (kept low for gentle warps)
+  resolution_zoom_prob: 0.0   # probability of random resolution zoom (0 = off)
+  resolution_zoom_range: null # per-axis [[z_min,z_max],[y_min,y_max],[x_min,x_max]] in nm; null = [30,40],[6,8],[6,8]
+  resolution_map: null  # prefix→[Z,Y,X] nm for per-volume native resolution; null = use pixel_size for all
+  # Keep false on multi-GPU jobs if host RAM is tight (each rank × num_workers processes).
+  persistent_workers: true
+  train_volumes: null  # List of {vol, seg} dicts; null = dataset defaults
+  val_volumes: null    # Defaults to train_volumes
+  test_volumes: null   # Defaults to train_volumes
+
+# Model configuration
+model:
+  type: cosmostransfer3d  # Options: cosmostransfer3d, vista3d
+  in_channels: 1
+  num_classes: 16
+  instance_channels: 16   # Per-voxel embedding dim for the instance head
+  brainbow_channels: 10   # Fixed by the loss (rawval + minloc/avgloc/maxloc RGB = 1+3+3+3)
+  feature_size: 64
+  dropout: 0.2
+  # If true, the wrapper will auto-pull pretrained weights from HuggingFace
+  # on first instantiation (Cosmos -> nvidia/Cosmos-Transfer2.5-2B,
+  # Vista -> MONAI/VISTA3D-HF).  Downloads are cached under
+  # ~/.cache/brainbow/.  Set to false to train from scratch.
+  pretrained: true
+
+# Optimizer configuration
+optimizer:
+  type: adamw
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  scheduler:
+    type: cosine
+    T_max: 100
+    eta_min: 1.0e-6
+
+# Loss configuration
+loss:
+  semantic_mode: sigmoid     # sigmoid (multi-label: mito inside neuron) or softmax (mutually exclusive)
+  active_classes: null        # null = all channels; set to N to only train the first N semantic channels
+  weight_semantic: 1.0
+  weight_ce: 1.0
+  weight_iou: 1.0
+  weight_dice: 1.0
+  weight_instance: 1.0
+  weight_pull: 1.0
+  weight_push: 1.0
+  weight_norm: 0.001
+  delta_v: 0.5
+  delta_d: 1.5
+  weight_edge: 10.0
+  weight_bone: 10.0
+  weight_geometry: 0.0
+  dir_target: centroid         # centroid or skeleton
+  weight_dir: 1.0
+  weight_cov: 0.0
+  weight_raw: 1.0
+  loss_dir: smooth_l1          # smooth_l1 (robust offsets), mse, or l1
+  loss_cov: mse                # mse (Frobenius-norm), l1, or smooth_l1
+  loss_raw: l1                 # l1 (sharp reconstruction), mse, or smooth_l1
+  ignore_index: -100
+
+# Training configuration
+training:
+  training_modes:
+    - automatic
+  # Validation-time clusterer.  `bandwidth` defaults to loss.delta_v,
+  # `normalize_embeddings` defaults to loss.normalize_embeddings.
+  # Names: soft_meanshift | hdbscan | meanshift | spatial_cc
+  #
+  #   - soft_meanshift : differentiable mean-shift (historical default).
+  #                      Over-segments on random / untrained embeddings.
+  #   - hdbscan        : density-based, auto-K.  Subsamples to
+  #                      max_points.  GPU via cuML.  Ignores spatial
+  #                      connectivity.
+  #   - meanshift      : classical MeanShift.  GPU only if cuML < 23.x.
+  #   - spatial_cc     : connected components on the per-voxel
+  #                      embedding-affinity graph (see clusterer.py).
+  #                      Respects spatial connectivity, linear time,
+  #                      one threshold.  GPU via cupyx.scipy.sparse.
+  #                      Recommended for dense-EM neurons.
+  clusterer:
+    name: soft_meanshift
+    # Common:
+    # min_cluster_size: 50
+    # backend: auto
+    # hdbscan / meanshift:
+    # max_points: 50000
+    # cluster_selection_epsilon: null   # null → bandwidth
+    # spatial_cc:
+    # connectivity: 1                   # 1 → 6-nbr; else → 26-nbr
+  max_epochs: 100
+  accelerator: auto  # Options: cpu, gpu, tpu, auto
+  devices: auto
+  strategy: ddp  # Explicit DDP for even GPU memory distribution; bf16-mixed is recommended
+  precision: bf16-mixed  # Options: 32-true, 16-mixed, bf16-mixed
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  val_check_interval: 1.0
+  limit_val_batches: 10
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 2
+  log_every_n_steps: 50
+  enable_progress_bar: true
+  enable_model_summary: true
+  deterministic: false
+  benchmark: true
+  # torch.compile on the DiT backbone (Cosmos-only; no-op on Vista).
+  # false/null = off; true = "reduce-overhead" (~1 min compile);
+  # "max-autotune" = best runtime but 5-15 min first compile.
+  compile: false
+  compile_fullgraph: false
+  fast_dev_run: false
+  profiler: null  # Options: null, simple, advanced, pytorch
+  # Full Lightning resume (optimizer, epoch, schedulers). Prefer this after crashes.
+  resume_from_checkpoint: null
+
+# Callbacks configuration
+callbacks:
+  checkpoint:
+    enabled: true
+    dirpath: null
+    # Scalar tags live under ``{stage}/{mode}/...`` — see
+    # ``brainbow/modules/base.py`` for the full hierarchy.
+    filename: "{epoch:02d}-{val/automatic/loss:.4f}"
+    save_top_k: 3
+    monitor: val/automatic/loss
+    mode: min
+    save_last: true
+    verbose: true
+
+  early_stopping:
+    enabled: false
+    monitor: val/automatic/loss
+    patience: 20
+    mode: min
+    verbose: true
+    min_delta: 0.0
+
+  lr_monitor:
+    enabled: true
+
+  image_logger:
+    enabled: true
+    every_n_epochs: 1
+    max_images: 4
+    # Manifold projection used for the `instance_<algo>` TB panel.
+    # algorithm: pca | svd | umap
+    #   - pca  (default): linear, centered SVD; fast & deterministic
+    #   - svd            : linear, uncentered; slightly cheaper than pca
+    #   - umap           : non-linear, highlights local clusters (~10-100× slower)
+    # backend:   auto | cuml | torch | umap-learn
+    #   - auto (default): cuML on CUDA when available, else torch / umap-learn
+    projection_algorithm: pca
+    projection_backend: auto
+
+  # Clear GPU cache before validation (helps large 3D models at train/val boundary).
+  cuda_empty_cache_before_val: false

@@ -1,0 +1,82 @@
+# Neurons - pinned dependencies
+# Generated from conda env 'brainbow' (Python 3.12.12, CUDA 13.0)
+# Install: pip install -r requirements.txt
+
+# Core deep learning
+--extra-index-url https://download.pytorch.org/whl/cu130
+# torch==2.10.0+cu130
+# torchvision==0.25.0+cu130
+pytorch-lightning==2.6.1
+torchmetrics==1.0.3
+monai==1.5.2
+einops==0.8.2
+
+# GPU acceleration (RAPIDS / CUDA 13 wheels on NVIDIA's index).
+# Enables:
+#   - cuML HDBSCAN / MeanShift in brainbow.inference.clusterer  (val + inference)
+#   - cuML PCA / TruncatedSVD / UMAP in brainbow.utils.manifold  (TB viz)
+#   - cupy-backed EDT / Gaussian / connected components in brainbow.transforms
+#   - pylibcugraph-backed sparse connected_components used by the
+#     spatial_cc clusterer via cupyx.scipy.sparse.csgraph (neither
+#     cuml nor cucim ships a sparse CC; pylibcugraph is the backend
+#     cupyx dispatches to).
+#   - DLPack zero-copy torch <-> cupy <-> cuml interop
+# For CUDA 12 builds replace cu13 -> cu12 and cuda13x -> cuda12x.
+#
+# NOTE: install with `pip`, not `uv pip`.  cupy-cuda13x==14.0.1 pins
+# cuda-pathfinder>=1.3.3,<2.dev0 which uv treats as a pre-release
+# request and refuses by default.  If you must use uv, pass
+# `--prerelease=allow --index-strategy unsafe-best-match`.
+--extra-index-url https://pypi.nvidia.com
+cupy-cuda13x==14.0.1
+cuml-cu13==26.4.0
+pylibcugraph-cu13==26.4.0
+
+# Configuration
+hydra-core==1.3.2
+omegaconf==2.3.0
+
+# Data formats
+h5py==3.15.1
+tifffile==2026.2.16
+pynrrd==1.1.3
+nibabel==5.3.3
+pillow==12.0.0
+cloud-volume>=10.4.0
+
+# Scientific computing
+numpy==2.3.5
+scipy==1.17.0
+scikit-learn==1.8.0
+scikit-image==0.26.0
+
+# Experiment tracking
+wandb==0.25.0
+tensorboard==2.20.0
+
+# Visualization
+matplotlib==3.10.8
+plotly>=5.24.0
+
+# Cosmos-Predict2.5 backbone
+diffusers==0.37.0
+huggingface_hub>=1.6.0
+safetensors==0.7.0
+accelerate==1.13.0
+
+# HTTP / networking
+requests #==2.32.5
+charset-normalizer #==3.4.5
+chardet<6.0.0
+
+# Utilities
+rich==14.3.2
+tqdm==4.66.5
+
+# Dev / testing
+pytest==9.0.2
+pytest-cov==7.0.0
+
+# Notebooks
+ipykernel>=6.29.0
+nbformat==5.10.4

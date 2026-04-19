@@ -1,0 +1,158 @@
+/* ── reset ───────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: #e8e8ec; color: #333; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+
+/* ── 2x2 panel grid ─────────────────────────────────────────────── */
+#viewer {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  height: calc(100vh - 40px);
+  background: #c8c8ce;
+}
+
+.panel {
+  position: relative;
+  overflow: hidden;
+  background: #f0f0f4;
+}
+
+.panel canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+.panel-label {
+  position: absolute;
+  top: 4px;
+  left: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #555;
+  text-shadow: 0 1px 2px rgba(255,255,255,.6);
+  pointer-events: none;
+  z-index: 10;
+  letter-spacing: 0.5px;
+}
+
+.slice-info {
+  color: #2070c0;
+  margin-left: 6px;
+}
+
+/* ── toolbar ─────────────────────────────────────────────────────── */
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 40px;
+  padding: 0 12px;
+  background: #e0e0e6;
+  border-top: 1px solid #c0c0c8;
+  font-size: 12px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  color: #444;
+}
+
+.tb-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+#toolbar input[type="range"] {
+  width: 90px;
+  accent-color: #4080d0;
+}
+
+#toolbar select {
+  background: #fff;
+  color: #333;
+  border: 1px solid #bbb;
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 12px;
+}
+
+#toolbar input[type="checkbox"] {
+  accent-color: #4080d0;
+}
+
+#tb-instance {
+  color: #2060b0;
+  font-weight: 600;
+}
+
+#tb-coord {
+  color: #777;
+  font-family: 'Consolas', 'Courier New', monospace;
+}
+
+#tb-spacing {
+  color: #999;
+  font-family: 'Consolas', 'Courier New', monospace;
+  margin-left: auto;
+}
+
+#btn-clear-cache {
+  background: #fff;
+  color: #777;
+  border: 1px solid #bbb;
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+#btn-clear-cache:hover { color: #d04040; border-color: #d04040; }
+
+/* ── selection chips ────────────────────────────────────────────── */
+#tb-selected {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  max-width: 300px;
+}
+
+.sel-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: #d0ddf0;
+  color: #2060a0;
+  border: 1px solid #a0b8d8;
+  border-radius: 10px;
+  padding: 1px 7px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.sel-chip:hover {
+  background: #b8cce8;
+}
+
+.sel-x {
+  color: #c04040;
+  font-weight: bold;
+  margin-left: 2px;
+}
+
+.sel-clear {
+  color: #c04040;
+  font-size: 10px;
+  cursor: pointer;
+  text-decoration: underline;
+  white-space: nowrap;
+}
+
+.sel-clear:hover {
+  color: #e05050;
+}
