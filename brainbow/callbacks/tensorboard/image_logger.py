@@ -193,7 +193,7 @@ class ImageLogger(pl.Callback):
         labels: torch.Tensor,
         n: int,
     ) -> Optional[torch.Tensor]:
-        """Return the 10-channel brainbow GT target if it should be logged.
+        """Return the 16-channel brainbow GT target if it should be logged.
 
         Gated by:
           * ``weight_brainbow > 0`` on the criterion, AND

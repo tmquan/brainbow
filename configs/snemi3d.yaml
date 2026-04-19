@@ -67,7 +67,7 @@ model:
   in_channels: 1
   num_classes: 16
   instance_channels: 10
-  brainbow_channels: 10
+  brainbow_channels: 16
   feature_size: 64
   variant: "2B"
   dtype: "bf16"
@@ -209,12 +209,15 @@ loss:
 
   # -----------------------------------------------------------------
   # Brainbow head -- per-instance (min, avg, max) RGB colouring +
-  # per-voxel raw-intensity reconstruction (10 channels).
+  # per-voxel raw-intensity reconstruction + 6 face-affinity channels
+  # (16 channels total).
   # Channel layout (see brainbow/losses/brainbow.py):
   #   ch 0      := raw  (raw image intensity, per voxel)
   #   ch 1-3    := min  (normalised (z, y, x) of each instance's bbox min)
   #   ch 4-6    := avg  (normalised (z, y, x) centroid)
   #   ch 7-9    := max  (normalised (z, y, x) of each instance's bbox max)
+  #   ch 10-15  := aff  (binary face-affinity to 6 neighbours U/D/L/R/T/B
+  #                      with SAME-pad; supervised via soft-Dice on sigmoid)
   # -----------------------------------------------------------------
   weight_brainbow: 1.0             # head weight; 0 -> brainbow head disabled
   brainbow_loss_loc: smooth_l1     # regression loss for the 9 location channels
@@ -223,4 +226,6 @@ loss:
   brainbow_weight_avg: 1.0         # sub-weight for avg channels (ch 4-6)
   brainbow_weight_max: 1.0         # sub-weight for max channels (ch 7-9)
   brainbow_weight_raw: 1.0         # sub-weight for raw channel  (ch 0)
+  brainbow_weight_aff: 1.0         # sub-weight for affinity soft-Dice (ch 10-15, U/D/L/R/T/B, sigmoid)
   brainbow_foreground_only_loc: true  # apply location loss on foreground voxels only (bg has no instance)
+  brainbow_aff_eps: 1.0            # smoothing term in the soft-Dice denominator

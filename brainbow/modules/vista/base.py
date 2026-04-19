@@ -29,7 +29,7 @@ class BaseVistaModule(BaseCircuitModule):
         return self._model_cls(
             in_channels=model_config.get("in_channels", 1),
             num_classes=model_config.get("num_classes", 16),
-            instance_channels=model_config.get("instance_channels", 16),
+            instance_channels=model_config.get("instance_channels", 10),
             feature_size=model_config.get("feature_size", 64),
             encoder_name=model_config.get("encoder_name", "vista3d"),
             dropout=model_config.get("dropout", 0.0),

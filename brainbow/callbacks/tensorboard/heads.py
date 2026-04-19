@@ -152,17 +152,19 @@ def _log_geometry(
 
     Channel layout matches :class:`brainbow.losses.geometry.GeometryLoss`::
 
-        ch 0                         := raw   (1 channel, grayscale)
-        ch 1 .. 1+S                  := dir   (S channels)
-        ch 1+S .. 1+S + S*(S+1)//2   := cov   (upper-triangle covariance)
+        ch 0                          := raw   (1 channel, grayscale)
+        ch 1 .. 1 + S*(S+1)//2        := cov   (upper-triangle covariance)
+        ch 1 + S*(S+1)//2 .. channels := dir   (S channels)
     """
     if "geometry" not in preds:
         return
     head = ctx.for_head("geometry")
     S = spatial_dims
     ch_raw = 1
-    ch_dir = S
     ch_cov_tri = S * (S + 1) // 2
+    ch_dir = S
+    c_cov_end = ch_raw + ch_cov_tri
+    c_dir_end = c_cov_end + ch_dir
     geom = _to_2d(preds["geometry"][:n])
     if sem_ids is not None:
         fg_mask_pred = (sem_ids > 0).long()
@@ -172,14 +174,14 @@ def _log_geometry(
     g_raw = geom[:, :ch_raw].clamp(0.0, 1.0)
     g_raw_rgb = repeat(g_raw, "b 1 h w -> b 3 h w")
 
-    g_dir_rgb = _render_dir_quiver(
-        geom[:, ch_raw:ch_raw + ch_dir], img_gray, fg_mask_pred, S,
-        dir_target=dir_target,
-    )
-
-    cov_tri = geom[:, ch_raw + ch_dir:ch_raw + ch_dir + ch_cov_tri]
+    cov_tri = geom[:, ch_raw:c_cov_end]
     cov_mat = upper_tri_channels_to_matrix(cov_tri, S)
     g_cov_rgb = _render_cov_glyphs(cov_mat, img_gray, fg_mask_pred, S)
+
+    g_dir_rgb = _render_dir_quiver(
+        geom[:, c_cov_end:c_dir_end], img_gray, fg_mask_pred, S,
+        dir_target=dir_target,
+    )
 
     tb.add_images(head.tag("raw"), g_raw_rgb, global_step=epoch)
     tb.add_images(head.tag(f"dir_{dir_target}"), g_dir_rgb, global_step=epoch)
@@ -195,27 +197,32 @@ def _log_brainbow(
     *,
     brainbow_target: Optional[torch.Tensor] = None,
 ) -> None:
-    """Log the 4 brainbow panels under ``{stage}/{mode}/brainbow/``.
+    """Log the brainbow panels under ``{stage}/{mode}/brainbow/``.
 
-    Layout of the 10-channel brainbow prediction / target:
-      - ch 0    : ``raw`` (dense, fg + bg; logged as grayscale)
-      - ch 1-3  : ``min`` RGB (foreground-only; zero on background)
-      - ch 4-6  : ``avg`` RGB
-      - ch 7-9  : ``max`` RGB
+    Layout of the 16-channel brainbow prediction / target:
+      - ch 0     : ``raw`` (dense, fg + bg; logged as grayscale)
+      - ch 1-3   : ``min`` RGB (foreground-only; zero on background)
+      - ch 4-6   : ``avg`` RGB
+      - ch 7-9   : ``max`` RGB
+      - ch 10-15 : ``aff`` (U / D / L / R / T / B face affinities; grayscale)
 
-    Panels are written under ``brainbow/pred/*`` and, when
-    ``brainbow_target`` is supplied, also under ``brainbow/gt/*`` so
-    the model output and its supervision signal can be compared
-    side-by-side in TensorBoard.
+    Predictions are raw logits; the affinity channels are passed through
+    sigmoid before visualisation.  Panels are written under
+    ``brainbow/pred/*`` and, when ``brainbow_target`` is supplied, also
+    under ``brainbow/gt/*`` so the model output and its supervision
+    signal can be compared side-by-side in TensorBoard.
     """
     if "brainbow" not in preds:
         return
     head = ctx.for_head("brainbow")
-    bb_pred = _to_2d(preds["brainbow"][:n]).clamp(0.0, 1.0)
-    _add_brainbow_panels(tb, head, "pred", bb_pred, epoch)
+    bb_pred = _to_2d(preds["brainbow"][:n])
+    _add_brainbow_panels(tb, head, "pred", bb_pred, epoch, is_pred=True)
     if brainbow_target is not None:
-        bb_gt = _to_2d(brainbow_target[:n]).clamp(0.0, 1.0)
-        _add_brainbow_panels(tb, head, "gt", bb_gt, epoch)
+        bb_gt = _to_2d(brainbow_target[:n])
+        _add_brainbow_panels(tb, head, "gt", bb_gt, epoch, is_pred=False)
+
+
+_AFF_TAG_NAMES: Tuple[str, ...] = ("u", "d", "l", "r", "t", "b")
 
 
 def _add_brainbow_panels(
@@ -224,25 +231,40 @@ def _add_brainbow_panels(
     variant: str,
     bb: torch.Tensor,
     epoch: int,
+    *,
+    is_pred: bool,
 ) -> None:
-    """Split a ``[n, 10, H, W]`` brainbow tensor into its 4 sub-panels.
+    """Split a ``[n, 16, H, W]`` brainbow tensor into its sub-panels.
 
     Args:
         tb: TensorBoard SummaryWriter.
         head: ``TagContext`` for the brainbow head (i.e. ``ctx.for_head("brainbow")``).
         variant: ``"pred"`` or ``"gt"``.  Becomes the next tag segment.
-        bb: ``[n, 10, H, W]`` brainbow map (already 2-D sliced and
-            clamped to ``[0, 1]``).
+        bb: ``[n, 16, H, W]`` brainbow map (already 2-D sliced).  For
+            predictions this is raw logits (sigmoid is applied below
+            for the affinity channels); for the ground-truth target it
+            is the ``[0, 1]``-valued target tensor.
         epoch: global step for TensorBoard.
+        is_pred: ``True`` when ``bb`` comes from the model (logits),
+            ``False`` when it is the ground-truth target tensor.
     """
-    raw = repeat(bb[:, 0:1], "b 1 h w -> b 3 h w")
-    mn = bb[:, 1:4]
-    av = bb[:, 4:7]
-    mx = bb[:, 7:10]
+    raw = repeat(bb[:, 0:1].clamp(0.0, 1.0), "b 1 h w -> b 3 h w")
+    mn = bb[:, 1:4].clamp(0.0, 1.0)
+    av = bb[:, 4:7].clamp(0.0, 1.0)
+    mx = bb[:, 7:10].clamp(0.0, 1.0)
     tb.add_images(head.tag(f"{variant}/raw"), raw, global_step=epoch)
     tb.add_images(head.tag(f"{variant}/min"), mn, global_step=epoch)
     tb.add_images(head.tag(f"{variant}/avg"), av, global_step=epoch)
     tb.add_images(head.tag(f"{variant}/max"), mx, global_step=epoch)
+
+    aff = bb[:, 10:16]
+    if is_pred:
+        aff = aff.sigmoid()
+    else:
+        aff = aff.clamp(0.0, 1.0)
+    for k, name in enumerate(_AFF_TAG_NAMES):
+        panel = repeat(aff[:, k:k + 1], "b 1 h w -> b 3 h w")
+        tb.add_images(head.tag(f"{variant}/aff/{name}"), panel, global_step=epoch)
 
 
 def _log_predictions(
@@ -280,7 +302,9 @@ def _log_predictions(
         {ctx.prefix}/geometry/cov
         {ctx.prefix}/geometry/raw
         {ctx.prefix}/brainbow/pred/{raw,min,avg,max}
-        {ctx.prefix}/brainbow/gt/{raw,min,avg,max}  (if target)
+        {ctx.prefix}/brainbow/pred/aff/{u,d,l,r,t,b}
+        {ctx.prefix}/brainbow/gt/{raw,min,avg,max}       (if target)
+        {ctx.prefix}/brainbow/gt/aff/{u,d,l,r,t,b}       (if target)
 
     Args:
         tb: TensorBoard SummaryWriter.
@@ -300,7 +324,7 @@ def _log_predictions(
             panel.  One of ``"pca"`` (default), ``"svd"``, ``"umap"``.
         projection_backend: Backend for the projection.  ``"auto"`` picks
             cuML on CUDA, else a CPU fallback.  ``"cuml"`` forces GPU.
-        brainbow_target: optional ``[n, 10, D, H, W]`` ground-truth map
+        brainbow_target: optional ``[n, 16, D, H, W]`` ground-truth map
             to log alongside the brainbow prediction.
 
     Returns:

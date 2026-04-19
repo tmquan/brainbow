@@ -1,5 +1,5 @@
 # Brainbow Configuration
-# Trains CosmosTransfer3D with the 10-channel Brainbow head active on
+# Trains CosmosTransfer3D with the 16-channel Brainbow head active on
 # the combined SNEMI3D + neurons + MICrONS dataset (see combine.yaml).
 #
 # The target map is built on-the-fly from the label volume + raw image:
@@ -7,6 +7,8 @@
 #   - 3 RGB channels  := normalised min  (bbox-min (z, y, x)) / (D, H, W)
 #   - 3 RGB channels  := normalised avg  (centroid) / (D, H, W)
 #   - 3 RGB channels  := normalised max  (bbox-max (z, y, x)) / (D, H, W)
+#   - 6 aff  channels := binary face-affinity to 6 neighbours (U,D,L,R,T,B)
+#                         with SAME-pad (boundary voxels self-connected).
 #
 # Usage:
 #   python scripts/train.py --config-name brainbow
@@ -35,4 +37,6 @@ loss:
   brainbow_weight_avg: 1.0
   brainbow_weight_max: 1.0
   brainbow_weight_raw: 1.0
+  brainbow_weight_aff: 1.0
   brainbow_foreground_only_loc: true
+  brainbow_aff_eps: 1.0

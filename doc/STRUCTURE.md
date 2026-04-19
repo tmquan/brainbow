@@ -120,8 +120,8 @@ All task losses follow a uniform skeleton (see `ORGANIZATION.md` §5).
 | `_common.py`    | Shared regression-loss name resolution (`l1` / `mse` / `smooth_l1` + aliases). |
 | `semantic.py`   | `SemanticLoss` — CE + IoU + Dice (sigmoid or softmax mode).                    |
 | `instance.py`   | `InstanceLoss` — pull / push / norm discriminative embedding loss.             |
-| `geometry.py`   | `GeometryLoss` — raw(1) + dir(S) + cov upper-tri(S·(S+1)/2) regression.        |
-| `brainbow.py`   | `BrainbowLoss` — 10-ch target: raw(1) + per-instance min/avg/max RGB(3+3+3).  |
+| `geometry.py`   | `GeometryLoss` — raw(1) + cov upper-tri(S·(S+1)/2) + dir(S) regression.        |
+| `brainbow.py`   | `BrainbowLoss` — 16-ch target: raw(1) + min/avg/max RGB(9) + face-affinity(6, soft-Dice on sigmoid). |
 | `combined.py`   | `CombinedLoss` — weighted sum with head-oriented output key hierarchy.         |
 
 ### `brainbow/metrics/` — per-head eval metrics

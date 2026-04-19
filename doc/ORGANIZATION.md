@@ -174,8 +174,8 @@ class <Task>Loss(nn.Module):
 | ------------- | ------------------------------------------------ | --------------- |
 | SemanticLoss  | `loss`, `ce`, `iou`, `dice`                      | `num_classes`   |
 | InstanceLoss  | `loss`, `pull`, `push`, `norm`                   | embedding `E`   |
-| GeometryLoss  | `loss`, `raw`, `dir`, `cov`                      | `1 + S + S*(S+1)//2` |
-| BrainbowLoss  | `loss`, `raw`, `min`, `avg`, `max`               | `10`            |
+| GeometryLoss  | `loss`, `raw`, `cov`, `dir`                      | `1 + S*(S+1)//2 + S` |
+| BrainbowLoss  | `loss`, `raw`, `min`, `avg`, `max`, `aff`        | `16`            |
 
 **Why this matters:**
 
@@ -294,8 +294,11 @@ project-scoped knobs (which heads to enable) go in `brainbow.yaml`.
 Loss-weight blocks are densely commented (see `configs/snemi3d.yaml`
 `loss:` block) so newcomers can learn the loss by reading the config.
 Brainbow-head sub-weights are prefixed (`brainbow_weight_raw`,
-`brainbow_weight_min|avg|max`) to keep them disambiguated from
-GeometryLoss's own `weight_raw` inside `CombinedLoss.__init__`.
+`brainbow_weight_min|avg|max|aff`) to keep them disambiguated from
+GeometryLoss's own `weight_raw` inside `CombinedLoss.__init__`.  The
+``aff`` sub-loss (soft-Dice on sigmoid face-affinity logits for the 6
+neighbours U/D/L/R/T/B) is tuned via `brainbow_weight_aff` and
+`brainbow_aff_eps`.
 
 ---
 

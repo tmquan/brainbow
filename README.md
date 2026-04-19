@@ -8,23 +8,27 @@ Cosmos-Transfer2.5 video-diffusion backbone (DiT + VAE).
 ## What it does
 
 For every connected-component label `> 0` in a volumetric segmentation,
-`brainbow` builds a **10-channel per-voxel target** directly from the
+`brainbow` builds a **16-channel per-voxel target** directly from the
 label volume + raw EM image -- no learnable target parameters:
 
-|   channels  | meaning                                                                |
-|-------------|------------------------------------------------------------------------|
-|    0        | **raw** := raw image intensity at the voxel                            |
-|    1 - 3    | RGB := normalised (z, y, x) of the instance's **min** (bounding-box min) |
-|    4 - 6    | RGB := normalised (z, y, x) of the instance's **avg** (centroid)       |
-|    7 - 9    | RGB := normalised (z, y, x) of the instance's **max** (bounding-box max) |
+|   channels  | meaning                                                                   |
+|-------------|---------------------------------------------------------------------------|
+|    0        | **raw** := raw image intensity at the voxel                               |
+|    1 - 3    | RGB := normalised (z, y, x) of the instance's **min** (bounding-box min)  |
+|    4 - 6    | RGB := normalised (z, y, x) of the instance's **avg** (centroid)          |
+|    7 - 9    | RGB := normalised (z, y, x) of the instance's **max** (bounding-box max)  |
+|   10 - 15   | **aff** := binary face-affinity to 6 neighbours (U, D, L, R, T, B)        |
 
-Each coordinate is divided by the patch dimensions `(D, H, W)` so every
-channel lives in `[0, 1]` regardless of anisotropy or patch size.  The
-target map is computed in a single vectorised pass (no Python loops
-over voxels): SciPy's `find_objects` + `np.bincount` on CPU,
+Each coordinate is divided by the patch dimensions `(D, H, W)` so the
+nine localisation channels live in `[0, 1]` regardless of anisotropy
+or patch size.  The six affinity channels use **SAME / replicate
+padding** at the crop boundary (boundary voxels are self-connected,
+`aff = 1`) so every voxel has a well-defined target without masking.
+The target map is computed in a single vectorised pass (no Python
+loops over voxels): SciPy's `find_objects` + `np.bincount` on CPU,
 `torch.scatter_reduce_` on CUDA.
 
-The model is a `CosmosTransfer3DWrapper` with a dedicated 10-channel
+The model is a `CosmosTransfer3DWrapper` with a dedicated 16-channel
 `"brainbow"` head attached after the shared VAE-decoder refinement
 stack (the existing `semantic`, `instance`, and `geometry` heads remain
 available and can be combined via weighted sums in `CombinedLoss`).
@@ -66,7 +70,7 @@ pip install -e ".[gpu-cu13]" --extra-index-url https://pypi.nvidia.com
 # Plain SNEMI3D run with the standard three-head recipe:
 python scripts/train.py --config-name snemi3d
 
-# Turn on the brainbow head (10-channel instance-colour + raw-value target):
+# Turn on the brainbow head (16-channel: raw + instance-colour + face-affinity):
 python scripts/train.py --config-name brainbow
 
 # DDP, custom batch size:
@@ -85,12 +89,13 @@ loss_fn = BrainbowLoss(
     weight_avg=1.0,
     weight_max=1.0,
     weight_raw=1.0,
+    weight_aff=1.0,          # soft-Dice on sigmoid(face-affinity logits)
     foreground_only_loc=True,
 )
 
-# prediction: [B, 10, D, H, W]  |  labels: [B, D, H, W]  |  image: [B, D, H, W]
+# prediction: [B, 16, D, H, W]  |  labels: [B, D, H, W]  |  image: [B, D, H, W]
 out = loss_fn(prediction, labels, image)
-# out -> {"loss", "min", "avg", "max", "raw"}
+# out -> {"loss", "raw", "min", "avg", "max", "aff"}
 ```
 
 ## Tests

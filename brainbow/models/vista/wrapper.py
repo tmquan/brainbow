@@ -41,7 +41,7 @@ class Vista3DWrapper(nn.Module):
             Set higher than currently needed to leave headroom for
             future class additions without retraining the backbone.
         instance_channels: Per-voxel instance embedding dimensionality
-            (default: 16).
+            (default: 10).
         feature_size: Base feature dimension from backbone (default: 64).
             Set to 48 to load the pretrained MONAI VISTA3D encoder
             cleanly (upstream uses ``init_filters=48``).
@@ -56,20 +56,20 @@ class Vista3DWrapper(nn.Module):
 
     Example:
         >>> model = Vista3DWrapper(
-        ...     in_channels=1, num_classes=16, instance_channels=16,
+        ...     in_channels=1, num_classes=16, instance_channels=10,
         ... )
         >>> x = torch.randn(1, 1, 64, 64, 64)
         >>> out = model(x)
         >>> out['semantic'].shape   # [1, 16, 64, 64, 64]
-        >>> out['instance'].shape   # [1, 16, 64, 64, 64]
-        >>> out['geometry'].shape   # [1, 10, 64, 64, 64]  (raw=1 + dir=3 + cov_tri=6)
+        >>> out['instance'].shape   # [1, 10, 64, 64, 64]
+        >>> out['geometry'].shape   # [1, 10, 64, 64, 64]  (raw=1 + cov_tri=6 + dir=3)
     """
 
     def __init__(
         self,
         in_channels: int = 1,
         num_classes: int = 16,
-        instance_channels: int = 16,
+        instance_channels: int = 10,
         feature_size: int = 64,
         encoder_name: str = "vista3d",
         dropout: float = 0.0,
@@ -90,9 +90,9 @@ class Vista3DWrapper(nn.Module):
         self._pretrained = pretrained
 
         S = _SPATIAL_DIMS
-        # Geometry head layout: raw (1) + dir (S) + cov upper-tri (S*(S+1)/2).
+        # Geometry head layout: raw (1) + cov upper-tri (S*(S+1)/2) + dir (S).
         # Matches BrainbowLoss channel convention with raw at ch 0.
-        self.geom_channels = 1 + S + S * (S + 1) // 2
+        self.geom_channels = 1 + S * (S + 1) // 2 + S
 
         self._build_backbone(encoder_name, **kwargs)
 

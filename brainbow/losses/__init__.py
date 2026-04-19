@@ -4,9 +4,9 @@ Loss functions for connectomics segmentation.
 Standalone task losses:
 - :class:`SemanticLoss`  -- CE + IoU + Dice
 - :class:`InstanceLoss`  -- pull / push / norm
-- :class:`GeometryLoss`  -- dir / cov / raw
-- :class:`BrainbowLoss`  -- 9-channel per-instance (min, avg, max)loc colouring
-                           + 1-channel raw image reconstruction
+- :class:`GeometryLoss`  -- raw / cov / dir (10 channels in 3-D)
+- :class:`BrainbowLoss`  -- 16-channel head: raw(1) + min/avg/max RGB(9)
+                           + 6-channel face-affinity (aff, SAME-pad)
 
 Combined multi-head loss used by every Lightning module:
 - :class:`CombinedLoss`  -- weighted sum of the task losses

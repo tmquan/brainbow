@@ -39,8 +39,8 @@ model:
   type: cosmostransfer3d  # Options: cosmostransfer3d, vista3d
   in_channels: 1
   num_classes: 16
-  instance_channels: 16   # Per-voxel embedding dim for the instance head
-  brainbow_channels: 10   # Fixed by the loss (raw + min/avg/max RGB = 1+3+3+3)
+  instance_channels: 10   # Per-voxel embedding dim for the instance head
+  brainbow_channels: 16   # Fixed by the loss (raw(1) + min/avg/max RGB(9) + aff(6))
   feature_size: 64
   dropout: 0.2
   # If true, the wrapper will auto-pull pretrained weights from HuggingFace

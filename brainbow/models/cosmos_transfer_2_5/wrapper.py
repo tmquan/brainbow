@@ -53,7 +53,7 @@ class CosmosTransfer3DWrapper(nn.Module):
                                      = 1 (raw) + 3 (dir) + 6 (cov upper-tri) = 10
                                      (3-D; layout matches BrainbowLoss ch 0 = raw)
     - ``brainbow``  [B, brainbow_channels, D, H, W]
-      (9 localisation + 1 raw-intensity channel by default)
+      (1 raw + 9 min/avg/max RGB + 6 face-affinity by default = 16)
 
     Because Cosmos-Transfer2.5 is natively a video model, the depth axis
     of the EM volume is mapped to the temporal axis of the backbone,
@@ -81,16 +81,17 @@ class CosmosTransfer3DWrapper(nn.Module):
         >>> x = torch.randn(1, 1, 32, 64, 64)
         >>> out = model(x)
         >>> out["semantic"].shape   # [1, 16, 32, 64, 64]
-        >>> out["instance"].shape   # [1, 16, 32, 64, 64]
-        >>> out["geometry"].shape   # [1, 10, 32, 64, 64]  (raw=1 + dir=3 + cov_tri=6)
+        >>> out["instance"].shape   # [1, 10, 32, 64, 64]
+        >>> out["geometry"].shape   # [1, 10, 32, 64, 64]  (raw=1 + cov_tri=6 + dir=3)
+        >>> out["brainbow"].shape   # [1, 16, 32, 64, 64]  (raw=1 + RGB=9 + aff=6)
     """
 
     def __init__(
         self,
         in_channels: int = 1,
         num_classes: int = 16,
-        instance_channels: int = 16,
-        brainbow_channels: int = 10,
+        instance_channels: int = 10,
+        brainbow_channels: int = 16,
         feature_size: int = 64,
         variant: str = "2B",
         checkpoint_variant: str = "post-trained",
@@ -127,9 +128,9 @@ class CosmosTransfer3DWrapper(nn.Module):
         self.dropout = dropout
 
         S = _SPATIAL_DIMS
-        # Geometry head layout: raw (1) + dir (S) + cov upper-tri (S*(S+1)/2).
+        # Geometry head layout: raw (1) + cov upper-tri (S*(S+1)/2) + dir (S).
         # Matches BrainbowLoss channel convention with raw at ch 0.
-        self.geom_channels = 1 + S + S * (S + 1) // 2
+        self.geom_channels = 1 + S * (S + 1) // 2 + S
 
         self._dtype = {
             "bf16": torch.bfloat16,

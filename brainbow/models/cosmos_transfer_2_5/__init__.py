@@ -6,12 +6,13 @@ extractor for the four-head volumetric segmentation task:
 
 - **Semantic**: per-voxel class logits  (``num_classes`` channels)
 - **Instance**: per-voxel embedding vectors  (``instance_channels`` channels)
-- **Geometry**: per-voxel raw intensity, direction, and covariance
-  (upper-triangle).  Channel layout mirrors BrainbowLoss: ``ch 0`` = raw,
-  then dir (S channels), then cov upper-triangle (S*(S+1)/2 channels).
-- **Brainbow**: per-voxel raw-intensity + instance colouring regression
-  (``brainbow_channels`` = 10 channels: 1 raw intensity followed by
-  3×RGB for (min/avg/max)loc; see :class:`brainbow.losses.BrainbowLoss`)
+- **Geometry**: per-voxel raw intensity, covariance, and direction.
+  Channel layout mirrors BrainbowLoss: ``ch 0`` = raw, then cov
+  upper-triangle (S*(S+1)/2 channels), then dir (S channels).
+- **Brainbow**: per-voxel raw-intensity + per-instance colouring +
+  face-affinity (``brainbow_channels`` = 16: 1 raw, 9 min/avg/max RGB,
+  6 face-affinity neighbours (U/D/L/R/T/B); see
+  :class:`brainbow.losses.BrainbowLoss`).
 
 Cosmos-Transfer2.5 is natively a video model with temporal + spatial
 dimensions.  For volumetric EM data the depth axis maps directly to the
