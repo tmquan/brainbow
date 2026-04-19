@@ -91,7 +91,7 @@ class Vista3DWrapper(nn.Module):
 
         S = _SPATIAL_DIMS
         # Geometry head layout: raw (1) + dir (S) + cov upper-tri (S*(S+1)/2).
-        # Matches BrainbowLoss channel convention with rawval at ch 0.
+        # Matches BrainbowLoss channel convention with raw at ch 0.
         self.geom_channels = 1 + S + S * (S + 1) // 2
 
         self._build_backbone(encoder_name, **kwargs)

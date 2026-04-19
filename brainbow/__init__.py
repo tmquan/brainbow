@@ -9,10 +9,10 @@ Provides:
   segmentation, together with a Vista3D reference implementation
 - A ``BrainbowLoss`` that turns each connected-component instance into
   a 10-channel per-voxel target:
-    * 1 channel   -- *rawval*, the raw image intensity at that voxel
-    * 3 channels  -- RGB of the instance's bounding-box *minloc*
-    * 3 channels  -- RGB of the instance's centroid / *avgloc*
-    * 3 channels  -- RGB of the instance's bounding-box *maxloc*
+    * 1 channel   -- *raw*, the raw image intensity at that voxel
+    * 3 channels  -- RGB of the instance's bounding-box *min* location
+    * 3 channels  -- RGB of the instance's centroid (*avg* location)
+    * 3 channels  -- RGB of the instance's bounding-box *max* location
 """
 
 import warnings

@@ -33,7 +33,7 @@ class ImageLogger(pl.Callback):
         {stage}/automatic/instance/{pca|svd|umap}
         {stage}/automatic/instance/prediction
         {stage}/automatic/geometry/{dir_centroid|cov|raw}
-        {stage}/automatic/brainbow/{pred,gt}/{rawval,minloc,avgloc,maxloc}
+        {stage}/automatic/brainbow/{pred,gt}/{raw,min,avg,max}
 
     This matches the scalar hierarchy emitted by
     :class:`brainbow.modules.base.BaseCircuitModule`

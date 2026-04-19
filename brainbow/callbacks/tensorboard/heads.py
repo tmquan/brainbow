@@ -198,10 +198,10 @@ def _log_brainbow(
     """Log the 4 brainbow panels under ``{stage}/{mode}/brainbow/``.
 
     Layout of the 10-channel brainbow prediction / target:
-      - ch 0    : ``rawval`` (dense, fg + bg; logged as grayscale)
-      - ch 1-3  : ``minloc`` RGB (foreground-only; zero on background)
-      - ch 4-6  : ``avgloc`` RGB
-      - ch 7-9  : ``maxloc`` RGB
+      - ch 0    : ``raw`` (dense, fg + bg; logged as grayscale)
+      - ch 1-3  : ``min`` RGB (foreground-only; zero on background)
+      - ch 4-6  : ``avg`` RGB
+      - ch 7-9  : ``max`` RGB
 
     Panels are written under ``brainbow/pred/*`` and, when
     ``brainbow_target`` is supplied, also under ``brainbow/gt/*`` so
@@ -235,14 +235,14 @@ def _add_brainbow_panels(
             clamped to ``[0, 1]``).
         epoch: global step for TensorBoard.
     """
-    rawval = repeat(bb[:, 0:1], "b 1 h w -> b 3 h w")
-    minloc = bb[:, 1:4]
-    avgloc = bb[:, 4:7]
-    maxloc = bb[:, 7:10]
-    tb.add_images(head.tag(f"{variant}/rawval"), rawval, global_step=epoch)
-    tb.add_images(head.tag(f"{variant}/minloc"), minloc, global_step=epoch)
-    tb.add_images(head.tag(f"{variant}/avgloc"), avgloc, global_step=epoch)
-    tb.add_images(head.tag(f"{variant}/maxloc"), maxloc, global_step=epoch)
+    raw = repeat(bb[:, 0:1], "b 1 h w -> b 3 h w")
+    mn = bb[:, 1:4]
+    av = bb[:, 4:7]
+    mx = bb[:, 7:10]
+    tb.add_images(head.tag(f"{variant}/raw"), raw, global_step=epoch)
+    tb.add_images(head.tag(f"{variant}/min"), mn, global_step=epoch)
+    tb.add_images(head.tag(f"{variant}/avg"), av, global_step=epoch)
+    tb.add_images(head.tag(f"{variant}/max"), mx, global_step=epoch)
 
 
 def _log_predictions(
@@ -279,8 +279,8 @@ def _log_predictions(
         {ctx.prefix}/geometry/dir_{centroid|skeleton}
         {ctx.prefix}/geometry/cov
         {ctx.prefix}/geometry/raw
-        {ctx.prefix}/brainbow/pred/{rawval,minloc,avgloc,maxloc}
-        {ctx.prefix}/brainbow/gt/{rawval,minloc,avgloc,maxloc}  (if target)
+        {ctx.prefix}/brainbow/pred/{raw,min,avg,max}
+        {ctx.prefix}/brainbow/gt/{raw,min,avg,max}  (if target)
 
     Args:
         tb: TensorBoard SummaryWriter.

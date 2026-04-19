@@ -76,13 +76,15 @@ class CombinedLoss(nn.Module):
         max_hard_pairs: int = 0,
         anchor_to_centroid: bool = False,
         centroid_scale: float = 5.0,
-        # BrainbowLoss kwargs
+        # BrainbowLoss kwargs (prefixed with ``brainbow_`` because
+        # ``weight_raw`` would otherwise collide with GeometryLoss's
+        # ``weight_raw`` when both heads are active).
         brainbow_loss_loc: str = "smooth_l1",
         brainbow_loss_raw: str = "l1",
-        weight_minloc: float = 1.0,
-        weight_avgloc: float = 1.0,
-        weight_maxloc: float = 1.0,
-        weight_rawval: float = 1.0,
+        brainbow_weight_min: float = 1.0,
+        brainbow_weight_avg: float = 1.0,
+        brainbow_weight_max: float = 1.0,
+        brainbow_weight_raw: float = 1.0,
         brainbow_foreground_only_loc: bool = True,
         # GeometryLoss kwargs (forwarded via **geom_kwargs)
         **geom_kwargs,
@@ -144,10 +146,10 @@ class CombinedLoss(nn.Module):
             BrainbowLoss(
                 loss_loc=brainbow_loss_loc,
                 loss_raw=brainbow_loss_raw,
-                weight_minloc=weight_minloc,
-                weight_avgloc=weight_avgloc,
-                weight_maxloc=weight_maxloc,
-                weight_rawval=weight_rawval,
+                weight_min=brainbow_weight_min,
+                weight_avg=brainbow_weight_avg,
+                weight_max=brainbow_weight_max,
+                weight_raw=brainbow_weight_raw,
                 foreground_only_loc=brainbow_foreground_only_loc,
             )
             if weight_brainbow > 0 else None
@@ -247,8 +249,8 @@ class CombinedLoss(nn.Module):
             bbow = self.brainbow_loss(predictions["brainbow"], labels, raw_image)
         else:
             bbow = {
-                "loss": zero, "minloc": zero, "avgloc": zero,
-                "maxloc": zero, "rawval": zero,
+                "loss": zero, "min": zero, "avg": zero,
+                "max": zero, "raw": zero,
             }
 
         # Total
@@ -294,10 +296,10 @@ class CombinedLoss(nn.Module):
 
         if self.brainbow_loss is not None:
             out["brainbow/loss"] = bbow["loss"]
-            out["brainbow/loss/minloc"] = bbow["minloc"]
-            out["brainbow/loss/avgloc"] = bbow["avgloc"]
-            out["brainbow/loss/maxloc"] = bbow["maxloc"]
-            out["brainbow/loss/rawval"] = bbow["rawval"]
+            out["brainbow/loss/min"] = bbow["min"]
+            out["brainbow/loss/avg"] = bbow["avg"]
+            out["brainbow/loss/max"] = bbow["max"]
+            out["brainbow/loss/raw"] = bbow["raw"]
 
         if self.learned_task_weights:
             if self.weight_semantic > 0:

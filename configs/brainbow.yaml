@@ -4,9 +4,9 @@
 #
 # The target map is built on-the-fly from the label volume + raw image:
 #   - 1 channel       := raw image intensity
-#   - 3 RGB channels  := normalised minloc  (z, y, x) / (D, H, W)
-#   - 3 RGB channels  := normalised avgloc  (centroid) / (D, H, W)
-#   - 3 RGB channels  := normalised maxloc  / (D, H, W)
+#   - 3 RGB channels  := normalised min  (bbox-min (z, y, x)) / (D, H, W)
+#   - 3 RGB channels  := normalised avg  (centroid) / (D, H, W)
+#   - 3 RGB channels  := normalised max  (bbox-max (z, y, x)) / (D, H, W)
 #
 # Usage:
 #   python scripts/train.py --config-name brainbow
@@ -31,8 +31,8 @@ loss:
   weight_brainbow: 1.0
   brainbow_loss_loc: smooth_l1
   brainbow_loss_raw: l1
-  weight_minloc: 1.0
-  weight_avgloc: 1.0
-  weight_maxloc: 1.0
-  weight_rawval: 1.0
+  brainbow_weight_min: 1.0
+  brainbow_weight_avg: 1.0
+  brainbow_weight_max: 1.0
+  brainbow_weight_raw: 1.0
   brainbow_foreground_only_loc: true

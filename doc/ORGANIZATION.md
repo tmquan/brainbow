@@ -175,7 +175,7 @@ class <Task>Loss(nn.Module):
 | SemanticLoss  | `loss`, `ce`, `iou`, `dice`                      | `num_classes`   |
 | InstanceLoss  | `loss`, `pull`, `push`, `norm`                   | embedding `E`   |
 | GeometryLoss  | `loss`, `raw`, `dir`, `cov`                      | `1 + S + S*(S+1)//2` |
-| BrainbowLoss  | `loss`, `rawval`, `minloc`, `avgloc`, `maxloc`   | `10`            |
+| BrainbowLoss  | `loss`, `raw`, `min`, `avg`, `max`               | `10`            |
 
 **Why this matters:**
 
@@ -267,29 +267,35 @@ the **only** place tag strings are assembled.
 
 ## 9. Hydra configuration layering
 
-Configs compose via Hydra's `defaults:` list:
+Configs compose via Hydra's `defaults:` list.  Each file's `defaults:`
+pulls in one parent; the effective config is the parent's merged with
+the child's overrides.  The real chain (parent → child) is::
 
-```
-default.yaml  ←  snemi3d.yaml  ←  brainbow.yaml  ←  combine.yaml
-```
+    default.yaml  →  snemi3d.yaml  →  combine.yaml  →  brainbow.yaml
 
-- `default.yaml`: every knob with a sensible default.
-- `snemi3d.yaml` / `microns.yaml` / `neurons.yaml`: per-dataset overrides
-  (volume list, resolution, pixel size).  Also the canonical home for
-  **shared model / loss hyperparameters** (e.g. `brainbow_channels`).
-- `combine.yaml`: multi-dataset training (volume lists from multiple
-  sources).
-- `brainbow.yaml`: project-level entry point that picks which base
-  config to inherit from.
+- `default.yaml`: every knob with a sensible default.  Also the
+  canonical home for **shared model / loss hyperparameters**
+  (e.g. `model.brainbow_channels`).
+- `snemi3d.yaml`: SNEMI3D volume list + per-dataset training overrides
+  (batch size, augmentation mix, dense `loss:` block whose comments
+  document every head and sub-weight).
+- `combine.yaml`: extends `snemi3d.yaml` with the full multi-dataset
+  volume list (SNEMI3D + neurons + MICrONS) and the harmonising
+  `resolution_zoom_*` knobs.
+- `brainbow.yaml`: project-level entry point.  Inherits from
+  `combine.yaml` and flips the loss weights so only the Brainbow head
+  is active.
 
 **Convention:** a parameter lives in the *most general* config where
-it's meaningful.  Model hyperparameters that don't depend on the
-dataset go in `default.yaml`; parameters shared by "every SNEMI-style
-experiment" go in `snemi3d.yaml`; parameters that change per project
-go in `brainbow.yaml`.
+it's meaningful.  Things that don't depend on the dataset go in
+`default.yaml`; dataset-scoped overrides go in the dataset config;
+project-scoped knobs (which heads to enable) go in `brainbow.yaml`.
 
 Loss-weight blocks are densely commented (see `configs/snemi3d.yaml`
 `loss:` block) so newcomers can learn the loss by reading the config.
+Brainbow-head sub-weights are prefixed (`brainbow_weight_raw`,
+`brainbow_weight_min|avg|max`) to keep them disambiguated from
+GeometryLoss's own `weight_raw` inside `CombinedLoss.__init__`.
 
 ---
 

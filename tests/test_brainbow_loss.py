@@ -3,9 +3,9 @@ Tests for BrainbowLoss and its 10-channel target construction.
 
 The target map encodes, per voxel:
   - channel  0   : raw image intensity at that voxel (dense, everywhere)
-  - channels 1-3 : normalised minloc (z, y, x) of the instance
-  - channels 4-6 : normalised avgloc (centroid) of the instance
-  - channels 7-9 : normalised maxloc (z, y, x) of the instance
+  - channels 1-3 : normalised min (bbox-min (z, y, x)) of the instance
+  - channels 4-6 : normalised avg (centroid) of the instance
+  - channels 7-9 : normalised max (bbox-max (z, y, x)) of the instance
 """
 
 import numpy as np
@@ -40,7 +40,7 @@ class TestBuildBrainbowTarget:
         assert target.shape == (1, 10, 8, 16, 16)
         assert target.dtype == torch.float32
 
-    def test_rawval_equals_image(self) -> None:
+    def test_raw_equals_image(self) -> None:
         labels, image = self._simple_labels()
         target = build_brainbow_target(labels, image)
         assert torch.allclose(target[:, 0], image.float())
@@ -85,7 +85,7 @@ class TestBuildBrainbowTarget:
             got = target[0, 4:7][:, fg][:, 0]
             assert torch.allclose(got, expected, atol=1e-6)
 
-    def test_empty_labels_only_rawval_contributes(self) -> None:
+    def test_empty_labels_only_raw_contributes(self) -> None:
         B, D, H, W = 1, 4, 4, 4
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
         image = torch.rand(B, D, H, W)
@@ -139,7 +139,7 @@ class TestBrainbowLoss:
     def test_forward_returns_required_keys(self, batch) -> None:
         pred, labels, image = batch
         out = BrainbowLoss()(pred, labels, image)
-        for k in ("loss", "minloc", "avgloc", "maxloc", "rawval"):
+        for k in ("loss", "min", "avg", "max", "raw"):
             assert k in out
 
     def test_loss_is_finite_and_non_negative(self, batch) -> None:
@@ -156,30 +156,30 @@ class TestBrainbowLoss:
         assert pred.grad is not None
         assert pred.grad.abs().sum() > 0
 
-    def test_zero_instances_only_rawval(self, batch) -> None:
+    def test_zero_instances_only_raw(self, batch) -> None:
         pred, _, image = batch
         B, D, H, W = image.shape
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
         out = BrainbowLoss()(pred, labels, image)
-        assert out["minloc"].item() == 0.0
-        assert out["avgloc"].item() == 0.0
-        assert out["maxloc"].item() == 0.0
-        assert out["rawval"].item() > 0.0
+        assert out["min"].item() == 0.0
+        assert out["avg"].item() == 0.0
+        assert out["max"].item() == 0.0
+        assert out["raw"].item() > 0.0
 
     def test_weights_applied_to_total(self, batch) -> None:
         pred, labels, image = batch
         uniform = BrainbowLoss(
-            weight_minloc=1.0, weight_avgloc=1.0,
-            weight_maxloc=1.0, weight_rawval=1.0,
+            weight_min=1.0, weight_avg=1.0,
+            weight_max=1.0, weight_raw=1.0,
         )(pred, labels, image)
         only_raw = BrainbowLoss(
-            weight_minloc=0.0, weight_avgloc=0.0,
-            weight_maxloc=0.0, weight_rawval=1.0,
+            weight_min=0.0, weight_avg=0.0,
+            weight_max=0.0, weight_raw=1.0,
         )(pred, labels, image)
-        # "only_raw" has exactly loss == rawval; uniform has the extra
+        # "only_raw" has exactly loss == raw; uniform has the extra
         # localisation terms, so it must be at least as large.
         assert only_raw["loss"].item() == pytest.approx(
-            only_raw["rawval"].item(), rel=1e-6
+            only_raw["raw"].item(), rel=1e-6
         )
         assert uniform["loss"].item() >= only_raw["loss"].item() - 1e-6
 
@@ -232,8 +232,8 @@ class TestBrainbowInCombinedLoss:
         for k in (
             "loss",
             "brainbow/loss",
-            "brainbow/loss/minloc",
-            "brainbow/loss/rawval",
+            "brainbow/loss/min",
+            "brainbow/loss/raw",
         ):
             assert k in out
         out["loss"].backward()

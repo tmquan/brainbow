@@ -15,7 +15,7 @@ where
 * ``head``   -- ``"semantic"`` | ``"instance"`` | ``"geometry"`` |
   ``"brainbow"``, omitted for mode-level panels (``image``, ``label``)
 * ``panel``  -- head-specific sub-tag (e.g. ``prediction``, ``pca``,
-  ``dir_centroid``, ``pred/rawval``)
+  ``dir_centroid``, ``pred/raw``)
 
 The scalar logs emitted by
 :class:`brainbow.modules.base.BaseCircuitModule` use the same

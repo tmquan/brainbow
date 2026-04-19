@@ -51,7 +51,7 @@ class CosmosTransfer3DWrapper(nn.Module):
     - ``instance``  [B, instance_channels, D, H, W]
     - ``geometry``  [B, G, D, H, W]  where G = 1 + S + S*(S+1)//2
                                      = 1 (raw) + 3 (dir) + 6 (cov upper-tri) = 10
-                                     (3-D; layout matches BrainbowLoss ch 0 = rawval)
+                                     (3-D; layout matches BrainbowLoss ch 0 = raw)
     - ``brainbow``  [B, brainbow_channels, D, H, W]
       (9 localisation + 1 raw-intensity channel by default)
 
@@ -128,7 +128,7 @@ class CosmosTransfer3DWrapper(nn.Module):
 
         S = _SPATIAL_DIMS
         # Geometry head layout: raw (1) + dir (S) + cov upper-tri (S*(S+1)/2).
-        # Matches BrainbowLoss channel convention with rawval at ch 0.
+        # Matches BrainbowLoss channel convention with raw at ch 0.
         self.geom_channels = 1 + S + S * (S + 1) // 2
 
         self._dtype = {

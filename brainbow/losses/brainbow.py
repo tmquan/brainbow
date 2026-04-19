@@ -8,10 +8,10 @@ image statistics -- no learnable parameters:
   ====  =====================================================
   ch    meaning
   ====  =====================================================
-  0     *rawval*  := raw (normalised) image intensity at that voxel
-  1-3   R,G,B     := normalised  z,y,x  of the instance's **minloc**
-  4-6   R,G,B     := normalised  z,y,x  of the instance's **avgloc** (centroid)
-  7-9   R,G,B     := normalised  z,y,x  of the instance's **maxloc**
+  0     *raw*  := raw (normalised) image intensity at that voxel
+  1-3   R,G,B  := normalised  z,y,x  of the instance's **min**  (bbox min)
+  4-6   R,G,B  := normalised  z,y,x  of the instance's **avg**  (centroid)
+  7-9   R,G,B  := normalised  z,y,x  of the instance's **max**  (bbox max)
   ====  =====================================================
 
 Normalisation is relative to the **patch size**, so every channel lives
@@ -205,10 +205,10 @@ class BrainbowLoss(nn.Module):
 
     The target map is built on-the-fly from ``labels`` + ``image``:
 
-    - Channel  0:   ``rawval``  (per-voxel raw image intensity)
-    - Channels 1-3: ``minloc``  normalised by (D, H, W)
-    - Channels 4-6: ``avgloc``  (centroid) normalised by (D, H, W)
-    - Channels 7-9: ``maxloc``  normalised by (D, H, W)
+    - Channel  0:   ``raw``  (per-voxel raw image intensity)
+    - Channels 1-3: ``min``  (per-instance bbox-min xyz, normalised by D,H,W)
+    - Channels 4-6: ``avg``  (per-instance centroid, normalised by D,H,W)
+    - Channels 7-9: ``max``  (per-instance bbox-max xyz, normalised by D,H,W)
 
     The 9 localisation channels are foreground-only (background voxels
     are zero) while channel 0 is supervised everywhere.
@@ -216,10 +216,10 @@ class BrainbowLoss(nn.Module):
     Args:
         loss_loc:  Regression loss name for the 9 localisation channels.
         loss_raw:  Regression loss name for the raw-intensity channel.
-        weight_minloc:    Weight of the 3 minloc channels.
-        weight_avgloc:    Weight of the 3 avgloc channels.
-        weight_maxloc:    Weight of the 3 maxloc channels.
-        weight_rawval:    Weight of the raw-intensity channel.
+        weight_min:   Weight of the 3 min-location channels (ch 1-3).
+        weight_avg:   Weight of the 3 avg-location channels (ch 4-6).
+        weight_max:   Weight of the 3 max-location channels (ch 7-9).
+        weight_raw:   Weight of the raw-intensity channel (ch 0).
         foreground_only_loc:  If True, the localisation loss is averaged
             over foreground voxels only (strongly recommended -- the
             target is zero on background, so averaging everywhere would
@@ -233,10 +233,10 @@ class BrainbowLoss(nn.Module):
         self,
         loss_loc: str = "smooth_l1",
         loss_raw: str = "l1",
-        weight_minloc: float = 1.0,
-        weight_avgloc: float = 1.0,
-        weight_maxloc: float = 1.0,
-        weight_rawval: float = 1.0,
+        weight_min: float = 1.0,
+        weight_avg: float = 1.0,
+        weight_max: float = 1.0,
+        weight_raw: float = 1.0,
         foreground_only_loc: bool = True,
     ) -> None:
         super().__init__()
@@ -244,10 +244,10 @@ class BrainbowLoss(nn.Module):
         self.loss_raw = canonical_regression_name(loss_raw)
         self._loss_loc_fn = regression_loss_fn(loss_loc)
         self._loss_raw_fn = regression_loss_fn(loss_raw)
-        self.weight_minloc = float(weight_minloc)
-        self.weight_avgloc = float(weight_avgloc)
-        self.weight_maxloc = float(weight_maxloc)
-        self.weight_rawval = float(weight_rawval)
+        self.weight_min = float(weight_min)
+        self.weight_avg = float(weight_avg)
+        self.weight_max = float(weight_max)
+        self.weight_raw = float(weight_raw)
         self.foreground_only_loc = bool(foreground_only_loc)
 
     @property
@@ -260,7 +260,7 @@ class BrainbowLoss(nn.Module):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def _build_target_rawval(self, image: torch.Tensor) -> torch.Tensor:
+    def _build_target_raw(self, image: torch.Tensor) -> torch.Tensor:
         """Raw-intensity target (ch 0) -- identity on the input image."""
         return rearrange(image.to(torch.float32), "b ... -> b 1 ...")
 
@@ -308,7 +308,7 @@ class BrainbowLoss(nn.Module):
     # Sub-losses
     # ------------------------------------------------------------------
 
-    def _compute_loss_rawval(
+    def _compute_loss_raw(
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
@@ -338,7 +338,7 @@ class BrainbowLoss(nn.Module):
             per_group = reduce(per_voxel, "b (g c) ... -> g", "mean", g=3)
 
         loss_min, loss_avg, loss_max = per_group.unbind(0)
-        return {"minloc": loss_min, "avgloc": loss_avg, "maxloc": loss_max}
+        return {"min": loss_min, "avg": loss_avg, "max": loss_max}
 
     # ------------------------------------------------------------------
     # Forward
@@ -362,8 +362,7 @@ class BrainbowLoss(nn.Module):
                 step otherwise rebuilds it twice (loss + image logger).
 
         Returns:
-            Dict with keys ``loss``, ``minloc``, ``avgloc``, ``maxloc``,
-            ``rawval``.
+            Dict with keys ``loss``, ``raw``, ``min``, ``avg``, ``max``.
         """
         if prediction.shape[1] != _BRAINBOW_CHANNELS:
             raise ValueError(
@@ -381,7 +380,7 @@ class BrainbowLoss(nn.Module):
         )
         target = target.to(dtype=prediction.dtype, device=prediction.device)
 
-        loss_raw = self._compute_loss_rawval(prediction[:, 0], target[:, 0])
+        loss_raw = self._compute_loss_raw(prediction[:, 0], target[:, 0])
         loc_losses = self._compute_loss_loc(
             prediction[:, 1:_BRAINBOW_CHANNELS],
             target[:, 1:_BRAINBOW_CHANNELS],
@@ -389,15 +388,15 @@ class BrainbowLoss(nn.Module):
         )
 
         total = (
-            self.weight_rawval * loss_raw
-            + self.weight_minloc * loc_losses["minloc"]
-            + self.weight_avgloc * loc_losses["avgloc"]
-            + self.weight_maxloc * loc_losses["maxloc"]
+            self.weight_raw * loss_raw
+            + self.weight_min * loc_losses["min"]
+            + self.weight_avg * loc_losses["avg"]
+            + self.weight_max * loc_losses["max"]
         )
 
         return {
             "loss": total,
-            "rawval": loss_raw,
+            "raw": loss_raw,
             **loc_losses,
         }
 
@@ -406,9 +405,9 @@ class BrainbowLoss(nn.Module):
             f"{self.__class__.__name__}("
             f"channels={self.task_channels}, "
             f"loss_loc='{self.loss_loc}', loss_raw='{self.loss_raw}', "
-            f"weight_rawval={self.weight_rawval}, "
-            f"weight_minloc={self.weight_minloc}, "
-            f"weight_avgloc={self.weight_avgloc}, "
-            f"weight_maxloc={self.weight_maxloc}, "
+            f"weight_raw={self.weight_raw}, "
+            f"weight_min={self.weight_min}, "
+            f"weight_avg={self.weight_avg}, "
+            f"weight_max={self.weight_max}, "
             f"foreground_only_loc={self.foreground_only_loc})"
         )

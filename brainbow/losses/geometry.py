@@ -4,7 +4,7 @@ Geometry head regression loss: raw + direction + covariance.
 Dimension-agnostic -- parameterized by ``spatial_dims``.
 
 Channel layout (deliberately aligned with :class:`BrainbowLoss`, whose
-``ch 0`` is also ``rawval``)::
+``ch 0`` is also ``raw``)::
 
     ch 0                          := raw  (image intensity, dense)
     ch 1 .. 1+S                   := dir  (unit direction vectors, FG-only)

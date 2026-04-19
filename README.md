@@ -13,10 +13,10 @@ label volume + raw EM image -- no learnable target parameters:
 
 |   channels  | meaning                                                                |
 |-------------|------------------------------------------------------------------------|
-|    0        | **rawval** := raw image intensity at the voxel                         |
-|    1 - 3    | RGB := normalised (z, y, x) of the instance's **minloc** (bounding-box min) |
-|    4 - 6    | RGB := normalised (z, y, x) of the instance's **avgloc** (centroid)    |
-|    7 - 9    | RGB := normalised (z, y, x) of the instance's **maxloc** (bounding-box max) |
+|    0        | **raw** := raw image intensity at the voxel                            |
+|    1 - 3    | RGB := normalised (z, y, x) of the instance's **min** (bounding-box min) |
+|    4 - 6    | RGB := normalised (z, y, x) of the instance's **avg** (centroid)       |
+|    7 - 9    | RGB := normalised (z, y, x) of the instance's **max** (bounding-box max) |
 
 Each coordinate is divided by the patch dimensions `(D, H, W)` so every
 channel lives in `[0, 1]` regardless of anisotropy or patch size.  The
@@ -80,17 +80,17 @@ from brainbow.losses import BrainbowLoss, build_brainbow_target
 
 loss_fn = BrainbowLoss(
     loss_loc="smooth_l1",    # regression loss on the 9 localisation channels
-    loss_raw="l1",           # regression loss on channel 9 (raw intensity)
-    weight_minloc=1.0,
-    weight_avgloc=1.0,
-    weight_maxloc=1.0,
-    weight_rawval=1.0,
+    loss_raw="l1",           # regression loss on channel 0 (raw intensity)
+    weight_min=1.0,
+    weight_avg=1.0,
+    weight_max=1.0,
+    weight_raw=1.0,
     foreground_only_loc=True,
 )
 
 # prediction: [B, 10, D, H, W]  |  labels: [B, D, H, W]  |  image: [B, D, H, W]
 out = loss_fn(prediction, labels, image)
-# out -> {"loss", "minloc", "avgloc", "maxloc", "rawval"}
+# out -> {"loss", "min", "avg", "max", "raw"}
 ```
 
 ## Tests
