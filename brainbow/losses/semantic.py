@@ -200,30 +200,36 @@ class SemanticLoss(nn.Module):
         """Masked binary cross-entropy on per-voxel probabilities.
 
         Operates on already-sliced inputs -- caller must have run
-        :meth:`_slice_active` first.  Uses :func:`F.binary_cross_entropy`
-        on probabilities (the model wrapper has already applied sigmoid),
-        and clamps the input to ``[eps, 1 - eps]`` to keep ``log(p)``
-        finite at the boundaries.
+        :meth:`_slice_active` first.  Computes BCE on probabilities (the
+        model wrapper has already applied sigmoid) and clamps the input
+        to ``[eps, 1 - eps]`` so ``log(p)`` stays finite at the
+        boundaries.
+
+        Numerical note: under ``bf16-mixed`` autocast, ``1 - p`` rounds
+        to exactly ``0`` whenever ``p > ~0.992`` (bf16 has ~3 decimal
+        digits of mantissa near 1), which would make ``log(1 - p)``
+        return ``-inf`` and nuke the whole step as NaN.  We therefore
+        do the log math in fp32 -- the upcast happens on the clamped
+        probabilities, so the clamp actually has teeth and the loss
+        stays bounded by ``log(eps)`` instead of blowing up.
         """
         target, valid_mask = self._build_target_onehot(probs, class_labels)
 
-        # BCE on probabilities.  Clamp away the log singularities that
-        # ``BCEWithLogitsLoss`` would have absorbed numerically.
         eps = 1e-7
-        p = probs.clamp(eps, 1.0 - eps)
-        per_voxel = -(target * p.log() + (1.0 - target) * (1.0 - p).log())
+        p = probs.float().clamp(eps, 1.0 - eps)
+        t = target.float()
         if self._pos_weight is not None:
             shape = [1, p.shape[1]] + [1] * (p.dim() - 2)
-            pw = self._pos_weight.view(*shape).to(per_voxel.dtype)
+            pw = self._pos_weight.view(*shape).to(p.dtype)
             # ``pos_weight`` re-weights the *positive* term only -- mirrors
             # the semantics of ``BCEWithLogitsLoss(pos_weight=...)`` so
             # configs carry over unchanged.
-            per_voxel = (
-                -(pw * target * p.log() + (1.0 - target) * (1.0 - p).log())
-            )
+            per_voxel = -(pw * t * p.log() + (1.0 - t) * (1.0 - p).log())
+        else:
+            per_voxel = -(t * p.log() + (1.0 - t) * (1.0 - p).log())
 
         if valid_mask is not None:
-            per_voxel = per_voxel * valid_mask
+            per_voxel = per_voxel * valid_mask.to(per_voxel.dtype)
             # Denominator mirrors nn.BCELoss(reduction="mean") but excludes
             # ignore-index voxels.  ``* C`` accounts for the per-voxel sum
             # over channels that BCE reports.

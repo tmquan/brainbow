@@ -542,9 +542,15 @@ class BrainbowLoss(nn.Module):
         zero = pred.new_zeros(())
         out: Dict[str, torch.Tensor] = {"ce": zero, "dice": zero, "iou": zero}
         if self.weight_ce > 0:
+            # BCE log math is numerically fragile under ``bf16-mixed``:
+            # once the wrapper applies sigmoid, near-saturated logits come
+            # out as ``p = 1`` in bf16 (bf16 mantissa is ~3 decimal digits
+            # near 1, so any ``p > ~0.992`` rounds to exactly 1), which
+            # makes ``log(1 - p) = -inf`` and poisons the step to NaN.
+            # Do the log in fp32 so the clamp below actually has teeth.
             eps = 1e-7
-            p = pred.clamp(eps, 1.0 - eps)
-            t = target.to(p.dtype)
+            p = pred.float().clamp(eps, 1.0 - eps)
+            t = target.float()
             if self._aff_pos_weight is not None:
                 pw = self._aff_pos_weight.to(p.dtype)
                 # ``pos_weight`` re-weights the *positive* term only, mirroring
