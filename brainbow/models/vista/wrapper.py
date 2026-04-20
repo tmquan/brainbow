@@ -247,8 +247,12 @@ class Vista3DWrapper(nn.Module):
                 spatial_shape=feat.shape[2:],
             )
 
+        # Semantic head is sigmoid-only (multi-label per-channel binary);
+        # apply the activation here so loss / metrics / tensorboard all
+        # consume probabilities directly -- there is exactly one sigmoid
+        # in the pipeline, and it lives here.
         out: Dict[str, torch.Tensor] = {
-            "semantic": self.head_semantic(feat),
+            "semantic": self.head_semantic(feat).sigmoid(),
             "instance": self.head_instance(feat),
             "geometry": self.head_geometry(feat),
         }

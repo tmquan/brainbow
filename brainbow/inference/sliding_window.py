@@ -165,17 +165,24 @@ def sliding_window_inference(
 
             outputs = model(patches)
 
+            # Brainbow model wrappers apply sigmoid to the semantic head
+            # before returning, so ``outputs["semantic"]`` is already a
+            # tensor of per-channel probabilities -- no extra activation
+            # needed here.  External / legacy models that still return
+            # raw logits under ``"logits"`` go through the softmax path
+            # below.
             if is_dual:
-                sem_logits = outputs["semantic"]
+                sem_probs = outputs["semantic"]
                 ins_emb = outputs["instance"]
             elif isinstance(outputs, dict):
-                sem_logits = outputs.get("logits", outputs.get("semantic"))
+                if "semantic" in outputs:
+                    sem_probs = outputs["semantic"]
+                else:
+                    sem_probs = F.softmax(outputs["logits"], dim=1)
                 ins_emb = None
             else:
-                sem_logits = outputs
+                sem_probs = F.softmax(outputs, dim=1)
                 ins_emb = None
-
-            sem_probs = F.softmax(sem_logits, dim=1)
 
             for idx, (ds, hs, ws) in enumerate(batch_pos):
                 sl = (slice(None), slice(ds, ds + pd), slice(hs, hs + ph), slice(ws, ws + pw))

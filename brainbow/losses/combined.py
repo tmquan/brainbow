@@ -18,7 +18,7 @@ emitted by :mod:`brainbow.callbacks.tensorboard`::
 """
 
 import math
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -29,6 +29,40 @@ from brainbow.losses.geometry import GeometryLoss
 from brainbow.losses.brainbow import BrainbowLoss
 
 
+HeadConfig = Union[float, int, Mapping[str, Any]]
+
+
+def _split_head(
+    cfg: HeadConfig, default_weight: float,
+) -> Tuple[float, Dict[str, Any]]:
+    """Split a head config into ``(head_weight, sub_kwargs)``.
+
+    Accepts either a scalar (legacy flat form -- only the head weight is
+    set, sub-kwargs come from the outer flat kwargs) or a mapping of the
+    form ``{weight: float, **sub_kwargs}`` (new nested form).
+    """
+    if isinstance(cfg, Mapping):
+        d = dict(cfg)
+        w = float(d.pop("weight", default_weight))
+        return w, d
+    return float(cfg), {}
+
+
+# Legacy flat-kwarg groupings, used as a fallback when a head is passed
+# as a scalar (or omits a given key from its nested dict).  Keys map
+# 1:1 onto the sub-loss ``__init__`` parameter names.
+_SEMANTIC_FLAT_KEYS: Tuple[str, ...] = (
+    "weight_ce", "weight_iou", "weight_dice",
+    "class_weights", "active_classes", "label_smoothing",
+)
+_INSTANCE_FLAT_KEYS: Tuple[str, ...] = (
+    "weight_pull", "weight_push", "weight_norm", "weight_edge", "weight_bone",
+    "delta_v", "delta_d", "normalize_embeddings", "max_hard_pairs",
+    "anchor_to_centroid", "centroid_scale",
+)
+_BRAINBOW_FLAT_PREFIX: str = "brainbow_"
+
+
 class CombinedLoss(nn.Module):
     """Weighted sum of SemanticLoss + InstanceLoss + GeometryLoss + BrainbowLoss.
 
@@ -36,68 +70,115 @@ class CombinedLoss(nn.Module):
     positive.  With ``learned_task_weights=True`` the scalar weights
     become learned log-variances (Kendall & Gal, 2018).
 
+    Each ``weight_<head>`` parameter accepts either of two shapes:
+
+    - **Nested mapping** (preferred, recommended for new configs)::
+
+          weight_semantic:
+            weight: 1.0                 # head scalar (0 disables the head)
+            weight_ce: 1.0
+            weight_dice: 1.0
+            ...
+
+      All keys except ``weight`` are forwarded 1:1 to the corresponding
+      sub-loss constructor.  ``SemanticLoss`` is sigmoid-only (the model
+      wrapper applies sigmoid to the semantic head before the loss sees
+      it) so there is no ``semantic_mode`` knob; the same applies to the
+      6 brainbow affinity channels (``BrainbowLoss``).
+
+    - **Scalar float** (legacy flat form).  In this case the sub-loss
+      kwargs are read from the matching top-level flat kwargs
+      (e.g. ``weight_ce``, ``delta_v``, ``brainbow_weight_raw``).  This
+      preserves compatibility with configs written against the pre-nest
+      signature.
+
+    For the ``brainbow`` head the legacy flat kwargs are prefixed with
+    ``brainbow_`` to avoid colliding with ``GeometryLoss``'s
+    ``weight_raw``; inside the nested mapping the prefix is dropped
+    (``weight_raw``, ``weight_min``, ...).
+
     Args:
         spatial_dims: 2 or 3 (controls InstanceLoss / GeometryLoss).
         weight_semantic / weight_instance / weight_geometry /
-            weight_brainbow: task weights.
+            weight_brainbow: head config (float or nested mapping; see above).
         learned_task_weights: if ``True``, weights are learned via
             log-variances and the static weights become initialisations.
-        **sub_kwargs: forwarded to the four sub-losses.  See
-            :class:`SemanticLoss`, :class:`InstanceLoss`, :class:`GeometryLoss`,
-            :class:`BrainbowLoss`.
+        ignore_index: label value excluded from every loss term.
+        **legacy_kwargs: flat sub-loss kwargs for the legacy form;
+            unknown keys that don't match any of the four sub-losses are
+            forwarded to :class:`GeometryLoss` (which ignores unknowns
+            via its own ``**kwargs``).
     """
 
     def __init__(
         self,
         spatial_dims: int = 3,
-        weight_semantic: float = 1.0,
-        weight_instance: float = 1.0,
-        weight_geometry: float = 0.0,
-        weight_brainbow: float = 0.0,
+        weight_semantic: HeadConfig = 1.0,
+        weight_instance: HeadConfig = 1.0,
+        weight_geometry: HeadConfig = 0.0,
+        weight_brainbow: HeadConfig = 0.0,
         learned_task_weights: bool = False,
-        # SemanticLoss kwargs
-        semantic_mode: str = "sigmoid",
-        weight_ce: float = 1.0,
-        weight_iou: float = 0.0,
-        weight_dice: float = 0.0,
-        class_weights: Optional[List[float]] = None,
         ignore_index: int = -100,
-        active_classes: Optional[int] = None,
-        label_smoothing: float = 0.0,
-        # InstanceLoss kwargs
-        weight_pull: float = 1.0,
-        weight_push: float = 1.0,
-        weight_norm: float = 0.001,
-        weight_edge: float = 10.0,
-        weight_bone: float = 10.0,
-        delta_v: float = 0.5,
-        delta_d: float = 1.5,
-        normalize_embeddings: bool = False,
-        max_hard_pairs: int = 0,
-        anchor_to_centroid: bool = False,
-        centroid_scale: float = 5.0,
-        # BrainbowLoss kwargs (prefixed with ``brainbow_`` because
-        # ``weight_raw`` would otherwise collide with GeometryLoss's
-        # ``weight_raw`` when both heads are active).
-        brainbow_loss_loc: str = "smooth_l1",
-        brainbow_loss_raw: str = "l1",
-        brainbow_weight_min: float = 1.0,
-        brainbow_weight_avg: float = 1.0,
-        brainbow_weight_max: float = 1.0,
-        brainbow_weight_raw: float = 1.0,
-        brainbow_weight_aff: float = 1.0,
-        brainbow_foreground_only_loc: bool = True,
-        brainbow_aff_eps: float = 1e-5,
-        # GeometryLoss kwargs (forwarded via **geom_kwargs)
-        **geom_kwargs,
+        **legacy_kwargs: Any,
     ) -> None:
         super().__init__()
         self.spatial_dims = spatial_dims
-        self.weight_semantic = weight_semantic
-        self.weight_instance = weight_instance
-        self.weight_geometry = weight_geometry
-        self.weight_brainbow = weight_brainbow
+
+        # Split head configs into (scalar_weight, nested_kwargs).
+        w_sem, sem_nested = _split_head(weight_semantic, 1.0)
+        w_ins, ins_nested = _split_head(weight_instance, 1.0)
+        w_geom, geom_nested = _split_head(weight_geometry, 0.0)
+        w_bbow, bbow_nested = _split_head(weight_brainbow, 0.0)
+
+        self.weight_semantic = w_sem
+        self.weight_instance = w_ins
+        self.weight_geometry = w_geom
+        self.weight_brainbow = w_bbow
         self.learned_task_weights = learned_task_weights
+
+        # Partition legacy flat kwargs by target head.  Nested entries
+        # take priority; anything in ``legacy_kwargs`` only fills gaps.
+        sem_legacy = {
+            k: legacy_kwargs.pop(k) for k in _SEMANTIC_FLAT_KEYS
+            if k in legacy_kwargs
+        }
+        ins_legacy = {
+            k: legacy_kwargs.pop(k) for k in _INSTANCE_FLAT_KEYS
+            if k in legacy_kwargs
+        }
+        bbow_legacy: Dict[str, Any] = {}
+        for k in list(legacy_kwargs.keys()):
+            if k.startswith(_BRAINBOW_FLAT_PREFIX):
+                bbow_legacy[k[len(_BRAINBOW_FLAT_PREFIX):]] = legacy_kwargs.pop(k)
+
+        # Legacy alias: ``brainbow_weight_aff`` was the single Dice-on-
+        # affinities sub-weight before the CE/Dice/IoU split.  Map it to
+        # ``weight_dice`` (its direct successor) unless the caller has
+        # already set ``weight_dice`` explicitly.
+        if "weight_aff" in bbow_legacy:
+            legacy_aff = bbow_legacy.pop("weight_aff")
+            bbow_legacy.setdefault("weight_dice", legacy_aff)
+
+        # ``affinity_mode`` was the dead-end mode flag on BrainbowLoss
+        # (sigmoid-only in practice); silently drop it from both legacy
+        # flat kwargs and nested dicts so old configs keep loading.
+        bbow_legacy.pop("affinity_mode", None)
+
+        # Whatever remains (``dir_target``, ``weight_dir``, ``loss_dir``,
+        # etc.) is GeometryLoss-bound in the legacy flat form.
+        geom_legacy = legacy_kwargs
+
+        def _merge(legacy: Dict[str, Any], nested: Dict[str, Any]) -> Dict[str, Any]:
+            merged = dict(legacy)
+            merged.update(nested)
+            return merged
+
+        sem_kwargs = _merge(sem_legacy, sem_nested)
+        ins_kwargs = _merge(ins_legacy, ins_nested)
+        geom_kwargs = _merge(geom_legacy, geom_nested)
+        bbow_kwargs = _merge(bbow_legacy, bbow_nested)
+        # Drop dead-end mode flag whether it came in via flat or nested.
+        bbow_kwargs.pop("affinity_mode", None)
 
         if learned_task_weights:
             def _logvar(w: float) -> nn.Parameter:
@@ -105,58 +186,34 @@ class CombinedLoss(nn.Module):
                     torch.tensor(math.log(1.0 / max(w, 1e-8))),
                     requires_grad=w > 0,
                 )
-            self.log_var_sem = _logvar(weight_semantic)
-            self.log_var_ins = _logvar(weight_instance)
-            self.log_var_geom = _logvar(weight_geometry)
-            self.log_var_bbow = _logvar(weight_brainbow)
+            self.log_var_sem = _logvar(w_sem)
+            self.log_var_ins = _logvar(w_ins)
+            self.log_var_geom = _logvar(w_geom)
+            self.log_var_bbow = _logvar(w_bbow)
+
+        # SemanticLoss is sigmoid-only; silently drop any leftover
+        # ``semantic_mode`` / ``mode`` keys from old configs so that
+        # passing the legacy YAML doesn't raise an unexpected-kwarg error.
+        for dead in ("semantic_mode", "mode"):
+            sem_kwargs.pop(dead, None)
 
         self.semantic_loss: Optional[SemanticLoss] = (
             SemanticLoss(
-                mode=semantic_mode,
-                weight_ce=weight_ce,
-                weight_iou=weight_iou,
-                weight_dice=weight_dice,
-                class_weights=class_weights,
                 ignore_index=ignore_index,
-                active_classes=active_classes,
-                label_smoothing=label_smoothing,
+                **sem_kwargs,
             )
-            if weight_semantic > 0 else None
+            if w_sem > 0 else None
         )
         self.instance_loss: Optional[InstanceLoss] = (
-            InstanceLoss(
-                spatial_dims=spatial_dims,
-                weight_pull=weight_pull,
-                weight_push=weight_push,
-                weight_norm=weight_norm,
-                weight_edge=weight_edge,
-                weight_bone=weight_bone,
-                delta_v=delta_v,
-                delta_d=delta_d,
-                normalize_embeddings=normalize_embeddings,
-                max_hard_pairs=max_hard_pairs,
-                anchor_to_centroid=anchor_to_centroid,
-                centroid_scale=centroid_scale,
-            )
-            if weight_instance > 0 else None
+            InstanceLoss(spatial_dims=spatial_dims, **ins_kwargs)
+            if w_ins > 0 else None
         )
         self.geometry_loss: Optional[GeometryLoss] = (
             GeometryLoss(spatial_dims=spatial_dims, **geom_kwargs)
-            if weight_geometry > 0 else None
+            if w_geom > 0 else None
         )
         self.brainbow_loss: Optional[BrainbowLoss] = (
-            BrainbowLoss(
-                loss_loc=brainbow_loss_loc,
-                loss_raw=brainbow_loss_raw,
-                weight_min=brainbow_weight_min,
-                weight_avg=brainbow_weight_avg,
-                weight_max=brainbow_weight_max,
-                weight_raw=brainbow_weight_raw,
-                weight_aff=brainbow_weight_aff,
-                foreground_only_loc=brainbow_foreground_only_loc,
-                aff_eps=brainbow_aff_eps,
-            )
-            if weight_brainbow > 0 else None
+            BrainbowLoss(**bbow_kwargs) if w_bbow > 0 else None
         )
 
     # ------------------------------------------------------------------

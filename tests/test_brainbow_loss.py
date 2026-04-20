@@ -188,7 +188,13 @@ class TestBrainbowLoss:
         labels[0, 4:, 8:, 8:] = 2
         labels[1, 2:6, 4:12, 4:12] = 3
         image = torch.rand(B, D, H, W)
-        pred = torch.randn(B, 16, D, H, W, requires_grad=True)
+        # ``BrainbowLoss`` now expects post-sigmoid probabilities on the
+        # 6 affinity channels (the model wrapper applies sigmoid before
+        # the loss sees the prediction).  The 10 regression channels can
+        # take any real value -- we use ``randn`` to keep them general.
+        loc = torch.randn(B, 10, D, H, W)
+        aff = torch.rand(B, 6, D, H, W)
+        pred = torch.cat([loc, aff], dim=1).detach().requires_grad_(True)
         return pred, labels, image
 
     def test_num_channels_constant(self) -> None:
@@ -231,11 +237,12 @@ class TestBrainbowLoss:
         pred, labels, image = batch
         uniform = BrainbowLoss(
             weight_min=1.0, weight_avg=1.0, weight_max=1.0,
-            weight_raw=1.0, weight_aff=1.0,
+            weight_raw=1.0, weight_dice=1.0,
         )(pred, labels, image)
         only_raw = BrainbowLoss(
             weight_min=0.0, weight_avg=0.0, weight_max=0.0,
-            weight_raw=1.0, weight_aff=0.0,
+            weight_raw=1.0,
+            weight_ce=0.0, weight_dice=0.0, weight_iou=0.0,
         )(pred, labels, image)
         # "only_raw" has exactly loss == raw; uniform has the extra
         # localisation + affinity terms, so it must be at least as large.
@@ -244,17 +251,20 @@ class TestBrainbowLoss:
         )
         assert uniform["loss"].item() >= only_raw["loss"].item() - 1e-6
 
-    def test_aff_loss_is_soft_dice_on_sigmoid(self, batch) -> None:
-        """Perfect affinity logits (large +) give Dice ~ 1 -> loss ~ 0."""
+    def test_aff_loss_is_soft_dice_on_probs(self, batch) -> None:
+        """Perfect affinity probs give Dice ~ 1 -> loss ~ 0.
+
+        ``BrainbowLoss`` consumes the 6 affinity channels as
+        already-sigmoided probabilities (the model wrapper applies the
+        activation upstream), so a ``perfect'' prediction is one whose
+        channels equal the binary target tensor itself.
+        """
         pred, labels, image = batch
-        loss_fn = BrainbowLoss(weight_aff=1.0)
+        loss_fn = BrainbowLoss(weight_dice=1.0)
         target = loss_fn.build_target(labels, image)
 
-        # Replace the affinity channels of `pred` with a near-perfect
-        # prediction (large positive logit where target is 1, large
-        # negative where target is 0).  Everything else random.
         ideal = pred.detach().clone()
-        ideal[:, 10:16] = (target[:, 10:16] - 0.5) * 20.0    # +-10 logits
+        ideal[:, 10:16] = target[:, 10:16]
         out = loss_fn(ideal, labels, image)
         assert out["aff"].item() < 0.05
 
@@ -297,7 +307,12 @@ class TestBrainbowInCombinedLoss:
         labels[0, :2, :4, :4] = 1
         labels[0, 2:, 4:, 4:] = 2
         image = torch.rand(B, D, H, W)
-        preds = {"brainbow": torch.randn(B, 16, D, H, W, requires_grad=True)}
+        # Match the wrapper's output contract: regression channels are
+        # arbitrary reals, affinity channels (10-15) are already in [0, 1].
+        bb = torch.cat(
+            [torch.randn(B, 10, D, H, W), torch.rand(B, 6, D, H, W)], dim=1,
+        ).detach().requires_grad_(True)
+        preds = {"brainbow": bb}
         targets = {
             "labels": labels,
             "semantic_labels": (labels > 0).long(),
@@ -335,7 +350,9 @@ class TestBrainbowInCombinedLoss:
         B, D, H, W = 1, 4, 8, 8
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
         labels[0, :2, :4, :4] = 1
-        preds = {"brainbow": torch.randn(B, 16, D, H, W)}
+        preds = {"brainbow": torch.cat(
+            [torch.randn(B, 10, D, H, W), torch.rand(B, 6, D, H, W)], dim=1,
+        )}
         with pytest.raises(KeyError):
             loss(preds, {"labels": labels, "semantic_labels": (labels > 0).long()})
 

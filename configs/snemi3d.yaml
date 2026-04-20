@@ -160,52 +160,58 @@ optimizer:
     eta_min: 1.0e-6
 
 loss:
-  # CombinedLoss = weight_semantic * semantic + weight_instance * instance
-  #              + weight_geometry * geometry + weight_brainbow * brainbow
-  # Each head has its own sub-weights below.  Setting a head weight to 0
-  # disables that head entirely (the sub-module is not instantiated).
+  # CombinedLoss = weight_semantic.weight * semantic + weight_instance.weight * instance
+  #              + weight_geometry.weight * geometry + weight_brainbow.weight * brainbow
+  # Each head's config is a mapping: ``weight`` is the head scalar (set to
+  # 0 to disable the head entirely -- the sub-module is not instantiated)
+  # and the remaining keys are forwarded as kwargs to the corresponding
+  # sub-loss (SemanticLoss / InstanceLoss / GeometryLoss / BrainbowLoss).
+
+  ignore_index: -100               # label value excluded from every loss term
+  learned_task_weights: false      # Kendall-style uncertainty weighting across heads
 
   # -----------------------------------------------------------------
   # Semantic head -- binary foreground / background (sigmoid, 1 class)
   # -----------------------------------------------------------------
-  semantic_mode: sigmoid           # sigmoid (multi-label) | softmax (exclusive)
-  active_classes: 1                # only foreground is learnt for SNEMI3D
-  class_weights: [0.2]             # per-class CE weighting (down-weights FG to fight imbalance)
-  label_smoothing: 0.0
-  weight_semantic: 1.0             # head weight; 0 -> semantic head disabled (instance carries FG info)
-  weight_ce: 0.0                   # cross-entropy sub-loss
-  weight_iou: 0.0                  # IoU sub-loss (0 -> skipped)
-  weight_dice: 1.0                 # Dice sub-loss (helps on heavily imbalanced FG)
+  weight_semantic:
+    weight: 1.0                    # head weight; 0 -> semantic head disabled (instance carries FG info)
+    # NOTE: SemanticLoss is sigmoid-only; the model wrapper applies sigmoid
+    #       to the semantic head before the loss / TB callbacks see it.
+    active_classes: 1              # only foreground is learnt for SNEMI3D
+    class_weights: [0.2]           # per-class CE weighting (down-weights FG to fight imbalance)
+    label_smoothing: 0.0
+    weight_ce: 1.0                 # cross-entropy sub-loss
+    weight_iou: 0.0                # IoU sub-loss (0 -> skipped)
+    weight_dice: 1.0               # Dice sub-loss (helps on heavily imbalanced FG)
 
   # -----------------------------------------------------------------
   # Instance head -- discriminative embedding (pull / push / norm)
   # -----------------------------------------------------------------
-  weight_instance: 1.0             # head weight for the embedding loss
-  weight_pull: 1.0                 # intra-cluster pull (voxels -> their centroid, hinge at delta_v)
-  weight_push: 1.0                 # inter-cluster push (centroid <-> centroid, hinge at delta_d)
-  weight_norm: 0.001               # mild centroid-norm regulariser (prevents blowup)
-  delta_v: 0.5                     # pull margin: allowed intra-cluster radius
-  delta_d: 1.5                     # push margin: half the minimum centroid separation
-  normalize_embeddings: false      # L2-normalise embeddings before loss (cosine-like)
-  anchor_to_centroid: false        # anchor pull to running centroid instead of batch centroid
-  learned_task_weights: false      # Kendall-style uncertainty weighting across heads
-  max_hard_pairs: 0                # 0 = all pairs; >0 = hard-negative mining budget
-  weight_edge: 1.0                 # per-voxel multiplier on boundary voxels (1.0 = off)
-  weight_bone: 1.0                 # per-voxel multiplier on medial-axis voxels (1.0 = off)
+  weight_instance:
+    weight: 1.0                    # head weight for the embedding loss
+    weight_pull: 1.0               # intra-cluster pull (voxels -> their centroid, hinge at delta_v)
+    weight_push: 1.0               # inter-cluster push (centroid <-> centroid, hinge at delta_d)
+    weight_norm: 0.001             # mild centroid-norm regulariser (prevents blowup)
+    delta_v: 0.5                   # pull margin: allowed intra-cluster radius
+    delta_d: 1.5                   # push margin: half the minimum centroid separation
+    normalize_embeddings: false    # L2-normalise embeddings before loss (cosine-like)
+    anchor_to_centroid: false      # anchor pull to running centroid instead of batch centroid
+    max_hard_pairs: 0              # 0 = all pairs; >0 = hard-negative mining budget
+    weight_edge: 1.0               # per-voxel multiplier on boundary voxels (1.0 = off)
+    weight_bone: 1.0               # per-voxel multiplier on medial-axis voxels (1.0 = off)
 
   # -----------------------------------------------------------------
   # Geometry head -- direction field + covariance + raw reconstruction
   # -----------------------------------------------------------------
-  weight_geometry: 1.0             # head weight; 0 -> geometry head disabled
-  dir_target: centroid             # direction-field target: "centroid" or "skeleton"
-  weight_dir: 1.0                  # direction sub-loss
-  weight_cov: 1.0                  # covariance sub-loss (shape/anisotropy)
-  weight_raw: 1.0                  # raw-image reconstruction sub-loss (autoencoder-ish)
-  loss_dir: smooth_l1              # regression loss for direction   (mse | l1 | smooth_l1)
-  loss_cov: smooth_l1              # regression loss for covariance
-  loss_raw: smooth_l1              # regression loss for raw-intensity reconstruction
-
-  ignore_index: -100               # label value excluded from every loss term
+  weight_geometry:
+    weight: 1.0                    # head weight; 0 -> geometry head disabled
+    dir_target: centroid           # direction-field target: "centroid" or "skeleton"
+    weight_dir: 1.0                # direction sub-loss
+    weight_cov: 1.0                # covariance sub-loss (shape/anisotropy)
+    weight_raw: 1.0                # raw-image reconstruction sub-loss (autoencoder-ish)
+    loss_dir: smooth_l1            # regression loss for direction   (mse | l1 | smooth_l1)
+    loss_cov: smooth_l1            # regression loss for covariance
+    loss_raw: smooth_l1            # regression loss for raw-intensity reconstruction
 
   # -----------------------------------------------------------------
   # Brainbow head -- per-instance (min, avg, max) RGB colouring +
@@ -218,15 +224,24 @@ loss:
   #   ch 7-9    := max  (normalised (z, y, x) of each instance's bbox max)
   #   ch 10-15  := aff  (binary face-affinity to 6 neighbours in Z-Y-X
   #                      order T/B/U/D/L/R with SAME-pad; supervised via
-  #                      soft-Dice on sigmoid)
+  #                      CE + soft-Dice + soft-Jaccard on sigmoid)
   # -----------------------------------------------------------------
-  weight_brainbow: 1.0             # head weight; 0 -> brainbow head disabled
-  brainbow_loss_loc: smooth_l1     # regression loss for the 9 location channels
-  brainbow_loss_raw: l1            # regression loss for the raw channel
-  brainbow_weight_min: 1.0         # sub-weight for min channels (ch 1-3)
-  brainbow_weight_avg: 1.0         # sub-weight for avg channels (ch 4-6)
-  brainbow_weight_max: 1.0         # sub-weight for max channels (ch 7-9)
-  brainbow_weight_raw: 1.0         # sub-weight for raw channel  (ch 0)
-  brainbow_weight_aff: 1.0         # sub-weight for affinity soft-Dice (ch 10-15, T/B/U/D/L/R, Z-Y-X, sigmoid)
-  brainbow_foreground_only_loc: true  # apply location loss on foreground voxels only (bg has no instance)
-  brainbow_aff_eps: 1.0e-5         # MONAI DiceLoss smoothing (smooth_nr=smooth_dr); MONAI default is 1e-5
+  weight_brainbow:
+    weight: 1.0                    # head weight; 0 -> brainbow head disabled
+    loss_loc: smooth_l1            # regression loss for the 9 location channels
+    loss_raw: l1                   # regression loss for the raw channel
+    weight_min: 1.0                # sub-weight for min channels (ch 1-3)
+    weight_avg: 1.0                # sub-weight for avg channels (ch 4-6)
+    weight_max: 1.0                # sub-weight for max channels (ch 7-9)
+    weight_raw: 1.0                # sub-weight for raw channel  (ch 0)
+    # Affinity sub-losses (ch 10-15, T/B/U/D/L/R, Z-Y-X): CE + Dice + IoU.
+    # The model wrapper applies sigmoid to channels 10-15 of the brainbow
+    # head before the loss / TB callbacks see them, so these sub-losses
+    # operate on per-channel binary probabilities directly.
+    class_weights: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]  # BCE pos_weight per aff channel
+    label_smoothing: 0.0           # kept for parity with SemanticLoss (no-op in sigmoid/BCE)
+    weight_ce: 1.0                 # BCE sub-loss on the 6 affinity channels (renamed from weight_aff)
+    weight_iou: 0.0                # soft-Jaccard sub-loss (MONAI DiceLoss jaccard=True)
+    weight_dice: 1.0               # soft-Dice sub-loss (preserves previous affinity behaviour)
+    foreground_only_loc: true      # apply location loss on foreground voxels only (bg has no instance)
+    aff_eps: 1.0e-5                # MONAI DiceLoss smoothing (smooth_nr=smooth_dr); MONAI default is 1e-5

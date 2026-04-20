@@ -61,7 +61,10 @@ optimizer:
 
 # Loss configuration
 loss:
-  semantic_mode: sigmoid     # sigmoid (multi-label: mito inside neuron) or softmax (mutually exclusive)
+  # SemanticLoss is sigmoid-only (multi-label per-channel binary); the
+  # model wrapper applies sigmoid to the semantic head before the loss
+  # sees it.  Likewise BrainbowLoss treats channels 10-15 as
+  # already-sigmoided per-direction binary affinities.
   active_classes: null        # null = all channels; set to N to only train the first N semantic channels
   weight_semantic: 1.0
   weight_ce: 1.0

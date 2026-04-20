@@ -48,7 +48,7 @@ single pass of :func:`scipy.ndimage.find_objects` + centroid-via-
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -318,16 +318,37 @@ class BrainbowLoss(nn.Module):
         weight_avg:   Weight of the 3 avg-location channels (ch 4-6).
         weight_max:   Weight of the 3 max-location channels (ch 7-9).
         weight_raw:   Weight of the raw-intensity channel (ch 0).
-        weight_aff:   Weight of the 6 affinity channels (ch 10-15).
+        weight_ce:    Weight of the BCE sub-loss on the 6 affinity
+            channels (ch 10-15).  The model wrapper applies ``sigmoid``
+            to channels 10-15 of the brainbow head **before** this loss
+            sees them, so the BCE is computed on probabilities (not
+            logits) via :func:`F.binary_cross_entropy`.  Uses
+            ``pos_weight = class_weights`` when provided (broadcast over
+            spatial dims; mirrors ``BCEWithLogitsLoss`` semantics).
+        weight_dice:  Weight of the soft-Dice sub-loss on the 6 affinity
+            channels (MONAI :class:`DiceLoss` with ``sigmoid=False`` --
+            the wrapper has already applied sigmoid).
+        weight_iou:   Weight of the soft-Jaccard sub-loss on the 6
+            affinity channels (MONAI :class:`DiceLoss` with
+            ``sigmoid=False, jaccard=True``).
+        class_weights: Optional per-affinity-channel weight list (length
+            6, one entry per direction T/B/U/D/L/R).  Plumbed into the
+            BCE sub-loss as ``pos_weight``.  No effect on the Dice / IoU
+            sub-losses.
+        label_smoothing: Stored for parity with the previous signature;
+            sigmoid BCE has no native label-smoothing, so this value is
+            unused.
         foreground_only_loc:  If True, the localisation loss is averaged
             over foreground voxels only (strongly recommended -- the
             target is zero on background, so averaging everywhere would
             down-weight instance gradients proportionally to foreground
             fraction).  Default ``True``.
         aff_eps: Numerical stabiliser passed as both ``smooth_nr`` and
-            ``smooth_dr`` to :class:`monai.losses.DiceLoss`.  The affinity
-            sub-loss is ``1 - (2 Σ p t + ε) / (Σ p + Σ t + ε)`` where
-            ``p = sigmoid(logits)``, summed over batch + spatial per
+            ``smooth_dr`` to :class:`monai.losses.DiceLoss`.  The Dice /
+            IoU affinity sub-losses are
+            ``1 - (2 Σ p t + ε) / (Σ p + Σ t + ε)`` (or Jaccard) where
+            ``p`` is the **already-sigmoided** affinity probability
+            arriving from the wrapper, summed over batch + spatial per
             channel and averaged across the 6 direction channels.
     """
 
@@ -341,7 +362,11 @@ class BrainbowLoss(nn.Module):
         weight_avg: float = 1.0,
         weight_max: float = 1.0,
         weight_raw: float = 1.0,
-        weight_aff: float = 1.0,
+        weight_ce: float = 0.0,
+        weight_dice: float = 1.0,
+        weight_iou: float = 0.0,
+        class_weights: Optional[List[float]] = None,
+        label_smoothing: float = 0.0,
         foreground_only_loc: bool = True,
         aff_eps: float = 1e-5,
     ) -> None:
@@ -354,17 +379,46 @@ class BrainbowLoss(nn.Module):
         self.weight_avg = float(weight_avg)
         self.weight_max = float(weight_max)
         self.weight_raw = float(weight_raw)
-        self.weight_aff = float(weight_aff)
+        self.weight_ce = float(weight_ce)
+        self.weight_dice = float(weight_dice)
+        self.weight_iou = float(weight_iou)
+        self.class_weights = (
+            list(map(float, class_weights)) if class_weights is not None else None
+        )
+        self.label_smoothing = float(label_smoothing)
         self.foreground_only_loc = bool(foreground_only_loc)
         self.aff_eps = float(aff_eps)
-        self._aff_dice = DiceLoss(
-            sigmoid=True,
+
+        # BCE pos_weight reshaped to [1, 6, 1, 1, 1] so it broadcasts
+        # over [B, 6, D, H, W]; None means uniform weighting.
+        if self.class_weights is not None:
+            if len(self.class_weights) != _N_AFF:
+                raise ValueError(
+                    f"class_weights must have length {_N_AFF} (one per affinity "
+                    f"channel T/B/U/D/L/R); got {len(self.class_weights)}."
+                )
+            pw = torch.tensor(self.class_weights, dtype=torch.float32).view(
+                1, _N_AFF, 1, 1, 1,
+            )
+            self.register_buffer("_aff_pos_weight", pw, persistent=False)
+        else:
+            self._aff_pos_weight = None
+
+        # Sigmoid is applied externally (in the model wrapper) to the 6
+        # affinity channels: BCE consumes probabilities directly via
+        # F.binary_cross_entropy, and the Dice / IoU sub-losses are MONAI
+        # DiceLoss with sigmoid=False so they do not re-apply any
+        # activation.
+        _dice_kwargs = dict(
+            sigmoid=False,
             include_background=True,
             reduction="mean",
             batch=True,                       # aggregate over B + spatial per channel
             smooth_nr=self.aff_eps,
             smooth_dr=self.aff_eps,
         )
+        self._aff_dice = DiceLoss(**_dice_kwargs)
+        self._aff_iou = DiceLoss(**_dice_kwargs, jaccard=True)
 
     @property
     def task_channels(self) -> int:
@@ -460,20 +514,50 @@ class BrainbowLoss(nn.Module):
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
-    ) -> torch.Tensor:
-        """Soft-Dice loss on sigmoid affinities (ch 10-15) via MONAI.
+    ) -> Dict[str, torch.Tensor]:
+        """CE + Dice + IoU sub-losses on sigmoid affinities (ch 10-15).
 
-        Delegates to :class:`monai.losses.DiceLoss` with ``sigmoid=True``
-        and ``batch=True`` so intersections / unions are summed over
-        batch + spatial per channel, and the final ``1 - dice`` is
-        averaged across the 6 direction channels.  ``aff_eps`` is wired
-        in as both ``smooth_nr`` and ``smooth_dr``.
+        ``pred`` is **already** in ``[0, 1]`` (the model wrapper applies
+        sigmoid to channels 10-15 of the brainbow head).  Returns a dict
+        with keys ``ce``, ``dice``, ``iou``; each sub-term is only
+        computed when its weight is non-zero, the rest are filled with a
+        zero tensor matching the prediction dtype/device so downstream
+        logging can treat them uniformly.
+
+        - ``ce``   : binary cross-entropy on probabilities via
+          :func:`torch.nn.functional.binary_cross_entropy`, with optional
+          ``pos_weight = class_weights`` (broadcast over the 6 affinity
+          channels).  Inputs are clamped to ``[eps, 1 - eps]`` to keep
+          ``log(p)`` finite at the boundaries.
+        - ``dice`` : :class:`monai.losses.DiceLoss` with ``sigmoid=False``
+          and ``batch=True`` so intersections / unions are summed over
+          batch + spatial per channel and the final ``1 - dice`` is
+          averaged across the 6 direction channels.
+        - ``iou``  : same MONAI loss with ``jaccard=True``.
 
         No mask: SAME-pad guarantees every voxel has a valid target
         (boundary voxels supervise ``aff == 1`` -- self-connected), so
-        the Dice score is well-defined on the full volume.
+        every score is well-defined on the full volume.
         """
-        return self._aff_dice(pred, target)
+        zero = pred.new_zeros(())
+        out: Dict[str, torch.Tensor] = {"ce": zero, "dice": zero, "iou": zero}
+        if self.weight_ce > 0:
+            eps = 1e-7
+            p = pred.clamp(eps, 1.0 - eps)
+            t = target.to(p.dtype)
+            if self._aff_pos_weight is not None:
+                pw = self._aff_pos_weight.to(p.dtype)
+                # ``pos_weight`` re-weights the *positive* term only, mirroring
+                # ``BCEWithLogitsLoss(pos_weight=...)`` so old configs port.
+                per_voxel = -(pw * t * p.log() + (1.0 - t) * (1.0 - p).log())
+            else:
+                per_voxel = -(t * p.log() + (1.0 - t) * (1.0 - p).log())
+            out["ce"] = per_voxel.mean()
+        if self.weight_dice > 0:
+            out["dice"] = self._aff_dice(pred, target)
+        if self.weight_iou > 0:
+            out["iou"] = self._aff_iou(pred, target)
+        return out
 
     # ------------------------------------------------------------------
     # Forward
@@ -499,7 +583,8 @@ class BrainbowLoss(nn.Module):
 
         Returns:
             Dict with keys ``loss``, ``raw``, ``min``, ``avg``, ``max``,
-            ``aff``.
+            ``aff`` (sum of the active affinity sub-losses) plus the
+            individual ``aff_ce``, ``aff_dice``, ``aff_iou`` terms.
         """
         if prediction.shape[1] != _BRAINBOW_CHANNELS:
             raise ValueError(
@@ -523,9 +608,14 @@ class BrainbowLoss(nn.Module):
             target[:, 1:_N_LOC],
             labels,
         )
-        loss_aff = self._compute_loss_aff(
+        aff_losses = self._compute_loss_aff(
             prediction[:, _N_LOC:_BRAINBOW_CHANNELS],
             target[:, _N_LOC:_BRAINBOW_CHANNELS],
+        )
+        loss_aff = (
+            self.weight_ce * aff_losses["ce"]
+            + self.weight_dice * aff_losses["dice"]
+            + self.weight_iou * aff_losses["iou"]
         )
 
         total = (
@@ -533,7 +623,7 @@ class BrainbowLoss(nn.Module):
             + self.weight_min * loc_losses["min"]
             + self.weight_avg * loc_losses["avg"]
             + self.weight_max * loc_losses["max"]
-            + self.weight_aff * loss_aff
+            + loss_aff
         )
 
         return {
@@ -541,6 +631,9 @@ class BrainbowLoss(nn.Module):
             "raw": loss_raw,
             **loc_losses,
             "aff": loss_aff,
+            "aff_ce": aff_losses["ce"],
+            "aff_dice": aff_losses["dice"],
+            "aff_iou": aff_losses["iou"],
         }
 
     def __repr__(self) -> str:
@@ -552,6 +645,10 @@ class BrainbowLoss(nn.Module):
             f"weight_min={self.weight_min}, "
             f"weight_avg={self.weight_avg}, "
             f"weight_max={self.weight_max}, "
-            f"weight_aff={self.weight_aff}, "
+            f"weight_ce={self.weight_ce}, "
+            f"weight_dice={self.weight_dice}, "
+            f"weight_iou={self.weight_iou}, "
+            f"class_weights={self.class_weights}, "
+            f"label_smoothing={self.label_smoothing}, "
             f"foreground_only_loc={self.foreground_only_loc})"
         )

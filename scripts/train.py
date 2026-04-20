@@ -24,7 +24,21 @@ import collections
 import datetime
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
+
+
+def _head_weight_scalar(loss_cfg: Any, head: str, default: float = 0.0) -> float:
+    """Extract the scalar head weight from a (nested or flat) loss config.
+
+    Accepts both the new nested form (``weight_<head>`` is a mapping with
+    a ``weight`` key) and the legacy flat form (``weight_<head>`` is a
+    scalar).  OmegaConf's ``DictConfig`` / ``ListConfig`` are tolerated
+    via :class:`collections.abc.Mapping`.
+    """
+    v = loss_cfg.get(f"weight_{head}", default) if hasattr(loss_cfg, "get") else default
+    if isinstance(v, Mapping):
+        return float(v.get("weight", default))
+    return float(v)
 
 warnings.filterwarnings("ignore", message=r".*isinstance.*LeafSpec.*is deprecated.*")
 warnings.filterwarnings("ignore", message=r".*AccumulateGrad.*stream.*mismatch.*")
@@ -104,7 +118,9 @@ def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
         "find_boundaries": float(data_cfg.get("find_boundaries", 0.0)),
         "pixel_size": tuple(pixel_size) if pixel_size is not None else None,
         "min_foreground": float(data_cfg.get("min_foreground", 0.0)),
-        "compute_geometry": float(cfg.get("loss", {}).get("weight_geometry", 0.0)) > 0,
+        "compute_geometry": _head_weight_scalar(
+            cfg.get("loss", {}), "geometry", default=0.0,
+        ) > 0,
         "elastic_prob": float(data_cfg.get("elastic_prob", 0.0)),
         "elastic_sigma_range": tuple(data_cfg.get("elastic_sigma_range", [35, 50])),
         "elastic_magnitude_range": tuple(data_cfg.get("elastic_magnitude_range", [10, 40])),

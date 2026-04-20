@@ -49,15 +49,22 @@ def _log_semantic(
     if "semantic" not in preds:
         return None, None
     head = ctx.for_head("semantic")
+    # ``preds["semantic"]`` is already a tensor of per-channel sigmoid
+    # probabilities -- the model wrapper applies sigmoid to the semantic
+    # head before anything downstream (loss, metrics, this callback)
+    # sees it.  No activation is re-applied here.
     sem = _to_2d(preds["semantic"][:n])
     if active_classes is not None and active_classes < sem.shape[1]:
         sem = sem[:, :active_classes]
     if sem.shape[1] == 1:
-        sem_fg = sem[:, :1].sigmoid()
+        sem_fg = sem[:, :1]
         sem_ids = (sem_fg[:, 0] > 0.5).long()
     else:
+        # Multi-channel sigmoid (multi-label).  ``argmax`` is monotone
+        # under sigmoid so the class ranking matches the old logits path;
+        # use the second channel's probability as a foreground heatmap.
         sem_ids = sem.argmax(dim=1)
-        sem_fg = sem[:, :2].softmax(dim=1)[:, 1:]
+        sem_fg = sem[:, 1:2]
     sem_gray = repeat(sem_fg, "b 1 h w -> b 3 h w")
     tb.add_images(head.tag("prediction"), sem_gray, global_step=epoch)
     return sem_fg, sem_ids
@@ -207,11 +214,13 @@ def _log_brainbow(
       - ch 10-15 : ``aff`` (T / B / U / D / L / R face affinities, Z-Y-X
                    order; grayscale)
 
-    Predictions are raw logits; the affinity channels are passed through
-    sigmoid before visualisation.  Panels are written under
-    ``brainbow/pred/*`` and, when ``brainbow_target`` is supplied, also
-    under ``brainbow/gt/*`` so the model output and its supervision
-    signal can be compared side-by-side in TensorBoard.
+    Predictions arriving here are post-activation: the model wrapper
+    applies sigmoid to channels 10-15 of the brainbow head (the 6 face
+    affinities) so this callback does **not** re-apply any activation.
+    Panels are written under ``brainbow/pred/*`` and, when
+    ``brainbow_target`` is supplied, also under ``brainbow/gt/*`` so the
+    model output and its supervision signal can be compared side-by-side
+    in TensorBoard.
     """
     if "brainbow" not in preds:
         return
@@ -242,12 +251,15 @@ def _add_brainbow_panels(
         head: ``TagContext`` for the brainbow head (i.e. ``ctx.for_head("brainbow")``).
         variant: ``"pred"`` or ``"gt"``.  Becomes the next tag segment.
         bb: ``[n, 16, H, W]`` brainbow map (already 2-D sliced).  For
-            predictions this is raw logits (sigmoid is applied below
-            for the affinity channels); for the ground-truth target it
-            is the ``[0, 1]``-valued target tensor.
+            predictions this is the post-activation model output (the
+            wrapper has applied sigmoid to channels 10-15); for the
+            ground-truth target it is the ``[0, 1]``-valued target
+            tensor.
         epoch: global step for TensorBoard.
-        is_pred: ``True`` when ``bb`` comes from the model (logits),
-            ``False`` when it is the ground-truth target tensor.
+        is_pred: ``True`` when ``bb`` comes from the model (post-sigmoid
+            on the affinity channels), ``False`` when it is the
+            ground-truth target tensor.  Kept on the signature for
+            symmetry; both branches now go through the same clamp.
     """
     raw = repeat(bb[:, 0:1].clamp(0.0, 1.0), "b 1 h w -> b 3 h w")
     mn = bb[:, 1:4].clamp(0.0, 1.0)
@@ -258,11 +270,10 @@ def _add_brainbow_panels(
     tb.add_images(head.tag(f"{variant}/avg"), av, global_step=epoch)
     tb.add_images(head.tag(f"{variant}/max"), mx, global_step=epoch)
 
-    aff = bb[:, 10:16]
-    if is_pred:
-        aff = aff.sigmoid()
-    else:
-        aff = aff.clamp(0.0, 1.0)
+    # Affinity channels: the wrapper has already applied sigmoid on the
+    # prediction side, so for both pred and gt we just clamp into the
+    # valid display range.
+    aff = bb[:, 10:16].clamp(0.0, 1.0)
     for k, name in enumerate(_AFF_TAG_NAMES):
         panel = repeat(aff[:, k:k + 1], "b 1 h w -> b 3 h w")
         tb.add_images(head.tag(f"{variant}/aff/{name}"), panel, global_step=epoch)

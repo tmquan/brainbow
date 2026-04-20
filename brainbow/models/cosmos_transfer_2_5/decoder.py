@@ -240,13 +240,24 @@ class _DecoderAdapter3D(nn.Module):
             )
         out: Dict[str, torch.Tensor] = {}
         if "semantic" not in self._disabled_heads:
-            out["semantic"] = self.head_semantic(decoded)
+            # Semantic head is sigmoid-only (multi-label per-channel
+            # binary).  Apply the activation here so loss / metrics /
+            # tensorboard all consume probabilities directly -- there is
+            # exactly one sigmoid in the pipeline, and it lives here.
+            out["semantic"] = self.head_semantic(decoded).sigmoid()
         if "instance" not in self._disabled_heads:
             out["instance"] = self.head_instance(decoded)
         if "geometry" not in self._disabled_heads:
             out["geometry"] = self.head_geometry(decoded)
         if "brainbow" not in self._disabled_heads:
-            out["brainbow"] = self.head_brainbow(decoded)
+            # Brainbow head: channels 0-9 are regression (raw + min/avg/max
+            # RGB), channels 10-15 are 6 face-affinity binaries and need
+            # the per-channel sigmoid.  Concatenating keeps autograd happy
+            # and avoids an in-place view that would break torch.compile.
+            bb = self.head_brainbow(decoded)
+            out["brainbow"] = torch.cat(
+                [bb[:, :10], bb[:, 10:].sigmoid()], dim=1,
+            )
         return out
 
 

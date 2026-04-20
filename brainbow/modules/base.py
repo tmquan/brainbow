@@ -32,7 +32,7 @@ scalars for a given head collapse into the same TensorBoard group.
 
 import warnings
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import torch
 import torch.distributed as dist
@@ -50,6 +50,30 @@ from brainbow.metrics import (
 )
 
 _SPATIAL_AXES = {2: "h w", 3: "d h w"}
+
+
+def _head_weight(
+    loss_config: Dict[str, Any], head: str, default: float = 1.0,
+) -> float:
+    """Extract the scalar head weight from a (nested or flat) loss config."""
+    v = loss_config.get(f"weight_{head}", default)
+    if isinstance(v, Mapping):
+        return float(v.get("weight", default))
+    return float(v)
+
+
+def _head_field(
+    loss_config: Dict[str, Any], head: str, field: str, default: Any = None,
+) -> Any:
+    """Read a sub-loss field from either the nested head dict or the flat form.
+
+    Checks ``loss_config["weight_<head>"][field]`` first (new nested
+    form), then falls back to ``loss_config[field]`` (legacy flat form).
+    """
+    v = loss_config.get(f"weight_{head}")
+    if isinstance(v, Mapping) and field in v:
+        return v[field]
+    return loss_config.get(field, default)
 
 
 class BaseCircuitModule(pl.LightningModule):
@@ -127,7 +151,7 @@ class BaseCircuitModule(pl.LightningModule):
         disabled_heads = frozenset(
             name
             for name in ("semantic", "instance", "geometry", "brainbow")
-            if loss_config.get(f"weight_{name}", 1.0) == 0
+            if _head_weight(loss_config, name, default=1.0) == 0
         )
         self._disabled_heads = disabled_heads
 
@@ -138,10 +162,13 @@ class BaseCircuitModule(pl.LightningModule):
 
         clusterer_config = dict(self.training_config.get("clusterer", {}) or {})
         clusterer_name = clusterer_config.pop("name", "soft_meanshift")
-        clusterer_config.setdefault("bandwidth", loss_config.get("delta_v", 0.5))
+        clusterer_config.setdefault(
+            "bandwidth",
+            _head_field(loss_config, "instance", "delta_v", default=0.5),
+        )
         clusterer_config.setdefault(
             "normalize_embeddings",
-            loss_config.get("normalize_embeddings", False),
+            _head_field(loss_config, "instance", "normalize_embeddings", default=False),
         )
         self.clusterer = build_clusterer(clusterer_name, **clusterer_config)
 
@@ -341,19 +368,25 @@ class BaseCircuitModule(pl.LightningModule):
         prefix: str,
         bs: float,
     ) -> None:
-        sem_logits = predictions["semantic"]
+        # ``predictions["semantic"]`` is *already* a tensor of per-channel
+        # sigmoid probabilities -- the model wrapper applies sigmoid to
+        # the semantic head before anything downstream (loss, metrics,
+        # tensorboard) sees it.
+        sem_probs = predictions["semantic"]
         sem_loss = getattr(self.criterion, "semantic_loss", None)
         active = getattr(sem_loss, "active_classes", None) if sem_loss else None
-        if active is not None and active < sem_logits.shape[1]:
-            sem_logits = sem_logits[:, :active]
+        if active is not None and active < sem_probs.shape[1]:
+            sem_probs = sem_probs[:, :active]
 
-        sem_mode = getattr(sem_loss, "mode", "softmax") if sem_loss else "softmax"
-        if sem_mode == "sigmoid" and sem_logits.shape[1] == 1:
-            sem_pred = (sem_logits[:, 0].sigmoid() > 0.5).long()
+        if sem_probs.shape[1] == 1:
+            sem_pred = (sem_probs[:, 0] > 0.5).long()
             n_cls = 2
         else:
-            sem_pred = sem_logits.argmax(dim=1)
-            n_cls = sem_logits.shape[1]
+            # Multi-channel sigmoid (multi-label).  ``argmax`` is monotone
+            # under sigmoid so the class ranking matches what the old
+            # logits path produced.
+            sem_pred = sem_probs.argmax(dim=1)
+            n_cls = sem_probs.shape[1]
 
         sem_gt = targets["semantic_labels"]
         head = f"{prefix}/semantic/metric"

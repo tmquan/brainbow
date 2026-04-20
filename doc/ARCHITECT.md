@@ -1,0 +1,269 @@
+# Brainbow — Model Architecture & Parameter Budget
+
+Two end-to-end wrappers live under `brainbow/models/`:
+
+1. [`CosmosTransfer3DWrapper`](#1-cosmostransfer3dwrapper) — EM → pretrained Wan VAE → Cosmos-Transfer 2.5 DiT → VISTA task heads. **Four heads** (semantic, instance, geometry, brainbow).
+2. [`Vista3DWrapper`](#2-vista3dwrapper) — EM → SegResNetDS2 → VISTA task heads. **Three heads** (semantic, instance, geometry; no brainbow).
+
+Every channel count below mirrors `configs/default.yaml`. Parameter counts are
+approximate; use `model.get_num_parameters(trainable_only=…)` on a loaded
+instance for exact numbers.
+
+---
+
+## 1. `CosmosTransfer3DWrapper`
+
+`brainbow/models/cosmos_transfer_2_5/wrapper.py`
+
+### 1.1 Data flow
+
+```
+[B, 1, D, H, W]  EM volume
+   │
+   │ _adapt_to_rgb:          channel repeat 1 → 3                     (0 params)
+   │ pad spatial/temporal:   multiples of (4, 8, 8)                   (0 params)
+   ▼
+[B, 3, D,   H,    W   ]
+   │
+   │ vae_encoder  (Wan 3-D VAE encoder)                        ≈ 50 M params
+   │   stride  (4, 8, 8)  in (D, H, W)
+   ▼
+[B, 16, D/4, H/8, W/8]   latent grid
+   │
+   │ dit  (Cosmos-Transfer 2.5 DiT, 2B variant)                ≈ 2.3 B params
+   │   token-domain transformer: 28 blocks × hidden 2048
+   │   hooks extract features at layers {7, 14, 21, 27}
+   ▼
+[B, N, 2048] × 4   per-layer token sequences
+   │
+   │ feature_projector (_FeatureProjector3D)                   ≈ 1.1 M params
+   │   concat 4 × 2048 → MLP (1×1×1 conv) → feature_size
+   ▼
+[B, 64, D/4, H/8, W/8]
+   │
+   │ decoder_adapter._DecoderAdapter3D:                        ≈ 80 M params
+   │   to_latent:      1×1×1 conv, 64 → 16                     ≈ 1 K params
+   │   decoder_body:   Wan VAE decoder (same weights as vae_decoder)
+   │                   ≈ 73 M params (shared reference, see §1.4)
+   │   trilinear upsample to input size if needed
+   ▼
+[B, 64, D, H, W]   decoded feature map
+   │
+   ├─ head_semantic  (VistaTaskHead3D, 64 → 16)                ≈ 0.7 M params
+   ├─ head_instance  (VistaTaskHead3D, 64 → 10)                ≈ 0.7 M params
+   ├─ head_geometry  (VistaTaskHead3D, 64 → 10)                ≈ 0.7 M params
+   └─ head_brainbow  (VistaTaskHead3D, 64 → 16)                ≈ 0.7 M params
+```
+
+### 1.2 Channel map
+
+| Stage                        | Channels | Spatial factor vs input |
+|------------------------------|----------|-------------------------|
+| Input (EM)                   | **1**    | 1                       |
+| After RGB adapt              | 3        | 1                       |
+| VAE latent (DiT input)       | **16**   | 1 / (4, 8, 8)           |
+| DiT hidden dim               | **2048** | 1 / (4, 8, 8)           |
+| Extracted feature layers     | 4 × 2048 | 1 / (4, 8, 8)           |
+| `feature_projector` output   | **64**   | 1 / (4, 8, 8)           |
+| `to_latent` back to VAE      | **16**   | 1 / (4, 8, 8)           |
+| Decoder output (trilinear up)| **64**   | 1                       |
+| `head_semantic`              | `num_classes = 16`        |
+| `head_instance`              | `instance_channels = 10`  |
+| `head_geometry`              | `1 + 6 + 3 = 10`  (raw / cov-upper-triangle / dir) |
+| `head_brainbow`              | `brainbow_channels = 16`  (raw/1 + min/avg/max RGB/9 + aff/6) |
+
+### 1.3 The DiT variant (2B)
+
+From `brainbow/models/cosmos_transfer_2_5/variants.py` (`_VARIANT_CONFIGS["2B"]`):
+
+| Key                    | Value |
+|------------------------|-------|
+| HF repo                | `nvidia/Cosmos-Transfer2.5-2B` |
+| Revision               | `diffusers/general` |
+| `hidden_dim`           | **2048** |
+| `num_layers`           | **28** |
+| `num_heads`            | **16** (head_dim 128) |
+| `mlp_ratio`            | **4** |
+| `latent_channels`      | **16** |
+| `patch_size`           | **2** |
+| `spatial_compression`  | **8** |
+| `temporal_compression` | **4** |
+| Default `feature_layers` | `{n/4, n/2, 3n/4, n-1}` → `{7, 14, 21, 27}` |
+
+Per-block parameter budget:
+
+- QKV projections:         3 × 2048² ≈ 12.6 M
+- Attention output proj:   2048²     ≈  4.2 M
+- MLP up + down (×4):      2 × 2048 × 8192 ≈ 33.6 M
+- AdaLN modulation + norms ≈ 25 M
+- **~75 M per block × 28 blocks ≈ 2.1 B**, plus patch embed, final norm and
+  timestep embed ≈ 0.1-0.2 B → **~2.3 B total**.
+
+### 1.4 `_DecoderAdapter3D` — shared-weight gotcha
+
+The `decoder_adapter` holds a **reference** to the same `vae_decoder` module
+that lives on the wrapper (`wrapper.vae_decoder is
+wrapper.decoder_adapter.decoder_body`). Lightning's
+`ModelSummary` walks the module tree and **double-counts** those weights once
+per registration site. Use `CosmosTransfer3DWrapper.get_num_parameters(...)`
+(which iterates `self.parameters()` and deduplicates by `id`) for authoritative
+totals.
+
+The adapter adds, on top of the shared decoder:
+
+- `to_latent` — 1×1×1 conv, `feature_size → latent_channels` (~1 K params).
+- Four `VistaTaskHead3D` heads (~0.7 M each).
+- Optional trilinear upsample to input resolution (0 params).
+
+### 1.5 `VistaTaskHead3D`
+
+`brainbow/models/vista/heads.py` — shared by both wrappers.
+
+```
+in         → (optional 1×1 conv to refine_channels)
+           → UnetrBasicBlock (3×3×3, instance-norm, residual)
+           → UnetrBasicBlock (3×3×3, instance-norm, residual)
+           → (optional Dropout3d)
+           → 1×1 conv  → out_channels
+```
+
+No internal upsampler — spatial resolution is preserved. At
+`refine_channels=64` and `out_channels ≤ 16`, each head is **~0.7 M** params.
+
+### 1.6 Freeze flags → what actually moves
+
+| Flag                       | Target module(s)                                    | Effect when `True` |
+|----------------------------|-----------------------------------------------------|--------------------|
+| `freeze_vae_encoder`       | `vae_encoder` (and any `_vae_ref[0].encode`)        | `requires_grad_(False)` + `eval()` + forward runs under `torch.no_grad()` |
+| `freeze_dit_backbone`      | `dit` only                                          | `requires_grad_(False)`; hook path also `.detach()`s block outputs so gradient can't leak through `feature_projector` |
+| `freeze_vae_decoder`       | `decoder_adapter.decoder_body` (= `vae_decoder`)    | body frozen **except** the last up-block + `conv_norm_out`, which stay trainable as a fine-tuning shim |
+
+`freeze_dit_backbone` accepts three forms in config:
+
+| YAML value | Meaning |
+|------------|---------|
+| `true`     | permanently frozen |
+| `false`    | permanently trainable (from step 0) |
+| `1` (int)  | frozen during epoch 0, unfrozen at start of epoch 1 (optimizer rebuilt) |
+
+The phased-schedule machinery lives in
+`brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start`.
+
+### 1.7 Default-combine parameter budget
+
+With `configs/combine.yaml` (inherits `snemi3d.yaml`:
+`freeze_vae_encoder: true`, `freeze_dit_backbone: 1`, `freeze_vae_decoder: true`,
+pretrained HF Cosmos-Transfer 2B loaded):
+
+| Component                    | Total    | Epoch 0 trainable | Epoch 1+ trainable |
+|------------------------------|---------:|------------------:|-------------------:|
+| VAE encoder                  | ~50 M    | 0                 | 0                  |
+| DiT backbone                 | ~2.30 B  | 0                 | ~2.30 B            |
+| `feature_projector`          | ~1.1 M   | ~1.1 M            | ~1.1 M             |
+| `to_latent`                  | ~1 K     | ~1 K              | ~1 K               |
+| VAE decoder body (frozen)    | ~70 M    | 0                 | 0                  |
+| VAE decoder shim (last up-block + norm) | ~3 M | ~3 M          | ~3 M               |
+| 4 × `VistaTaskHead3D`        | ~3 M     | ~3 M              | ~3 M               |
+| **Total**                    | **~2.43 B** | **~7 M**       | **~2.31 B**        |
+
+The `_fallback_down` module (`brainbow/modules/cosmos_transfer_2_5/base.py`:
+73-74) is only active when no HF VAE is loaded — in the pretrained path it is
+frozen and contributes zero trainable params.
+
+### 1.8 Practical training implications
+
+- Epoch 0 trains **~7 M params** — learns how to read DiT features through a
+  clean pipeline. Converges quickly, no overfit risk.
+- Epoch 1+ trains **~2.31 B params** — the full DiT joins with its own LR
+  group (`optimizer.dit_backbone_lr`). Requires
+  `model.gradient_checkpointing: true`, otherwise memory ≈ weights + grads +
+  AdamW moments + activations easily exceeds 80 GB.
+- Shared `vae_decoder` weights mean changes made via the "shim" (last up-block
+  + out-norm) are visible to the main `wrapper.vae_decoder` too — no extra
+  state-dict management needed when saving / loading.
+
+---
+
+## 2. `Vista3DWrapper`
+
+`brainbow/models/vista/wrapper.py`
+
+### 2.1 Data flow
+
+```
+[B, 1, D, H, W]  EM volume
+   │
+   │ backbone: SegResNetDS2 (or SegResNet fallback)     ≈ 30-50 M params
+   │   blocks_down = (1, 2, 2, 4, 4)   init_filters=64
+   │   norm="instance", dsdepth=1
+   ▼
+[B, 64, D, H, W]  full-resolution feature map
+   │
+   │ (optional) point_encoder residual add                  ~0.1 M params
+   ▼
+   ├─ head_semantic  (VistaTaskHead3D, 64 → 16)             ≈ 0.7 M params
+   ├─ head_instance  (VistaTaskHead3D, 64 → 10)             ≈ 0.7 M params
+   └─ head_geometry  (VistaTaskHead3D, 64 → 10)             ≈ 0.7 M params
+```
+
+No VAE and no DiT — the SegResNetDS2 backbone does both downsampling and
+upsampling internally.
+
+### 2.2 Channel map
+
+| Stage                        | Channels |
+|------------------------------|----------|
+| Input (EM)                   | **1**    |
+| `init_filters`               | **64** (default; MONAI pretrained weights require **48**) |
+| Backbone output / head input | **`feature_size` = 64** |
+| `head_semantic`              | `num_classes = 16` |
+| `head_instance`              | `instance_channels = 10` |
+| `head_geometry`              | `1 + 6 + 3 = 10` |
+
+### 2.3 Pretraining
+
+When `pretrained=True` **and** `feature_size == 48`, `load_pretrained_vista3d_encoder`
+downloads MONAI's `VISTA3D-HF` encoder weights and loads them into the backbone
+encoder (`strict=False`). With `feature_size == 64` (our default) the load is
+skipped and the backbone starts random — trades pretrained init for a wider
+feature channel throughout.
+
+### 2.4 No freeze-flag API
+
+`Vista3DWrapper` does **not** implement `freeze_vae_encoder` /
+`freeze_dit_backbone` / `freeze_vae_decoder`. Those are Cosmos-specific. For
+Vista, the entire model is always trainable; freeze individually if needed via
+`backbone.requires_grad_(False)` etc.
+
+### 2.5 No brainbow head
+
+Brainbow is an experimental task that only ships with the Cosmos wrapper.
+`Vista3DWrapper` exposes `semantic`, `instance`, `geometry` only.
+
+### 2.6 Rough parameter budget
+
+| Component         | Params    |
+|-------------------|----------:|
+| SegResNetDS2 (64) | ~30-45 M  |
+| 3 × task heads    | ~2 M      |
+| Point encoder     | ~0.1 M    |
+| **Total**         | **~35 M** |
+
+Running Vista is roughly **70× cheaper per step** than full-unfrozen
+Cosmos-2B and ~5× cheaper than the Cosmos warm-up (epoch 0). Reasonable for
+local iteration and debugging when you don't need a brainbow head.
+
+---
+
+## 3. Choosing between the two
+
+| Use case                                               | Recommended wrapper |
+|--------------------------------------------------------|---------------------|
+| Full brainbow supervision (raw + min/avg/max + aff)    | Cosmos              |
+| Fast local dev / debugging on a single GPU             | Vista               |
+| Sufficient compute + data for 2.3 B parameter fine-tune | Cosmos (with warm-up schedule) |
+| Transfer from MONAI VISTA3D pretrain (`feature_size=48`)| Vista               |
+
+The `configs/default.yaml` and `configs/snemi3d.yaml` files default to
+`model.type: cosmostransfer3d`; switch to `vista3d` in the config to train the
+Vista wrapper instead.
