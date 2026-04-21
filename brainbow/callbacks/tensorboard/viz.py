@@ -27,8 +27,20 @@ def _to_2d(t: torch.Tensor) -> torch.Tensor:
 def _normalise(t: torch.Tensor) -> torch.Tensor:
     """Per-image min-max normalisation to [0, 1].
 
-    Each image in the batch is normalised independently so that
-    its minimum becomes 0 and its maximum becomes 1.
+    Each image in the batch is normalised independently so that its
+    minimum becomes 0 and its maximum becomes 1.
+
+    Note:
+        This is a **contrast stretch**, not a simple clip.  Applying
+        it to the ground-truth image panel (``true/image``) makes the
+        panel visually comparable across samples with different
+        intensity distributions, but it also means that
+        ``true/image`` can look brighter / more contrasted than the
+        brainbow ``pred/raw`` panel, which is shown via
+        ``clamp(0, 1)`` on the already-normalised reconstruction.
+        Keep that in mind when comparing reconstruction quality
+        visually; the loss scalars (``brainbow/loss/raw``) are
+        computed on the unstretched signal.
     """
     flat = rearrange(t, "b ... -> b (...)")                        # [B, N]
     lo = reduce(flat, "b n -> b 1", "min")

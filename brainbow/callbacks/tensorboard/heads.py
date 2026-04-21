@@ -16,6 +16,17 @@ from brainbow.callbacks.tensorboard.geometry import (
     _render_dir_quiver,
 )
 from brainbow.callbacks.tensorboard.tags import TagContext
+# Channel layout constants for the brainbow head live in the loss
+# module -- single source of truth.  Re-importing them here (rather
+# than re-declaring the magic numbers) guarantees that any future
+# change to the brainbow channel layout (e.g. extra affinity
+# directions) propagates into the visualiser automatically.
+from brainbow.losses.brainbow import (
+    _AFF_NAMES as _BB_AFF_NAMES,
+    _BRAINBOW_CHANNELS,
+    _N_AFF,
+    _N_LOC,
+)
 from brainbow.losses.geometry import upper_tri_channels_to_matrix
 from brainbow.callbacks.tensorboard.viz import (
     _label_to_rgb,
@@ -23,6 +34,11 @@ from brainbow.callbacks.tensorboard.viz import (
     _project_embedding,
     _to_2d,
 )
+
+# Lowercase affinity tag segments (T/B/U/D/L/R -> t/b/u/d/l/r) derived
+# from the canonical Z-Y-X-ordered name tuple in ``brainbow.losses.
+# brainbow._AFF_NAMES``.
+_AFF_TAG_NAMES: Tuple[str, ...] = tuple(name.lower() for name in _BB_AFF_NAMES)
 
 
 def _log_semantic(
@@ -102,31 +118,29 @@ def _log_instance(
     if clusterer is None:
         return
     if sem_fg is not None:
+        # ``sem_ids`` is already 2-D (the central slice was taken inside
+        # ``_log_semantic`` via ``_to_2d``), so ``fg_mask_pred`` is
+        # [B, H, W] -- same spatial rank as ``inst`` above.
         fg_mask_pred = sem_ids > 0
         fg_alpha = sem_fg
     else:
         # Semantic head disabled (e.g. ``weight_semantic=0``):
         # there is no predicted foreground at inference time.
-        # Use an all-ones mask so the panel honestly reflects
-        # what will happen when the model is deployed — every
-        # voxel is clustered — instead of silently pulling
-        # information from GT labels and flattering the viz.
+        # Use an all-ones mask so the panel honestly reflects what
+        # will happen when the model is deployed -- every voxel is
+        # clustered -- instead of silently pulling information from
+        # GT labels and flattering the viz.
         fg_mask_pred = torch.ones_like(labels, dtype=torch.bool)
         fg_alpha = rearrange(fg_mask_pred.float(), "b ... -> b 1 ...")
-    # `inst` has been sliced to 2-D by `_to_2d` above; the fg mask
-    # must carry the same spatial rank, i.e. [B, H, W].  (Historically
-    # an extra channel dim was added here which the flattening
-    # clusterers tolerated but `spatial_cc` does not — keep shapes
-    # honest.)
-    if inst.dim() == 5:
-        fg_mask_full = rearrange(
-            _to_2d(rearrange(fg_mask_pred, "b ... -> b 1 ...")),
-            "b 1 ... -> b ...",
-        )
-    else:
-        fg_mask_full = fg_mask_pred
-    ins_pred, _, _ = clusterer(inst, fg_mask_full)
+
+    # Both ``inst`` and ``fg_mask_pred`` are 2-D here (``_to_2d`` was
+    # applied above and ``sem_ids`` / ``labels`` arrive 2-D from the
+    # orchestrator), so the clusterer sees matching ranks [B, H, W].
+    ins_pred, _, _ = clusterer(inst, fg_mask_pred)
     if ins_pred.dim() > 3:
+        # Defensive: a clusterer that returns a 4-D tensor (B, 1, H, W)
+        # is still acceptable -- squeeze the channel axis so
+        # ``_label_to_rgb`` receives the expected [B, H, W] long map.
         ins_pred = rearrange(
             _to_2d(rearrange(ins_pred, "b ... -> b 1 ...")),
             "b 1 ... -> b ...",
@@ -239,9 +253,6 @@ def _log_brainbow(
         _add_brainbow_panels(tb, head, "true", bb_true, epoch, is_pred=False)
 
 
-_AFF_TAG_NAMES: Tuple[str, ...] = ("t", "b", "u", "d", "l", "r")
-
-
 def _add_brainbow_panels(
     tb: Any,
     head: TagContext,
@@ -253,16 +264,28 @@ def _add_brainbow_panels(
 ) -> None:
     """Split a ``[n, 16, H, W]`` brainbow tensor into its sub-panels.
 
+    Channel layout (imported from
+    :mod:`brainbow.losses.brainbow` -- single source of truth)::
+
+        ch 0                 : raw   (dense intensity; grayscale)
+        ch 1 .. 4            : min   (bbox-min xyz colour)
+        ch 4 .. 7            : avg   (centroid xyz colour)
+        ch 7 .. ``_N_LOC``   : max   (bbox-max xyz colour)
+        ch ``_N_LOC`` ..     : aff   (``_N_AFF`` face affinities,
+         ``_BRAINBOW_CHANNELS``         Z-Y-X order: T B U D L R)
+
     Args:
         tb: TensorBoard SummaryWriter.
-        head: ``TagContext`` for the brainbow head (i.e. ``ctx.for_head("brainbow")``).
+        head: ``TagContext`` for the brainbow head (i.e.
+            ``ctx.for_head("brainbow")``).
         variant: ``"pred"`` or ``"true"``.  Becomes the next tag segment.
-        bb: ``[n, 16, H, W]`` brainbow map (already 2-D sliced).  For
-            predictions this is the post-activation model output (the
-            wrapper has applied sigmoid to all 16 channels); for the
-            ground-truth target it is the ``[0, 1]``-valued target
-            tensor.  Both cases are already in display range and the
-            ``clamp`` below is just a rounding guard.
+        bb: ``[n, _BRAINBOW_CHANNELS, H, W]`` brainbow map (already 2-D
+            sliced).  For predictions this is the post-activation model
+            output (the wrapper has applied sigmoid to **every**
+            channel); for the ground-truth target it is the
+            ``[0, 1]``-valued target tensor.  Both cases are already in
+            display range and the ``clamp`` below is just a rounding
+            guard.
         epoch: global step for TensorBoard.
         is_pred: ``True`` when ``bb`` comes from the model (post-sigmoid
             on every channel), ``False`` when it is the ground-truth
@@ -271,9 +294,21 @@ def _add_brainbow_panels(
             the input image and would duplicate
             ``{ctx.prefix}/true/image``.
     """
+    # Sanity-check: the panel indices below assume the canonical 16-
+    # channel brainbow layout from ``brainbow.losses.brainbow``.  If that
+    # ever changes the slicing has to be updated too; flag loudly rather
+    # than silently show wrong content.
+    if bb.shape[1] != _BRAINBOW_CHANNELS:
+        raise ValueError(
+            f"_add_brainbow_panels expects {_BRAINBOW_CHANNELS} channels, "
+            f"got {bb.shape[1]} (variant={variant!r})."
+        )
+
+    # Localisation (colour) panels: [min | avg | max] of the xyz bbox /
+    # centroid, normalised by the crop (D, H, W).  Zero on background.
     mn = bb[:, 1:4].clamp(0.0, 1.0)
     av = bb[:, 4:7].clamp(0.0, 1.0)
-    mx = bb[:, 7:10].clamp(0.0, 1.0)
+    mx = bb[:, 7:_N_LOC].clamp(0.0, 1.0)
     # ``brainbow[:, 0]`` is supervised to equal the normalised input
     # image, so the ground-truth ``raw`` panel would duplicate
     # ``{ctx.prefix}/true/image`` pixel-for-pixel.  Emit ``raw`` only on
@@ -289,7 +324,11 @@ def _add_brainbow_panels(
     # Affinity channels: the wrapper has already applied sigmoid on the
     # prediction side (the same sigmoid that covers ch 0-9), so for both
     # pred and true we just clamp into the valid display range.
-    aff = bb[:, 10:16].clamp(0.0, 1.0)
+    aff = bb[:, _N_LOC:_BRAINBOW_CHANNELS].clamp(0.0, 1.0)
+    assert aff.shape[1] == _N_AFF == len(_AFF_TAG_NAMES), (
+        f"affinity channel / tag count mismatch: tensor has {aff.shape[1]} "
+        f"channels, expected {_N_AFF} (tags={_AFF_TAG_NAMES})."
+    )
     for k, name in enumerate(_AFF_TAG_NAMES):
         panel = repeat(aff[:, k:k + 1], "b 1 h w -> b 3 h w")
         tb.add_images(head.tag(f"{variant}/{name}"), panel, global_step=epoch)

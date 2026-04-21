@@ -4,6 +4,29 @@ Contains the multi-layer feature projector, a random-init progressive
 upsampler, and the pretrained-VAE-aware :class:`_DecoderAdapter3D`
 that hosts the four task heads (semantic, instance, geometry,
 brainbow).
+
+Head activations (applied exactly once, here, before loss / metric /
+visualisation consume the outputs)::
+
+    semantic :  sigmoid on every channel (per-channel multi-label
+                binary probabilities)
+    instance :  linear (discriminative embedding; unbounded Euclidean
+                space -- sigmoid would collapse it into the unit
+                hypercube)
+    geometry :  sigmoid on ch 0 (``raw``, [0, 1] target); linear on
+                ``cov`` and ``dir`` (signed values -- sigmoid would
+                kill the sign).  Channel layout is owned by
+                :class:`brainbow.losses.geometry.GeometryLoss`::
+                    [raw(1) | cov(S*(S+1)/2) | dir(S)]
+    brainbow :  sigmoid on every channel (every target lives in
+                [0, 1]: raw intensity, normalised xyz colours, binary
+                face affinities).  Channel layout is owned by
+                :mod:`brainbow.losses.brainbow`::
+                    [raw(1) | min/avg/max (9) | aff (6)]
+
+Keeping the activation policy in a single place (this file) means the
+loss modules consume probabilities directly and the TensorBoard
+image logger never has to re-apply any activation.
 """
 
 import logging

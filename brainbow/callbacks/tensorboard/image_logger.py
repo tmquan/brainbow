@@ -24,6 +24,19 @@ class ImageLogger(pl.Callback):
     Logs visualisations for both **training** and **validation** batches
     using **automatic** mode (image-only forward).
 
+    Lifecycle (per epoch, rank-0 only)::
+
+        on_{train,validation}_batch_end(batch_idx == 0)
+            -> cache first batch on CPU (self._{train,val}_batch)
+
+        on_{train,validation}_epoch_end
+            -> eval mode + autocast + no_grad
+            -> forward(images)
+            -> optional build_brainbow_target(labels, images)
+            -> _log_predictions(tb, ctx, ...)   # heads.py orchestrator
+                   -> _log_semantic / _log_instance
+                      _log_geometry / _log_brainbow
+
     All tags live under ``{stage}/{mode}/...`` where
     ``stage`` ∈ {``train``, ``val``} and ``mode`` = ``"automatic"``::
 
@@ -36,6 +49,10 @@ class ImageLogger(pl.Callback):
         {stage}/automatic/brainbow/pred/{raw,min,avg,max}
         {stage}/automatic/brainbow/true/{min,avg,max}
         {stage}/automatic/brainbow/{pred,true}/{t,b,u,d,l,r}
+
+    ``brainbow/true/raw`` is intentionally **not** emitted: it would
+    duplicate ``{stage}/automatic/true/image`` pixel-for-pixel (the
+    brainbow ``raw`` channel is literally the input image).
 
     This matches the scalar hierarchy emitted by
     :class:`brainbow.modules.base.BaseCircuitModule`
@@ -230,8 +247,15 @@ class ImageLogger(pl.Callback):
         self, tb, pl_module, batch, *, stage: str,
     ):
         epoch = pl_module.current_epoch
+        # Gate autocast on the actual device the module lives on, **not**
+        # on ``torch.cuda.is_available()``: the latter is True whenever
+        # any GPU is visible to the process, which would spuriously flip
+        # CUDA autocast on when the user has chosen a CPU trainer.
         device_type = str(pl_module.device).split(":")[0]
-        with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=torch.cuda.is_available()):
+        autocast_enabled = device_type == "cuda"
+        with torch.no_grad(), torch.amp.autocast(
+            device_type=device_type, enabled=autocast_enabled,
+        ):
             images = batch["image"].to(pl_module.device)
             if images.dim() == self.spatial_dims + 1:
                 images = rearrange(images, "b ... -> b 1 ...")
@@ -243,6 +267,10 @@ class ImageLogger(pl.Callback):
             n = min(images.shape[0], self.max_images)
             preds_auto = pl_module.model(images[:n])
 
+        # Autocast-returned tensors may be bf16/fp16.  Cast back to fp32
+        # so every downstream op in this callback (colour LUTs,
+        # matplotlib renderers, TB image encoders) operates in a single,
+        # display-friendly dtype.
         preds_auto = {
             k: v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v
             for k, v in preds_auto.items()
