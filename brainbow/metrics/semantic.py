@@ -67,7 +67,7 @@ def compute_per_point_dice(
 ) -> float:
     """Mean Dice coefficient across foreground classes for a single sample."""
     p_oh, t_oh = _to_onehot_pair(pred.cpu(), target.cpu(), num_classes, ignore_index)
-    metric = DiceMetric(include_background=False, reduction="mean", ignore_empty=True)
+    metric = DiceMetric(include_background=True, reduction="mean", ignore_empty=False)
     result = metric(p_oh, t_oh)
     val = result.nanmean().item()
     return val if val == val else 0.0  # handle NaN
