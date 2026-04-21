@@ -34,7 +34,7 @@ def _log_semantic(
     *,
     active_classes: Optional[int] = None,
 ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-    """Log ``{stage}/{mode}/semantic/prediction`` and return fg tensors.
+    """Log ``{stage}/{mode}/semantic/pred`` and return fg tensors.
 
     Returns:
         ``(sem_fg, sem_ids)``:
@@ -66,7 +66,7 @@ def _log_semantic(
         sem_ids = sem.argmax(dim=1)
         sem_fg = sem[:, 1:2]
     sem_gray = repeat(sem_fg, "b 1 h w -> b 3 h w")
-    tb.add_images(head.tag("prediction"), sem_gray, global_step=epoch)
+    tb.add_images(head.tag("pred"), sem_gray, global_step=epoch)
     return sem_fg, sem_ids
 
 
@@ -84,8 +84,9 @@ def _log_instance(
     projection_algorithm: str = "pca",
     projection_backend: str = "auto",
 ) -> None:
-    """Log the manifold-projected embedding (``instance/{pca|svd|umap}``)
-    and, when a clusterer is provided, the clustered ``instance/prediction``."""
+    """Log the manifold-projected embedding
+    (``instance/pred/{pca|svd|umap}``) and, when a clusterer is
+    provided, the clustered label map under ``instance/pred/label``."""
     if "instance" not in preds:
         return
     head = ctx.for_head("instance")
@@ -94,7 +95,9 @@ def _log_instance(
         inst, n_components=3,
         algorithm=projection_algorithm, backend=projection_backend,
     )
-    tb.add_images(head.tag(projection_algorithm), inst_rgb, global_step=epoch)
+    tb.add_images(
+        head.tag(f"pred/{projection_algorithm}"), inst_rgb, global_step=epoch,
+    )
 
     if clusterer is None:
         return
@@ -129,7 +132,7 @@ def _log_instance(
             "b 1 ... -> b ...",
         )
     ins_rgb = _label_to_rgb(ins_pred.long()) * fg_alpha
-    tb.add_images(head.tag("prediction"), ins_rgb, global_step=epoch)
+    tb.add_images(head.tag("pred/label"), ins_rgb, global_step=epoch)
 
 
 def _log_geometry(
@@ -145,11 +148,11 @@ def _log_geometry(
     sem_ids: Optional[torch.Tensor],
     dir_target: str = "centroid",
 ) -> None:
-    """Log the three geometry panels under ``{stage}/{mode}/geometry/``:
+    """Log the three geometry panels under ``{stage}/{mode}/geometry/pred/``:
 
-    * ``raw``                     -- raw-intensity reconstruction (ch 0, grayscale)
-    * ``dir_{centroid|skeleton}`` -- direction quiver overlay
-    * ``cov``                     -- covariance ellipse glyphs (from
+    * ``pred/raw``                     -- raw-intensity reconstruction (ch 0, grayscale)
+    * ``pred/dir_{centroid|skeleton}`` -- direction quiver overlay
+    * ``pred/cov``                     -- covariance ellipse glyphs (from
       the upper-triangle channels, expanded to full matrices here
       only for rendering)
 
@@ -190,9 +193,11 @@ def _log_geometry(
         dir_target=dir_target,
     )
 
-    tb.add_images(head.tag("raw"), g_raw_rgb, global_step=epoch)
-    tb.add_images(head.tag(f"dir_{dir_target}"), g_dir_rgb, global_step=epoch)
-    tb.add_images(head.tag("cov"), g_cov_rgb, global_step=epoch)
+    tb.add_images(head.tag("pred/raw"), g_raw_rgb, global_step=epoch)
+    tb.add_images(
+        head.tag(f"pred/dir_{dir_target}"), g_dir_rgb, global_step=epoch,
+    )
+    tb.add_images(head.tag("pred/cov"), g_cov_rgb, global_step=epoch)
 
 
 def _log_brainbow(
@@ -215,12 +220,14 @@ def _log_brainbow(
                    order; grayscale)
 
     Predictions arriving here are post-activation: the model wrapper
-    applies sigmoid to channels 10-15 of the brainbow head (the 6 face
-    affinities) so this callback does **not** re-apply any activation.
+    applies a single sigmoid to all 16 channels of the brainbow head
+    (every target lives in ``[0, 1]``) so this callback does **not**
+    re-apply any activation; the ``clamp`` below is purely a guard for
+    float-rounding drift.
     Panels are written under ``brainbow/pred/*`` and, when
-    ``brainbow_target`` is supplied, also under ``brainbow/gt/*`` so the
-    model output and its supervision signal can be compared side-by-side
-    in TensorBoard.
+    ``brainbow_target`` is supplied, also under ``brainbow/true/*`` so
+    the model output and its supervision signal can be compared
+    side-by-side in TensorBoard.
     """
     if "brainbow" not in preds:
         return
@@ -228,8 +235,8 @@ def _log_brainbow(
     bb_pred = _to_2d(preds["brainbow"][:n])
     _add_brainbow_panels(tb, head, "pred", bb_pred, epoch, is_pred=True)
     if brainbow_target is not None:
-        bb_gt = _to_2d(brainbow_target[:n])
-        _add_brainbow_panels(tb, head, "gt", bb_gt, epoch, is_pred=False)
+        bb_true = _to_2d(brainbow_target[:n])
+        _add_brainbow_panels(tb, head, "true", bb_true, epoch, is_pred=False)
 
 
 _AFF_TAG_NAMES: Tuple[str, ...] = ("t", "b", "u", "d", "l", "r")
@@ -249,34 +256,43 @@ def _add_brainbow_panels(
     Args:
         tb: TensorBoard SummaryWriter.
         head: ``TagContext`` for the brainbow head (i.e. ``ctx.for_head("brainbow")``).
-        variant: ``"pred"`` or ``"gt"``.  Becomes the next tag segment.
+        variant: ``"pred"`` or ``"true"``.  Becomes the next tag segment.
         bb: ``[n, 16, H, W]`` brainbow map (already 2-D sliced).  For
             predictions this is the post-activation model output (the
-            wrapper has applied sigmoid to channels 10-15); for the
+            wrapper has applied sigmoid to all 16 channels); for the
             ground-truth target it is the ``[0, 1]``-valued target
-            tensor.
+            tensor.  Both cases are already in display range and the
+            ``clamp`` below is just a rounding guard.
         epoch: global step for TensorBoard.
         is_pred: ``True`` when ``bb`` comes from the model (post-sigmoid
-            on the affinity channels), ``False`` when it is the
-            ground-truth target tensor.  Kept on the signature for
-            symmetry; both branches now go through the same clamp.
+            on every channel), ``False`` when it is the ground-truth
+            target tensor.  Also gates the ``raw`` panel: on the ground-
+            truth branch we skip it because ``bb[:, 0]`` is literally
+            the input image and would duplicate
+            ``{ctx.prefix}/true/image``.
     """
-    raw = repeat(bb[:, 0:1].clamp(0.0, 1.0), "b 1 h w -> b 3 h w")
     mn = bb[:, 1:4].clamp(0.0, 1.0)
     av = bb[:, 4:7].clamp(0.0, 1.0)
     mx = bb[:, 7:10].clamp(0.0, 1.0)
-    tb.add_images(head.tag(f"{variant}/raw"), raw, global_step=epoch)
+    # ``brainbow[:, 0]`` is supervised to equal the normalised input
+    # image, so the ground-truth ``raw`` panel would duplicate
+    # ``{ctx.prefix}/true/image`` pixel-for-pixel.  Emit ``raw`` only on
+    # the prediction side where it actually carries information (the
+    # model's autoencoder reconstruction).
+    if is_pred:
+        raw = repeat(bb[:, 0:1].clamp(0.0, 1.0), "b 1 h w -> b 3 h w")
+        tb.add_images(head.tag(f"{variant}/raw"), raw, global_step=epoch)
     tb.add_images(head.tag(f"{variant}/min"), mn, global_step=epoch)
     tb.add_images(head.tag(f"{variant}/avg"), av, global_step=epoch)
     tb.add_images(head.tag(f"{variant}/max"), mx, global_step=epoch)
 
     # Affinity channels: the wrapper has already applied sigmoid on the
-    # prediction side, so for both pred and gt we just clamp into the
-    # valid display range.
+    # prediction side (the same sigmoid that covers ch 0-9), so for both
+    # pred and true we just clamp into the valid display range.
     aff = bb[:, 10:16].clamp(0.0, 1.0)
     for k, name in enumerate(_AFF_TAG_NAMES):
         panel = repeat(aff[:, k:k + 1], "b 1 h w -> b 3 h w")
-        tb.add_images(head.tag(f"{variant}/aff/{name}"), panel, global_step=epoch)
+        tb.add_images(head.tag(f"{variant}/{name}"), panel, global_step=epoch)
 
 
 def _log_predictions(
@@ -301,22 +317,24 @@ def _log_predictions(
 
     * mode level ::
 
-        {ctx.prefix}/image
-        {ctx.prefix}/label
+        {ctx.prefix}/true/image
+        {ctx.prefix}/true/label
 
     * per-head (only when the corresponding output is present in
       ``preds``) ::
 
-        {ctx.prefix}/semantic/prediction
-        {ctx.prefix}/instance/{pca|svd|umap}
-        {ctx.prefix}/instance/prediction                  (if clusterer)
-        {ctx.prefix}/geometry/dir_{centroid|skeleton}
-        {ctx.prefix}/geometry/cov
-        {ctx.prefix}/geometry/raw
+        {ctx.prefix}/semantic/pred
+        {ctx.prefix}/instance/pred/{pca|svd|umap}
+        {ctx.prefix}/instance/pred/label                 (if clusterer)
+        {ctx.prefix}/geometry/pred/dir_{centroid|skeleton}
+        {ctx.prefix}/geometry/pred/cov
+        {ctx.prefix}/geometry/pred/raw
         {ctx.prefix}/brainbow/pred/{raw,min,avg,max}
-        {ctx.prefix}/brainbow/pred/aff/{t,b,u,d,l,r}     (Z-Y-X order)
-        {ctx.prefix}/brainbow/gt/{raw,min,avg,max}       (if target)
-        {ctx.prefix}/brainbow/gt/aff/{t,b,u,d,l,r}       (if target)
+        {ctx.prefix}/brainbow/pred/{t,b,u,d,l,r}         (Z-Y-X order)
+        {ctx.prefix}/brainbow/true/{min,avg,max}         (if target;
+            ``true/raw`` is omitted because it duplicates
+            ``{ctx.prefix}/true/image``)
+        {ctx.prefix}/brainbow/true/{t,b,u,d,l,r}         (if target)
 
     Args:
         tb: TensorBoard SummaryWriter.
@@ -329,7 +347,7 @@ def _log_predictions(
         n: number of images.
         epoch: global step for TensorBoard.
         clusterer: optional clusterer (SoftMeanShift / HDBSCAN / MeanShift)
-            for producing the ``instance/prediction`` panel.
+            for producing the ``instance/pred/label`` panel.
         dir_target: ``"centroid"`` or ``"skeleton"`` (geometry head).
         active_classes: number of active semantic channels (from config).
         projection_algorithm: Manifold algorithm for the ``instance/*``
@@ -351,8 +369,8 @@ def _log_predictions(
 
     img_gray = repeat(_normalise(images), "b 1 h w -> b 3 h w").contiguous()
     lbl_rgb = _label_to_rgb(labels.long())
-    tb.add_images(ctx.tag("image"), img_gray, global_step=epoch)
-    tb.add_images(ctx.tag("label"), lbl_rgb, global_step=epoch)
+    tb.add_images(ctx.tag("true/image"), img_gray, global_step=epoch)
+    tb.add_images(ctx.tag("true/label"), lbl_rgb, global_step=epoch)
 
     sem_fg, sem_ids = _log_semantic(
         tb, ctx, preds, n, epoch, active_classes=active_classes,

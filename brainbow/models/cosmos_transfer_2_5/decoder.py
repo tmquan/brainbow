@@ -246,18 +246,33 @@ class _DecoderAdapter3D(nn.Module):
             # exactly one sigmoid in the pipeline, and it lives here.
             out["semantic"] = self.head_semantic(decoded).sigmoid()
         if "instance" not in self._disabled_heads:
+            # Instance head stays linear: the discriminative embedding
+            # loss uses unbounded Euclidean space (delta_v / delta_d
+            # margins + centroid-norm regulariser) and a sigmoid would
+            # trap every voxel in the unit hypercube.
             out["instance"] = self.head_instance(decoded)
         if "geometry" not in self._disabled_heads:
-            out["geometry"] = self.head_geometry(decoded)
-        if "brainbow" not in self._disabled_heads:
-            # Brainbow head: channels 0-9 are regression (raw + min/avg/max
-            # RGB), channels 10-15 are 6 face-affinity binaries and need
-            # the per-channel sigmoid.  Concatenating keeps autograd happy
-            # and avoids an in-place view that would break torch.compile.
-            bb = self.head_brainbow(decoded)
-            out["brainbow"] = torch.cat(
-                [bb[:, :10], bb[:, 10:].sigmoid()], dim=1,
+            # Geometry head layout: [raw(1) | cov(S*(S+1)/2) | dir(S)].
+            # - raw (ch 0)    : [0, 1] target -> sigmoid.
+            # - cov (ch 1..)  : trace-normalised covariance with signed
+            #   off-diagonals; leave linear (sigmoid would kill the sign).
+            # - dir (last S)  : signed unit-vector components in [-1, 1];
+            #   leave linear for the same reason.
+            # Concatenation (not in-place) keeps autograd happy and avoids
+            # a view that would break torch.compile.
+            geom = self.head_geometry(decoded)
+            out["geometry"] = torch.cat(
+                [geom[:, :1].sigmoid(), geom[:, 1:]], dim=1,
             )
+        if "brainbow" not in self._disabled_heads:
+            # Brainbow head: every target lives in [0, 1] --
+            # ch 0 is the normalised raw image, ch 1-9 are per-instance
+            # bbox / centroid coordinates divided by (D, H, W), and
+            # ch 10-15 are binary face affinities.  A single sigmoid on
+            # all 16 channels is therefore the correct activation; the
+            # BCE / Dice / IoU sub-losses on the affinity block expect
+            # pre-sigmoided probabilities.
+            out["brainbow"] = self.head_brainbow(decoded).sigmoid()
         return out
 
 

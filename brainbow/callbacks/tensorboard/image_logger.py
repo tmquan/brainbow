@@ -27,13 +27,15 @@ class ImageLogger(pl.Callback):
     All tags live under ``{stage}/{mode}/...`` where
     ``stage`` ∈ {``train``, ``val``} and ``mode`` = ``"automatic"``::
 
-        {stage}/automatic/image
-        {stage}/automatic/label
-        {stage}/automatic/semantic/prediction
-        {stage}/automatic/instance/{pca|svd|umap}
-        {stage}/automatic/instance/prediction
-        {stage}/automatic/geometry/{dir_centroid|cov|raw}
-        {stage}/automatic/brainbow/{pred,gt}/{raw,min,avg,max}
+        {stage}/automatic/true/image
+        {stage}/automatic/true/label
+        {stage}/automatic/semantic/pred
+        {stage}/automatic/instance/pred/{pca|svd|umap}
+        {stage}/automatic/instance/pred/label
+        {stage}/automatic/geometry/pred/{dir_centroid|cov|raw}
+        {stage}/automatic/brainbow/pred/{raw,min,avg,max}
+        {stage}/automatic/brainbow/true/{min,avg,max}
+        {stage}/automatic/brainbow/{pred,true}/{t,b,u,d,l,r}
 
     This matches the scalar hierarchy emitted by
     :class:`brainbow.modules.base.BaseCircuitModule`

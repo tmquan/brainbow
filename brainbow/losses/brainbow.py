@@ -320,11 +320,12 @@ class BrainbowLoss(nn.Module):
         weight_raw:   Weight of the raw-intensity channel (ch 0).
         weight_ce:    Weight of the BCE sub-loss on the 6 affinity
             channels (ch 10-15).  The model wrapper applies ``sigmoid``
-            to channels 10-15 of the brainbow head **before** this loss
-            sees them, so the BCE is computed on probabilities (not
-            logits) via :func:`F.binary_cross_entropy`.  Uses
-            ``pos_weight = class_weights`` when provided (broadcast over
-            spatial dims; mirrors ``BCEWithLogitsLoss`` semantics).
+            to **all 16** brainbow channels **before** this loss sees
+            them (every target lives in ``[0, 1]``), so the BCE is
+            computed on probabilities (not logits) via
+            :func:`F.binary_cross_entropy`.  Uses ``pos_weight =
+            class_weights`` when provided (broadcast over spatial dims;
+            mirrors ``BCEWithLogitsLoss`` semantics).
         weight_dice:  Weight of the soft-Dice sub-loss on the 6 affinity
             channels (MONAI :class:`DiceLoss` with ``sigmoid=False`` --
             the wrapper has already applied sigmoid).
@@ -518,7 +519,9 @@ class BrainbowLoss(nn.Module):
         """CE + Dice + IoU sub-losses on sigmoid affinities (ch 10-15).
 
         ``pred`` is **already** in ``[0, 1]`` (the model wrapper applies
-        sigmoid to channels 10-15 of the brainbow head).  Returns a dict
+        a single sigmoid to every brainbow channel, so both the
+        regression head ch 0-9 and these affinity channels 10-15 arrive
+        pre-activated).  Returns a dict
         with keys ``ce``, ``dice``, ``iou``; each sub-term is only
         computed when its weight is non-zero, the rest are filled with a
         zero tensor matching the prediction dtype/device so downstream
