@@ -2,7 +2,7 @@
 Combined segmentation loss.
 
 Composes :class:`SemanticLoss`, :class:`InstanceLoss`,
-:class:`GeometryLoss` and :class:`BrainbowLoss` into a single dict-
+:class:`GeometryLoss` and :class:`BoundaryLoss` into a single dict-
 returning module shared by every Lightning module in the project
 (Vista3D, Cosmos-Transfer 3D).  Any task loss whose weight is
 ``0.0`` is not instantiated and contributes zero to the total.
@@ -26,7 +26,7 @@ import torch.nn as nn
 from brainbow.losses.semantic import SemanticLoss
 from brainbow.losses.instance import InstanceLoss
 from brainbow.losses.geometry import GeometryLoss
-from brainbow.losses.brainbow import BrainbowLoss
+from brainbow.losses.boundary import BoundaryLoss
 
 
 HeadConfig = Union[float, int, Mapping[str, Any]]
@@ -60,11 +60,15 @@ _INSTANCE_FLAT_KEYS: Tuple[str, ...] = (
     "delta_v", "delta_d", "normalize_embeddings", "max_hard_pairs",
     "anchor_to_centroid", "centroid_scale",
 )
-_BRAINBOW_FLAT_PREFIX: str = "brainbow_"
+# Legacy flat-kwarg prefix for the boundary head.  Historical configs
+# used ``brainbow_<key>``; the head was renamed to ``boundary`` but the
+# old prefix is still accepted so older configs keep loading.
+_BOUNDARY_FLAT_PREFIX: str = "boundary_"
+_BOUNDARY_FLAT_PREFIX_LEGACY: str = "brainbow_"
 
 
 class CombinedLoss(nn.Module):
-    """Weighted sum of SemanticLoss + InstanceLoss + GeometryLoss + BrainbowLoss.
+    """Weighted sum of SemanticLoss + InstanceLoss + GeometryLoss + BoundaryLoss.
 
     Each task loss is only constructed when its weight is strictly
     positive.  With ``learned_task_weights=True`` the scalar weights
@@ -84,23 +88,24 @@ class CombinedLoss(nn.Module):
       sub-loss constructor.  ``SemanticLoss`` is sigmoid-only (the model
       wrapper applies sigmoid to the semantic head before the loss sees
       it) so there is no ``semantic_mode`` knob; the same applies to the
-      6 brainbow affinity channels (``BrainbowLoss``).
+      6 boundary affinity channels (``BoundaryLoss``).
 
     - **Scalar float** (legacy flat form).  In this case the sub-loss
       kwargs are read from the matching top-level flat kwargs
-      (e.g. ``weight_ce``, ``delta_v``, ``brainbow_weight_raw``).  This
+      (e.g. ``weight_ce``, ``delta_v``, ``boundary_weight_raw``).  This
       preserves compatibility with configs written against the pre-nest
       signature.
 
-    For the ``brainbow`` head the legacy flat kwargs are prefixed with
-    ``brainbow_`` to avoid colliding with ``GeometryLoss``'s
-    ``weight_raw``; inside the nested mapping the prefix is dropped
-    (``weight_raw``, ``weight_min``, ...).
+    For the ``boundary`` head the legacy flat kwargs are prefixed with
+    ``boundary_`` (the historical ``brainbow_`` prefix still works) to
+    avoid colliding with ``GeometryLoss``'s ``weight_raw``; inside the
+    nested mapping the prefix is dropped (``weight_raw``,
+    ``weight_min``, ...).
 
     Args:
         spatial_dims: 2 or 3 (controls InstanceLoss / GeometryLoss).
         weight_semantic / weight_instance / weight_geometry /
-            weight_brainbow: head config (float or nested mapping; see above).
+            weight_boundary: head config (float or nested mapping; see above).
         learned_task_weights: if ``True``, weights are learned via
             log-variances and the static weights become initialisations.
         ignore_index: label value excluded from every loss term.
@@ -116,7 +121,7 @@ class CombinedLoss(nn.Module):
         weight_semantic: HeadConfig = 1.0,
         weight_instance: HeadConfig = 1.0,
         weight_geometry: HeadConfig = 0.0,
-        weight_brainbow: HeadConfig = 0.0,
+        weight_boundary: Optional[HeadConfig] = None,
         learned_task_weights: bool = False,
         ignore_index: int = -100,
         **legacy_kwargs: Any,
@@ -124,16 +129,24 @@ class CombinedLoss(nn.Module):
         super().__init__()
         self.spatial_dims = spatial_dims
 
+        # Back-compat: accept the old ``weight_brainbow`` key too.  If the
+        # caller passes both we honour ``weight_boundary`` (the new name)
+        # and silently ignore the legacy one.
+        if weight_boundary is None:
+            weight_boundary = legacy_kwargs.pop("weight_brainbow", 0.0)
+        else:
+            legacy_kwargs.pop("weight_brainbow", None)
+
         # Split head configs into (scalar_weight, nested_kwargs).
         w_sem, sem_nested = _split_head(weight_semantic, 1.0)
         w_ins, ins_nested = _split_head(weight_instance, 1.0)
         w_geom, geom_nested = _split_head(weight_geometry, 0.0)
-        w_bbow, bbow_nested = _split_head(weight_brainbow, 0.0)
+        w_bnd, bnd_nested = _split_head(weight_boundary, 0.0)
 
         self.weight_semantic = w_sem
         self.weight_instance = w_ins
         self.weight_geometry = w_geom
-        self.weight_brainbow = w_bbow
+        self.weight_boundary = w_bnd
         self.learned_task_weights = learned_task_weights
 
         # Partition legacy flat kwargs by target head.  Nested entries
@@ -146,23 +159,26 @@ class CombinedLoss(nn.Module):
             k: legacy_kwargs.pop(k) for k in _INSTANCE_FLAT_KEYS
             if k in legacy_kwargs
         }
-        bbow_legacy: Dict[str, Any] = {}
+        bnd_legacy: Dict[str, Any] = {}
         for k in list(legacy_kwargs.keys()):
-            if k.startswith(_BRAINBOW_FLAT_PREFIX):
-                bbow_legacy[k[len(_BRAINBOW_FLAT_PREFIX):]] = legacy_kwargs.pop(k)
+            for prefix in (_BOUNDARY_FLAT_PREFIX, _BOUNDARY_FLAT_PREFIX_LEGACY):
+                if k.startswith(prefix):
+                    bnd_legacy[k[len(prefix):]] = legacy_kwargs.pop(k)
+                    break
 
-        # Legacy alias: ``brainbow_weight_aff`` was the single Dice-on-
-        # affinities sub-weight before the CE/Dice/IoU split.  Map it to
-        # ``weight_dice`` (its direct successor) unless the caller has
-        # already set ``weight_dice`` explicitly.
-        if "weight_aff" in bbow_legacy:
-            legacy_aff = bbow_legacy.pop("weight_aff")
-            bbow_legacy.setdefault("weight_dice", legacy_aff)
+        # Legacy alias: ``brainbow_weight_aff`` / ``boundary_weight_aff``
+        # was the single Dice-on-affinities sub-weight before the
+        # CE/Dice/IoU split.  Map it to ``weight_dice`` (its direct
+        # successor) unless the caller has already set ``weight_dice``
+        # explicitly.
+        if "weight_aff" in bnd_legacy:
+            legacy_aff = bnd_legacy.pop("weight_aff")
+            bnd_legacy.setdefault("weight_dice", legacy_aff)
 
-        # ``affinity_mode`` was the dead-end mode flag on BrainbowLoss
+        # ``affinity_mode`` was the dead-end mode flag on BoundaryLoss
         # (sigmoid-only in practice); silently drop it from both legacy
         # flat kwargs and nested dicts so old configs keep loading.
-        bbow_legacy.pop("affinity_mode", None)
+        bnd_legacy.pop("affinity_mode", None)
 
         # Whatever remains (``dir_target``, ``weight_dir``, ``loss_dir``,
         # etc.) is GeometryLoss-bound in the legacy flat form.
@@ -176,9 +192,9 @@ class CombinedLoss(nn.Module):
         sem_kwargs = _merge(sem_legacy, sem_nested)
         ins_kwargs = _merge(ins_legacy, ins_nested)
         geom_kwargs = _merge(geom_legacy, geom_nested)
-        bbow_kwargs = _merge(bbow_legacy, bbow_nested)
+        bnd_kwargs = _merge(bnd_legacy, bnd_nested)
         # Drop dead-end mode flag whether it came in via flat or nested.
-        bbow_kwargs.pop("affinity_mode", None)
+        bnd_kwargs.pop("affinity_mode", None)
 
         if learned_task_weights:
             def _logvar(w: float) -> nn.Parameter:
@@ -189,7 +205,7 @@ class CombinedLoss(nn.Module):
             self.log_var_sem = _logvar(w_sem)
             self.log_var_ins = _logvar(w_ins)
             self.log_var_geom = _logvar(w_geom)
-            self.log_var_bbow = _logvar(w_bbow)
+            self.log_var_bnd = _logvar(w_bnd)
 
         # SemanticLoss is sigmoid-only; silently drop any leftover
         # ``semantic_mode`` / ``mode`` keys from old configs so that
@@ -212,8 +228,8 @@ class CombinedLoss(nn.Module):
             GeometryLoss(spatial_dims=spatial_dims, **geom_kwargs)
             if w_geom > 0 else None
         )
-        self.brainbow_loss: Optional[BrainbowLoss] = (
-            BrainbowLoss(**bbow_kwargs) if w_bbow > 0 else None
+        self.boundary_loss: Optional[BoundaryLoss] = (
+            BoundaryLoss(**bnd_kwargs) if w_bnd > 0 else None
         )
 
     # ------------------------------------------------------------------
@@ -297,19 +313,19 @@ class CombinedLoss(nn.Module):
         else:
             geom = {"loss": zero, "dir": zero, "cov": zero, "raw": zero}
 
-        # Brainbow
-        if self.brainbow_loss is not None and "brainbow" in predictions:
+        # Boundary
+        if self.boundary_loss is not None and "boundary" in predictions:
             raw_image = targets.get("raw_image")
             if raw_image is None:
                 raise KeyError(
-                    "BrainbowLoss requires `targets['raw_image']` "
+                    "BoundaryLoss requires `targets['raw_image']` "
                     "(normalised [B,D,H,W] image) to build its target."
                 )
             if raw_image.dim() == 5 and raw_image.shape[1] == 1:
                 raw_image = raw_image[:, 0]
-            bbow = self.brainbow_loss(predictions["brainbow"], labels, raw_image)
+            bnd = self.boundary_loss(predictions["boundary"], labels, raw_image)
         else:
-            bbow = {
+            bnd = {
                 "loss": zero, "min": zero, "avg": zero,
                 "max": zero, "raw": zero, "aff": zero,
             }
@@ -323,14 +339,14 @@ class CombinedLoss(nn.Module):
                 total = total + torch.exp(-self.log_var_ins) * ins["loss"] + self.log_var_ins
             if self.weight_geometry > 0:
                 total = total + torch.exp(-self.log_var_geom) * geom["loss"] + self.log_var_geom
-            if self.weight_brainbow > 0:
-                total = total + torch.exp(-self.log_var_bbow) * bbow["loss"] + self.log_var_bbow
+            if self.weight_boundary > 0:
+                total = total + torch.exp(-self.log_var_bnd) * bnd["loss"] + self.log_var_bnd
         else:
             total = (
                 self.weight_semantic * sem["loss"]
                 + self.weight_instance * ins["loss"]
                 + self.weight_geometry * geom["loss"]
-                + self.weight_brainbow * bbow["loss"]
+                + self.weight_boundary * bnd["loss"]
             )
 
         out: Dict[str, torch.Tensor] = {"loss": total}
@@ -355,13 +371,13 @@ class CombinedLoss(nn.Module):
             out["geometry/loss/cov"] = geom["cov"]
             out["geometry/loss/raw"] = geom["raw"]
 
-        if self.brainbow_loss is not None:
-            out["brainbow/loss"] = bbow["loss"]
-            out["brainbow/loss/min"] = bbow["min"]
-            out["brainbow/loss/avg"] = bbow["avg"]
-            out["brainbow/loss/max"] = bbow["max"]
-            out["brainbow/loss/raw"] = bbow["raw"]
-            out["brainbow/loss/aff"] = bbow["aff"]
+        if self.boundary_loss is not None:
+            out["boundary/loss"] = bnd["loss"]
+            out["boundary/loss/min"] = bnd["min"]
+            out["boundary/loss/avg"] = bnd["avg"]
+            out["boundary/loss/max"] = bnd["max"]
+            out["boundary/loss/raw"] = bnd["raw"]
+            out["boundary/loss/aff"] = bnd["aff"]
 
         if self.learned_task_weights:
             if self.weight_semantic > 0:
@@ -370,7 +386,7 @@ class CombinedLoss(nn.Module):
                 out["eff_w/instance"] = torch.exp(-self.log_var_ins).detach()
             if self.weight_geometry > 0:
                 out["eff_w/geometry"] = torch.exp(-self.log_var_geom).detach()
-            if self.weight_brainbow > 0:
-                out["eff_w/brainbow"] = torch.exp(-self.log_var_bbow).detach()
+            if self.weight_boundary > 0:
+                out["eff_w/boundary"] = torch.exp(-self.log_var_bnd).detach()
 
         return out

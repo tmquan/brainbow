@@ -59,7 +59,7 @@ applicable or directly: `python scripts/<name>.py`.
 | File                               | Covers                                              |
 | ---------------------------------- | --------------------------------------------------- |
 | `tests/test_losses.py`             | Semantic / Instance / Geometry / Combined.          |
-| `tests/test_brainbow_loss.py`      | BrainbowLoss + `build_brainbow_target`.             |
+| `tests/test_boundary_loss.py`      | BoundaryLoss + `build_boundary_target`.             |
 | `tests/test_datasets.py`           | `CircuitDataset` leaves (volume loading, splits).   |
 | `tests/test_datamodules.py`        | `CircuitDataModule` leaves (augmentation pipeline). |
 | `tests/test_preprocessors.py`      | HDF5 / NRRD / TIFF / NfTy converters.               |
@@ -121,7 +121,7 @@ All task losses follow a uniform skeleton (see `ORGANIZATION.md` §5).
 | `semantic.py`   | `SemanticLoss` — CE + IoU + Dice (sigmoid or softmax mode).                    |
 | `instance.py`   | `InstanceLoss` — pull / push / norm discriminative embedding loss.             |
 | `geometry.py`   | `GeometryLoss` — raw(1) + cov upper-tri(S·(S+1)/2) + dir(S) regression.        |
-| `brainbow.py`   | `BrainbowLoss` — 16-ch target: raw(1) + min/avg/max RGB(9) + face-affinity(6, soft-Dice on sigmoid). |
+| `boundary.py`   | `BoundaryLoss` — 16-ch target: raw(1) + min/avg/max RGB(9) + face-affinity(6, soft-Dice on sigmoid). |
 | `combined.py`   | `CombinedLoss` — weighted sum with head-oriented output key hierarchy.         |
 
 ### `brainbow/metrics/` — per-head eval metrics

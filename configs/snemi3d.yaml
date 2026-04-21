@@ -65,9 +65,9 @@ data:
 model:
   type: cosmostransfer3d
   in_channels: 1
-  num_classes: 16
+  semantic_channels: 1
   instance_channels: 10
-  brainbow_channels: 16
+  boundary_channels: 16
   feature_size: 64
   variant: "2B"
   dtype: "bf16"
@@ -161,11 +161,11 @@ optimizer:
 
 loss:
   # CombinedLoss = weight_semantic.weight * semantic + weight_instance.weight * instance
-  #              + weight_geometry.weight * geometry + weight_brainbow.weight * brainbow
+  #              + weight_geometry.weight * geometry + weight_boundary.weight * boundary
   # Each head's config is a mapping: ``weight`` is the head scalar (set to
   # 0 to disable the head entirely -- the sub-module is not instantiated)
   # and the remaining keys are forwarded as kwargs to the corresponding
-  # sub-loss (SemanticLoss / InstanceLoss / GeometryLoss / BrainbowLoss).
+  # sub-loss (SemanticLoss / InstanceLoss / GeometryLoss / BoundaryLoss).
 
   ignore_index: -100               # label value excluded from every loss term
   learned_task_weights: false      # Kendall-style uncertainty weighting across heads
@@ -214,10 +214,10 @@ loss:
     loss_raw: l1            # regression loss for raw-intensity reconstruction
 
   # -----------------------------------------------------------------
-  # Brainbow head -- per-instance (min, avg, max) RGB colouring +
-  # per-voxel raw-intensity reconstruction + 6 face-affinity channels
-  # (16 channels total).
-  # Channel layout (see brainbow/losses/brainbow.py):
+  # Boundary head (formerly ``brainbow``) -- per-instance (min, avg,
+  # max) RGB colouring + per-voxel raw-intensity reconstruction + 6
+  # face-affinity channels (16 channels total).
+  # Channel layout (see brainbow/losses/boundary.py):
   #   ch 0      := raw  (raw image intensity, per voxel)
   #   ch 1-3    := min  (normalised (z, y, x) of each instance's bbox min)
   #   ch 4-6    := avg  (normalised (z, y, x) centroid)
@@ -226,8 +226,8 @@ loss:
   #                      order T/B/U/D/L/R with SAME-pad; supervised via
   #                      CE + soft-Dice + soft-Jaccard on sigmoid)
   # -----------------------------------------------------------------
-  weight_brainbow:
-    weight: 1.0                    # head weight; 0 -> brainbow head disabled
+  weight_boundary:
+    weight: 1.0                    # head weight; 0 -> boundary head disabled
     loss_loc: l1            # regression loss for the 9 location channels
     loss_raw: l1                   # regression loss for the raw channel
     weight_min: 1.0                # sub-weight for min channels (ch 1-3)
@@ -235,7 +235,7 @@ loss:
     weight_max: 1.0                # sub-weight for max channels (ch 7-9)
     weight_raw: 1.0                # sub-weight for raw channel  (ch 0)
     # Affinity sub-losses (ch 10-15, T/B/U/D/L/R, Z-Y-X): CE + Dice + IoU.
-    # The model wrapper applies sigmoid to channels 10-15 of the brainbow
+    # The model wrapper applies sigmoid to channels 10-15 of the boundary
     # head before the loss / TB callbacks see them, so these sub-losses
     # operate on per-channel binary probabilities directly.
     class_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]  # BCE pos_weight per aff channel

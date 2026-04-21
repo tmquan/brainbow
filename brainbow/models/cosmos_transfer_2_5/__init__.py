@@ -4,15 +4,15 @@ Cosmos-Transfer2.5 **3D** model wrapper for volumetric connectomics segmentation
 Adapts the Cosmos-Transfer2.5 DiT backbone (2B or 14B) as a feature
 extractor for the four-head volumetric segmentation task:
 
-- **Semantic**: per-voxel class logits  (``num_classes`` channels)
+- **Semantic**: per-voxel class logits  (``semantic_channels`` channels)
 - **Instance**: per-voxel embedding vectors  (``instance_channels`` channels)
 - **Geometry**: per-voxel raw intensity, covariance, and direction.
-  Channel layout mirrors BrainbowLoss: ``ch 0`` = raw, then cov
+  Channel layout mirrors BoundaryLoss: ``ch 0`` = raw, then cov
   upper-triangle (S*(S+1)/2 channels), then dir (S channels).
-- **Brainbow**: per-voxel raw-intensity + per-instance colouring +
-  face-affinity (``brainbow_channels`` = 16: 1 raw, 9 min/avg/max RGB,
+- **Boundary**: per-voxel raw-intensity + per-instance colouring +
+  face-affinity (``boundary_channels`` = 16: 1 raw, 9 min/avg/max RGB,
   6 face-affinity neighbours in Z-Y-X order (T/B/U/D/L/R); see
-  :class:`brainbow.losses.BrainbowLoss`).
+  :class:`brainbow.losses.BoundaryLoss`).
 
 Cosmos-Transfer2.5 is natively a video model with temporal + spatial
 dimensions.  For volumetric EM data the depth axis maps directly to the

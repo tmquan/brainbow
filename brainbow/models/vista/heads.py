@@ -70,7 +70,7 @@ class VistaTaskHead3D(nn.Module):
         in_channels: Channel count of the backbone/decoder feature map
             fed into the head.
         out_channels: Task-specific output width (``num_classes`` for
-            semantic, ``instance_channels`` for instance, ``geom_channels``
+            semantic, ``instance_channels`` for instance, ``geometry_channels``
             for geometry).
         refine_channels: Width at which the residual refinement blocks
             operate.  Defaults to ``in_channels`` (VISTA3D's convention).

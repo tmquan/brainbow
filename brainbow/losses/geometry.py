@@ -3,7 +3,7 @@ Geometry head regression loss: raw + direction + covariance.
 
 Dimension-agnostic -- parameterized by ``spatial_dims``.
 
-Channel layout (deliberately aligned with :class:`BrainbowLoss`, whose
+Channel layout (deliberately aligned with :class:`BoundaryLoss`, whose
 ``ch 0`` is also ``raw``)::
 
     ch 0                          := raw  (image intensity, dense)
@@ -286,7 +286,7 @@ class GeometryLoss(nn.Module):
     ) -> torch.Tensor:
         """Dense raw-reconstruction loss over every voxel in the batch.
 
-        Matches :class:`BrainbowLoss` -- the raw channel is supervised
+        Matches :class:`BoundaryLoss` -- the raw channel is supervised
         on all voxels (no FG mask, no batch-filter).
         """
         img = raw_image.detach().clamp(0.0, 1.0).to(torch.float32)

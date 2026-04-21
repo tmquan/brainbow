@@ -11,7 +11,7 @@ from typing import Optional, Tuple
 #: Heads that produce their own sub-group inside ``{stage}/{mode}/``.
 #: Ordering is purely cosmetic (controls the order of calls in
 #: ``_log_predictions``; TB itself sorts tags alphabetically).
-HEADS: Tuple[str, ...] = ("semantic", "instance", "geometry", "brainbow")
+HEADS: Tuple[str, ...] = ("semantic", "instance", "geometry", "boundary")
 
 
 @dataclass(frozen=True)

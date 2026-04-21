@@ -5,7 +5,7 @@ Vista3D model wrapper for volumetric connectomics segmentation.
 - Semantic: per-voxel class logits (num_classes channels)
 - Instance: per-voxel embedding vectors for discriminative clustering (instance_channels channels)
 - Geometry: per-voxel raw-intensity reconstruction, direction, and covariance
-  (upper-triangle).  Channel layout mirrors BrainbowLoss: ch 0 = raw,
+  (upper-triangle).  Channel layout mirrors BoundaryLoss: ch 0 = raw,
   then dir (S), then cov upper-triangle (S*(S+1)/2).
 """
 
@@ -91,8 +91,8 @@ class Vista3DWrapper(nn.Module):
 
         S = _SPATIAL_DIMS
         # Geometry head layout: raw (1) + cov upper-tri (S*(S+1)/2) + dir (S).
-        # Matches BrainbowLoss channel convention with raw at ch 0.
-        self.geom_channels = 1 + S * (S + 1) // 2 + S
+        # Matches BoundaryLoss channel convention with raw at ch 0.
+        self.geometry_channels = 1 + S * (S + 1) // 2 + S
 
         self._build_backbone(encoder_name, **kwargs)
 
@@ -126,7 +126,7 @@ class Vista3DWrapper(nn.Module):
         )
         self.head_geometry = VistaTaskHead3D(
             in_channels=feature_size,
-            out_channels=self.geom_channels,
+            out_channels=self.geometry_channels,
             refine_channels=feature_size,
             dropout=dropout,
         )

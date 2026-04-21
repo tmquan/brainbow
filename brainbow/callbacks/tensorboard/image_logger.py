@@ -32,10 +32,10 @@ class ImageLogger(pl.Callback):
         on_{train,validation}_epoch_end
             -> eval mode + autocast + no_grad
             -> forward(images)
-            -> optional build_brainbow_target(labels, images)
+            -> optional build_boundary_target(labels, images)
             -> _log_predictions(tb, ctx, ...)   # heads.py orchestrator
                    -> _log_semantic / _log_instance
-                      _log_geometry / _log_brainbow
+                      _log_geometry / _log_boundary
 
     All tags live under ``{stage}/{mode}/...`` where
     ``stage`` ∈ {``train``, ``val``} and ``mode`` = ``"automatic"``::
@@ -46,13 +46,13 @@ class ImageLogger(pl.Callback):
         {stage}/automatic/instance/pred/{pca|svd|umap}
         {stage}/automatic/instance/pred/label
         {stage}/automatic/geometry/pred/{dir_centroid|cov|raw}
-        {stage}/automatic/brainbow/pred/{raw,min,avg,max}
-        {stage}/automatic/brainbow/true/{min,avg,max}
-        {stage}/automatic/brainbow/{pred,true}/{t,b,u,d,l,r}
+        {stage}/automatic/boundary/pred/{raw,min,avg,max}
+        {stage}/automatic/boundary/true/{min,avg,max}
+        {stage}/automatic/boundary/{pred,true}/{t,b,u,d,l,r}
 
-    ``brainbow/true/raw`` is intentionally **not** emitted: it would
+    ``boundary/true/raw`` is intentionally **not** emitted: it would
     duplicate ``{stage}/automatic/true/image`` pixel-for-pixel (the
-    brainbow ``raw`` channel is literally the input image).
+    boundary ``raw`` channel is literally the input image).
 
     This matches the scalar hierarchy emitted by
     :class:`brainbow.modules.base.BaseCircuitModule`
@@ -204,7 +204,7 @@ class ImageLogger(pl.Callback):
     # Internal: forward + dispatch
     # ------------------------------------------------------------------
 
-    def _maybe_build_brainbow_target(
+    def _maybe_build_boundary_target(
         self,
         preds: Dict[str, torch.Tensor],
         criterion: Any,
@@ -212,23 +212,23 @@ class ImageLogger(pl.Callback):
         labels: torch.Tensor,
         n: int,
     ) -> Optional[torch.Tensor]:
-        """Return the 16-channel brainbow GT target if it should be logged.
+        """Return the 16-channel boundary GT target if it should be logged.
 
         Gated by:
-          * ``weight_brainbow > 0`` on the criterion, AND
+          * ``weight_boundary > 0`` on the criterion, AND
           * ``spatial_dims == 3`` (target construction uses z/y/x coords), AND
-          * a ``"brainbow"`` key present in the model predictions.
+          * a ``"boundary"`` key present in the model predictions.
 
         Returns ``None`` otherwise (the GT panel is then skipped while
-        the prediction panel is still emitted by :func:`_log_brainbow`).
+        the prediction panel is still emitted by :func:`_log_boundary`).
         """
-        weight_brainbow = float(getattr(criterion, "weight_brainbow", 0.0) or 0.0)
-        if weight_brainbow <= 0.0 or self.spatial_dims != 3:
+        weight_boundary = float(getattr(criterion, "weight_boundary", 0.0) or 0.0)
+        if weight_boundary <= 0.0 or self.spatial_dims != 3:
             return None
-        if "brainbow" not in preds:
+        if "boundary" not in preds:
             return None
 
-        from brainbow.losses.brainbow import build_brainbow_target
+        from brainbow.losses.boundary import build_boundary_target
 
         img_bcdhw = images[:n]
         img_for_target = (
@@ -241,7 +241,7 @@ class ImageLogger(pl.Callback):
             if labels[:n].dim() == self.spatial_dims + 2
             else labels[:n]
         )
-        return build_brainbow_target(lbl_for_target, img_for_target).float()
+        return build_boundary_target(lbl_for_target, img_for_target).float()
 
     def _run_visualization(
         self, tb, pl_module, batch, *, stage: str,
@@ -286,7 +286,7 @@ class ImageLogger(pl.Callback):
         sem_loss = getattr(criterion, "semantic_loss", None) if criterion else None
         active_classes = getattr(sem_loss, "active_classes", None) if sem_loss else None
 
-        brainbow_target = self._maybe_build_brainbow_target(
+        boundary_target = self._maybe_build_boundary_target(
             preds_auto, criterion, images, labels, n,
         )
 
@@ -304,9 +304,9 @@ class ImageLogger(pl.Callback):
             active_classes=active_classes,
             projection_algorithm=self.projection_algorithm,
             projection_backend=self.projection_backend,
-            brainbow_target=brainbow_target,
+            boundary_target=boundary_target,
         )
-        del preds_auto, brainbow_target
+        del preds_auto, boundary_target
 
 
 __all__ = ["ImageLogger"]

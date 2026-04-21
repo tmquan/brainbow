@@ -7,7 +7,7 @@ Provides:
 - Preprocessors for common data formats (TIFF, HDF5, NRRD, NIfTI)
 - Cosmos-Transfer3D model wrapper (DiT + VAE backbone) for volumetric
   segmentation, together with a Vista3D reference implementation
-- A ``BrainbowLoss`` that turns each connected-component instance into
+- A ``BoundaryLoss`` that turns each connected-component instance into
   a 16-channel per-voxel target:
     * 1 channel   -- *raw*, the raw image intensity at that voxel
     * 3 channels  -- RGB of the instance's bounding-box *min* location
@@ -49,12 +49,12 @@ from brainbow.datamodules import (
     NeuronsDataModule,
 )
 from brainbow.losses import (
-    BrainbowLoss,
+    BoundaryLoss,
     CombinedLoss,
     GeometryLoss,
     InstanceLoss,
     SemanticLoss,
-    build_brainbow_target,
+    build_boundary_target,
 )
 from brainbow.modules import (
     BaseCircuitModule,
@@ -80,12 +80,12 @@ __all__ = [
     "MICRONSDataModule",
     "NeuronsDataModule",
     # Losses
-    "BrainbowLoss",
+    "BoundaryLoss",
     "CombinedLoss",
     "GeometryLoss",
     "InstanceLoss",
     "SemanticLoss",
-    "build_brainbow_target",
+    "build_boundary_target",
     # Modules
     "BaseCircuitModule",
     "BaseCosmosModule",

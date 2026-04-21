@@ -67,10 +67,10 @@ instance for exact numbers.
 | `feature_projector` output   | **64**   | 1 / (4, 8, 8)           |
 | `to_latent` back to VAE      | **16**   | 1 / (4, 8, 8)           |
 | Decoder output (trilinear up)| **64**   | 1                       |
-| `head_semantic`              | `num_classes = 16`        |
+| `head_semantic`              | `semantic_channels = 1`   |
 | `head_instance`              | `instance_channels = 10`  |
-| `head_geometry`              | `1 + 6 + 3 = 10`  (raw / cov-upper-triangle / dir) |
-| `head_brainbow`              | `brainbow_channels = 16`  (raw/1 + min/avg/max RGB/9 + aff/6) |
+| `head_geometry`              | `geometry_channels = 1 + 6 + 3 = 10`  (raw / cov-upper-triangle / dir) |
+| `head_boundary`              | `boundary_channels = 16`  (raw/1 + min/avg/max RGB/9 + aff/6) |
 
 ### 1.3 The DiT variant (2B)
 
@@ -216,9 +216,9 @@ upsampling internally.
 | Input (EM)                   | **1**    |
 | `init_filters`               | **64** (default; MONAI pretrained weights require **48**) |
 | Backbone output / head input | **`feature_size` = 64** |
-| `head_semantic`              | `num_classes = 16` |
+| `head_semantic`              | `semantic_channels = 1` |
 | `head_instance`              | `instance_channels = 10` |
-| `head_geometry`              | `1 + 6 + 3 = 10` |
+| `head_geometry`              | `geometry_channels = 1 + 6 + 3 = 10` |
 
 ### 2.3 Pretraining
 
@@ -235,10 +235,11 @@ feature channel throughout.
 Vista, the entire model is always trainable; freeze individually if needed via
 `backbone.requires_grad_(False)` etc.
 
-### 2.5 No brainbow head
+### 2.5 No boundary head
 
-Brainbow is an experimental task that only ships with the Cosmos wrapper.
-`Vista3DWrapper` exposes `semantic`, `instance`, `geometry` only.
+The boundary head (formerly ``brainbow``) is an experimental task that
+only ships with the Cosmos wrapper.  `Vista3DWrapper` exposes
+`semantic`, `instance`, `geometry` only.
 
 ### 2.6 Rough parameter budget
 
@@ -251,7 +252,7 @@ Brainbow is an experimental task that only ships with the Cosmos wrapper.
 
 Running Vista is roughly **70× cheaper per step** than full-unfrozen
 Cosmos-2B and ~5× cheaper than the Cosmos warm-up (epoch 0). Reasonable for
-local iteration and debugging when you don't need a brainbow head.
+local iteration and debugging when you don't need a boundary head.
 
 ---
 

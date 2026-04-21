@@ -48,7 +48,7 @@ brainbow/
     ├── datasets/         # MONAI CacheDatasets (base + per-dataset + lazy).
     ├── inference/        # sliding-window inference + instance clustering.
     ├── losses/           # SemanticLoss / InstanceLoss / GeometryLoss /
-    │                     # BrainbowLoss / CombinedLoss.
+    │                     # BoundaryLoss / CombinedLoss.
     ├── metrics/          # per-head evaluation metrics.
     ├── models/           # model wrappers (BaseModel + per-arch packages).
     ├── modules/          # Lightning modules (BaseCircuitModule + per-arch).
@@ -172,10 +172,10 @@ class <Task>Loss(nn.Module):
 
 | Loss          | Components (keys in returned dict)               | `task_channels` |
 | ------------- | ------------------------------------------------ | --------------- |
-| SemanticLoss  | `loss`, `ce`, `iou`, `dice`                      | `num_classes`   |
+| SemanticLoss  | `loss`, `ce`, `iou`, `dice`                      | `semantic_channels` |
 | InstanceLoss  | `loss`, `pull`, `push`, `norm`                   | embedding `E`   |
 | GeometryLoss  | `loss`, `raw`, `cov`, `dir`                      | `1 + S*(S+1)//2 + S` |
-| BrainbowLoss  | `loss`, `raw`, `min`, `avg`, `max`, `aff`        | `16`            |
+| BoundaryLoss  | `loss`, `raw`, `min`, `avg`, `max`, `aff`        | `16`            |
 
 **Why this matters:**
 
@@ -271,34 +271,34 @@ Configs compose via Hydra's `defaults:` list.  Each file's `defaults:`
 pulls in one parent; the effective config is the parent's merged with
 the child's overrides.  The real chain (parent → child) is::
 
-    default.yaml  →  snemi3d.yaml  →  combine.yaml  →  brainbow.yaml
+    default.yaml  →  snemi3d.yaml  →  combine.yaml  →  boundary.yaml
 
 - `default.yaml`: every knob with a sensible default.  Also the
   canonical home for **shared model / loss hyperparameters**
-  (e.g. `model.brainbow_channels`).
+  (e.g. `model.boundary_channels`).
 - `snemi3d.yaml`: SNEMI3D volume list + per-dataset training overrides
   (batch size, augmentation mix, dense `loss:` block whose comments
   document every head and sub-weight).
 - `combine.yaml`: extends `snemi3d.yaml` with the full multi-dataset
   volume list (SNEMI3D + neurons + MICrONS) and the harmonising
   `resolution_zoom_*` knobs.
-- `brainbow.yaml`: project-level entry point.  Inherits from
-  `combine.yaml` and flips the loss weights so only the Brainbow head
-  is active.
+- `boundary.yaml`: project-level entry point.  Inherits from
+  `combine.yaml` and flips the loss weights so only the Boundary head
+  (formerly ``brainbow``) is active.
 
 **Convention:** a parameter lives in the *most general* config where
 it's meaningful.  Things that don't depend on the dataset go in
 `default.yaml`; dataset-scoped overrides go in the dataset config;
-project-scoped knobs (which heads to enable) go in `brainbow.yaml`.
+project-scoped knobs (which heads to enable) go in `boundary.yaml`.
 
 Loss-weight blocks are densely commented (see `configs/snemi3d.yaml`
 `loss:` block) so newcomers can learn the loss by reading the config.
-Brainbow-head sub-weights are prefixed (`brainbow_weight_raw`,
-`brainbow_weight_min|avg|max|aff`) to keep them disambiguated from
+Boundary-head sub-weights are prefixed (`boundary_weight_raw`,
+`boundary_weight_min|avg|max|aff`) to keep them disambiguated from
 GeometryLoss's own `weight_raw` inside `CombinedLoss.__init__`.  The
 ``aff`` sub-loss (soft-Dice on sigmoid face-affinity logits for the 6
-neighbours in Z-Y-X order T/B/U/D/L/R) is tuned via `brainbow_weight_aff` and
-`brainbow_aff_eps`.
+neighbours in Z-Y-X order T/B/U/D/L/R) is tuned via `boundary_weight_aff` and
+`boundary_aff_eps`.
 
 ---
 

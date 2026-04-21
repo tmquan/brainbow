@@ -37,10 +37,10 @@ available and can be combined via weighted sums in `CombinedLoss`).
 
 ```
 brainbow/
-├── configs/             # Hydra configs; see configs/brainbow.yaml
+├── configs/             # Hydra configs; see configs/boundary.yaml
 ├── brainbow/            # importable package
 │   ├── losses/          # SemanticLoss, InstanceLoss, GeometryLoss,
-│   │   └── brainbow.py  #   BrainbowLoss + build_brainbow_target
+│   │   └── boundary.py  #   BoundaryLoss + build_boundary_target
 │   ├── models/          # CosmosTransfer3DWrapper, Vista3DWrapper
 │   ├── modules/         # Lightning modules (Cosmos-Transfer3D, Vista3D)
 │   ├── datasets/        # SNEMI3D, MICRONS, Neurons (base: CircuitDataset)
@@ -70,19 +70,19 @@ pip install -e ".[gpu-cu13]" --extra-index-url https://pypi.nvidia.com
 # Plain SNEMI3D run with the standard three-head recipe:
 python scripts/train.py --config-name snemi3d
 
-# Turn on the brainbow head (16-channel: raw + instance-colour + face-affinity):
-python scripts/train.py --config-name brainbow
+# Turn on the boundary head (16-channel: raw + instance-colour + face-affinity):
+python scripts/train.py --config-name boundary
 
 # DDP, custom batch size:
-python scripts/train.py --config-name brainbow data.batch_size=4 training.devices=4
+python scripts/train.py --config-name boundary data.batch_size=4 training.devices=4
 ```
 
 ## Loss
 
 ```python
-from brainbow.losses import BrainbowLoss, build_brainbow_target
+from brainbow.losses import BoundaryLoss, build_boundary_target
 
-loss_fn = BrainbowLoss(
+loss_fn = BoundaryLoss(
     loss_loc="smooth_l1",    # regression loss on the 9 localisation channels
     loss_raw="l1",           # regression loss on channel 0 (raw intensity)
     weight_min=1.0,

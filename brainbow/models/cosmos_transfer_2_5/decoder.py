@@ -3,7 +3,7 @@
 Contains the multi-layer feature projector, a random-init progressive
 upsampler, and the pretrained-VAE-aware :class:`_DecoderAdapter3D`
 that hosts the four task heads (semantic, instance, geometry,
-brainbow).
+boundary).
 
 Head activations (applied exactly once, here, before loss / metric /
 visualisation consume the outputs)::
@@ -18,10 +18,10 @@ visualisation consume the outputs)::
                 kill the sign).  Channel layout is owned by
                 :class:`brainbow.losses.geometry.GeometryLoss`::
                     [raw(1) | cov(S*(S+1)/2) | dir(S)]
-    brainbow :  sigmoid on every channel (every target lives in
+    boundary :  sigmoid on every channel (every target lives in
                 [0, 1]: raw intensity, normalised xyz colours, binary
                 face affinities).  Channel layout is owned by
-                :mod:`brainbow.losses.brainbow`::
+                :mod:`brainbow.losses.boundary`::
                     [raw(1) | min/avg/max (9) | aff (6)]
 
 Keeping the activation policy in a single place (this file) means the
@@ -135,8 +135,8 @@ class _DecoderAdapter3D(nn.Module):
         feature_size: int,
         num_classes: int,
         instance_channels: int,
-        geom_channels: int,
-        brainbow_channels: int,
+        geometry_channels: int,
+        boundary_channels: int,
         spatial_compression: int,
         temporal_compression: int,
         dropout: float = 0.0,
@@ -187,13 +187,13 @@ class _DecoderAdapter3D(nn.Module):
         )
         self.head_geometry = VistaTaskHead3D(
             in_channels=self._hidden_ch,
-            out_channels=geom_channels,
+            out_channels=geometry_channels,
             refine_channels=feature_size,
             dropout=dropout,
         )
-        self.head_brainbow = VistaTaskHead3D(
+        self.head_boundary = VistaTaskHead3D(
             in_channels=self._hidden_ch,
-            out_channels=brainbow_channels,
+            out_channels=boundary_channels,
             refine_channels=feature_size,
             dropout=dropout,
         )
@@ -287,15 +287,15 @@ class _DecoderAdapter3D(nn.Module):
             out["geometry"] = torch.cat(
                 [geom[:, :1].sigmoid(), geom[:, 1:]], dim=1,
             )
-        if "brainbow" not in self._disabled_heads:
-            # Brainbow head: every target lives in [0, 1] --
+        if "boundary" not in self._disabled_heads:
+            # Boundary head: every target lives in [0, 1] --
             # ch 0 is the normalised raw image, ch 1-9 are per-instance
             # bbox / centroid coordinates divided by (D, H, W), and
             # ch 10-15 are binary face affinities.  A single sigmoid on
             # all 16 channels is therefore the correct activation; the
             # BCE / Dice / IoU sub-losses on the affinity block expect
             # pre-sigmoided probabilities.
-            out["brainbow"] = self.head_brainbow(decoded).sigmoid()
+            out["boundary"] = self.head_boundary(decoded).sigmoid()
         return out
 
 

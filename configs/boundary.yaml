@@ -1,6 +1,10 @@
-# Brainbow Configuration
-# Trains CosmosTransfer3D with the 16-channel Brainbow head active on
+# Boundary-head Configuration
+# Trains CosmosTransfer3D with the 16-channel Boundary head active on
 # the combined SNEMI3D + neurons + MICrONS dataset (see combine.yaml).
+#
+# (Formerly named ``brainbow.yaml``.  The head was renamed from
+# ``brainbow`` to ``boundary`` because the 6 face-affinity channels
+# carry the instance-boundary supervision signal.)
 #
 # The target map is built on-the-fly from the label volume + raw image:
 #   - 1 channel       := raw image intensity
@@ -12,32 +16,32 @@
 #                         voxels self-connected).
 #
 # Usage:
-#   python scripts/train.py --config-name brainbow
-#   python scripts/train.py --config-name brainbow data.batch_size=2
+#   python scripts/train.py --config-name boundary
+#   python scripts/train.py --config-name boundary data.batch_size=2
 #
 # Full resume (optimizer + epoch) after interruption:
-#   python scripts/train.py --config-name brainbow \
+#   python scripts/train.py --config-name boundary \
 #     training.resume_from_checkpoint=outputs/checkpoints/last.ckpt
 
 defaults:
   - combine
 
-experiment_name: brainbow
+experiment_name: boundary
 project_name: brainbow
 
 loss:
-  # Turn off the dense instance-embedding head; the Brainbow head now
+  # Turn off the dense instance-embedding head; the Boundary head now
   # carries the instance-colouring signal.
   weight_semantic: 0.0
   weight_instance: 0.0
   weight_geometry: 0.0
-  weight_brainbow: 1.0
-  brainbow_loss_loc: smooth_l1
-  brainbow_loss_raw: l1
-  brainbow_weight_min: 1.0
-  brainbow_weight_avg: 1.0
-  brainbow_weight_max: 1.0
-  brainbow_weight_raw: 1.0
-  brainbow_weight_aff: 1.0
-  brainbow_foreground_only_loc: true
-  brainbow_aff_eps: 1.0e-5
+  weight_boundary: 1.0
+  boundary_loss_loc: smooth_l1
+  boundary_loss_raw: l1
+  boundary_weight_min: 1.0
+  boundary_weight_avg: 1.0
+  boundary_weight_max: 1.0
+  boundary_weight_raw: 1.0
+  boundary_weight_aff: 1.0
+  boundary_foreground_only_loc: true
+  boundary_aff_eps: 1.0e-5

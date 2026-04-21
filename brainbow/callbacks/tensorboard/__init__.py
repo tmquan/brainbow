@@ -13,7 +13,7 @@ where
 * ``mode``   -- ``"automatic"`` (single mode today; structured so
   additional modes such as ``"prompted"`` can slot in later)
 * ``head``   -- ``"semantic"`` | ``"instance"`` | ``"geometry"`` |
-  ``"brainbow"``, omitted for mode-level panels (``true/image``,
+  ``"boundary"``, omitted for mode-level panels (``true/image``,
   ``true/label``)
 * ``panel``  -- head-specific sub-tag (e.g. ``pred``, ``pred/pca``,
   ``pred/dir_centroid``, ``pred/raw``, ``true/t``)
@@ -59,8 +59,8 @@ End-to-end flow (rank-0 only, once per ``every_n_epochs``)::
         └──────────┬─────────────┘
                    ▼
         ┌────────────────────────┐   (optional) rebuild the 16-channel
-        │ build_brainbow_target  │   brainbow target for the ``true/*``
-        │ (losses.brainbow)      │   panels
+        │ build_boundary_target  │   boundary target for the ``true/*``
+        │ (losses.boundary)      │   panels
         └──────────┬─────────────┘
                    ▼
         ┌────────────────────────┐   mode-level panels + four per-head

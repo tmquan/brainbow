@@ -1,5 +1,8 @@
 """
-Brainbow loss: per-instance spatial colouring + raw intensity + face-affinity.
+Boundary loss: per-instance spatial colouring + raw intensity + face-affinity.
+
+(Formerly named ``BrainbowLoss`` -- the conceptual role is instance
+**boundary** supervision via face-affinity + per-instance colour cues.)
 
 For every connected component ``label > 0`` in the batch this loss builds
 a dense **16-channel** per-voxel target out of purely geometric and
@@ -25,7 +28,7 @@ channels; channel 0 carries the raw image value for every voxel.
 
 The 6 affinity channels encode, for every voxel ``v``, whether it shares
 its instance label with each of its 6 face neighbours (same-label = 1,
-different-label = 0).  Direction order is **Z → Y → X** (slowest to
+different-label = 0).  Direction order is **Z -> Y -> X** (slowest to
 fastest axis), each axis taken in (``-1``, ``+1``) order::
 
     ch 10 : T  (top    = z - 1)
@@ -59,7 +62,7 @@ from monai.losses import DiceLoss
 from brainbow.losses._common import canonical_regression_name, regression_loss_fn
 
 
-_BRAINBOW_CHANNELS: int = 16
+_BOUNDARY_CHANNELS: int = 16
 _N_LOC: int = 10          # ch 0..9 : raw + min/avg/max (10 channels)
 _N_AFF: int = 6           # ch 10..15 : T, B, U, D, L, R  (Z-Y-X)
 
@@ -137,16 +140,16 @@ def _affinity_target_np(labels: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Low-level builders (used by BrainbowLoss._build_target_*)
+# Low-level builders (used by BoundaryLoss._build_target_*)
 # ---------------------------------------------------------------------------
 
 
 @torch.no_grad()
-def _brainbow_target_torch(
+def _boundary_target_torch(
     labels: torch.Tensor,
     image: torch.Tensor,
 ) -> torch.Tensor:
-    """Vectorised 16-channel brainbow target on the same device as ``labels``.
+    """Vectorised 16-channel boundary target on the same device as ``labels``.
 
     Args:
         labels: ``[B, D, H, W]`` integer instance ids (``0`` = background).
@@ -159,7 +162,7 @@ def _brainbow_target_torch(
     dims_t = labels.new_tensor([D, H, W], dtype=torch.float32)
     norm = rearrange(dims_t, "c -> 1 c").clamp(min=1.0)
 
-    target = labels.new_zeros((B, _BRAINBOW_CHANNELS, D, H, W), dtype=torch.float32)
+    target = labels.new_zeros((B, _BOUNDARY_CHANNELS, D, H, W), dtype=torch.float32)
     target[:, 0] = image.to(torch.float32)
 
     for b in range(B):
@@ -196,16 +199,16 @@ def _brainbow_target_torch(
         target[b, 1:_N_LOC][:, fg] = rearrange(voxel_rgb, "m c -> c m")
 
     # Affinity ch 10-15 -- SAME-pad face equality over the whole batch.
-    target[:, _N_LOC:_BRAINBOW_CHANNELS] = _affinity_target_torch(labels)
+    target[:, _N_LOC:_BOUNDARY_CHANNELS] = _affinity_target_torch(labels)
     return target
 
 
 @torch.no_grad()
-def _brainbow_target_scipy(
+def _boundary_target_scipy(
     labels_np: np.ndarray,
     image_np: np.ndarray,
 ) -> np.ndarray:
-    """Reference 16-channel brainbow-target builder via ``scipy.ndimage``.
+    """Reference 16-channel boundary-target builder via ``scipy.ndimage``.
 
     CPU fallback used when the input tensors live on CPU.  ``find_objects``
     is a single O(N) pass over the label volume, which is faster than
@@ -214,7 +217,7 @@ def _brainbow_target_scipy(
     from scipy.ndimage import find_objects
 
     B, D, H, W = labels_np.shape
-    target = np.zeros((B, _BRAINBOW_CHANNELS, D, H, W), dtype=np.float32)
+    target = np.zeros((B, _BOUNDARY_CHANNELS, D, H, W), dtype=np.float32)
     target[:, 0] = image_np.astype(np.float32, copy=False)
     dims = np.array([D, H, W], dtype=np.float32).clip(min=1.0)
 
@@ -253,20 +256,20 @@ def _brainbow_target_scipy(
         target[b, 1:_N_LOC][:, fg] = voxel_rgb.T
 
     # Affinity ch 10-15 -- SAME-pad face equality over the whole batch.
-    target[:, _N_LOC:_BRAINBOW_CHANNELS] = _affinity_target_np(labels_np)
+    target[:, _N_LOC:_BOUNDARY_CHANNELS] = _affinity_target_np(labels_np)
     return target
 
 
 @torch.no_grad()
-def build_brainbow_target(
+def build_boundary_target(
     labels: torch.Tensor,
     image: torch.Tensor,
 ) -> torch.Tensor:
-    """Build a ``[B, 16, D, H, W]`` brainbow target from labels + image.
+    """Build a ``[B, 16, D, H, W]`` boundary target from labels + image.
 
     Picks the on-device torch path for CUDA tensors and the NumPy /
     scipy path for CPU tensors.  Exposed as a module-level function so
-    callers outside :class:`BrainbowLoss` can pre-build the target (e.g.
+    callers outside :class:`BoundaryLoss` can pre-build the target (e.g.
     the image-logger callback).
     """
     if labels.dim() != 4:
@@ -280,9 +283,9 @@ def build_brainbow_target(
         )
 
     if labels.is_cuda:
-        return _brainbow_target_torch(labels.long(), image.float())
+        return _boundary_target_torch(labels.long(), image.float())
 
-    target_np = _brainbow_target_scipy(
+    target_np = _boundary_target_scipy(
         labels.detach().cpu().long().numpy(),
         image.detach().cpu().float().numpy(),
     )
@@ -294,8 +297,8 @@ def build_brainbow_target(
 # ---------------------------------------------------------------------------
 
 
-class BrainbowLoss(nn.Module):
-    """Regression + binary loss on a 16-channel brainbow target map.
+class BoundaryLoss(nn.Module):
+    """Regression + binary loss on a 16-channel boundary target map.
 
     The target map is built on-the-fly from ``labels`` (+ ``image``):
 
@@ -320,7 +323,7 @@ class BrainbowLoss(nn.Module):
         weight_raw:   Weight of the raw-intensity channel (ch 0).
         weight_ce:    Weight of the BCE sub-loss on the 6 affinity
             channels (ch 10-15).  The model wrapper applies ``sigmoid``
-            to **all 16** brainbow channels **before** this loss sees
+            to **all 16** boundary channels **before** this loss sees
             them (every target lives in ``[0, 1]``), so the BCE is
             computed on probabilities (not logits) via
             :func:`F.binary_cross_entropy`.  Uses ``pos_weight =
@@ -347,13 +350,13 @@ class BrainbowLoss(nn.Module):
         aff_eps: Numerical stabiliser passed as both ``smooth_nr`` and
             ``smooth_dr`` to :class:`monai.losses.DiceLoss`.  The Dice /
             IoU affinity sub-losses are
-            ``1 - (2 Σ p t + ε) / (Σ p + Σ t + ε)`` (or Jaccard) where
+            ``1 - (2 S p t + e) / (S p + S t + e)`` (or Jaccard) where
             ``p`` is the **already-sigmoided** affinity probability
             arriving from the wrapper, summed over batch + spatial per
             channel and averaged across the 6 direction channels.
     """
 
-    num_channels: int = _BRAINBOW_CHANNELS
+    num_channels: int = _BOUNDARY_CHANNELS
 
     def __init__(
         self,
@@ -423,8 +426,8 @@ class BrainbowLoss(nn.Module):
 
     @property
     def task_channels(self) -> int:
-        """Expected width of the brainbow head prediction tensor (16)."""
-        return _BRAINBOW_CHANNELS
+        """Expected width of the boundary head prediction tensor (16)."""
+        return _BOUNDARY_CHANNELS
 
     # ------------------------------------------------------------------
     # Target construction
@@ -442,7 +445,7 @@ class BrainbowLoss(nn.Module):
         image: torch.Tensor,
     ) -> torch.Tensor:
         """Per-instance localisation target (ch 1-9, min / avg / max)."""
-        full = build_brainbow_target(labels, image)
+        full = build_boundary_target(labels, image)
         return full[:, 1:_N_LOC]
 
     @torch.no_grad()
@@ -459,8 +462,8 @@ class BrainbowLoss(nn.Module):
         labels: torch.Tensor,
         image: torch.Tensor,
     ) -> torch.Tensor:
-        """Full 16-channel brainbow target for ``(labels, image)``."""
-        return build_brainbow_target(labels, image)
+        """Full 16-channel boundary target for ``(labels, image)``."""
+        return build_boundary_target(labels, image)
 
     # Backwards-compat alias.
     def compute_target(
@@ -519,7 +522,7 @@ class BrainbowLoss(nn.Module):
         """CE + Dice + IoU sub-losses on sigmoid affinities (ch 10-15).
 
         ``pred`` is **already** in ``[0, 1]`` (the model wrapper applies
-        a single sigmoid to every brainbow channel, so both the
+        a single sigmoid to every boundary channel, so both the
         regression head ch 0-9 and these affinity channels 10-15 arrive
         pre-activated).  Returns a dict
         with keys ``ce``, ``dice``, ``iou``; each sub-term is only
@@ -579,7 +582,7 @@ class BrainbowLoss(nn.Module):
         image: torch.Tensor,
         cached_target: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Compute the brainbow regression + affinity loss.
+        """Compute the boundary regression + affinity loss.
 
         Args:
             prediction:     ``[B, 16, D, H, W]`` model output.  Channels
@@ -595,9 +598,9 @@ class BrainbowLoss(nn.Module):
             ``aff`` (sum of the active affinity sub-losses) plus the
             individual ``aff_ce``, ``aff_dice``, ``aff_iou`` terms.
         """
-        if prediction.shape[1] != _BRAINBOW_CHANNELS:
+        if prediction.shape[1] != _BOUNDARY_CHANNELS:
             raise ValueError(
-                f"BrainbowLoss expects {_BRAINBOW_CHANNELS}-channel prediction; "
+                f"BoundaryLoss expects {_BOUNDARY_CHANNELS}-channel prediction; "
                 f"got {prediction.shape[1]} channels."
             )
         if labels.dim() == 5 and labels.shape[1] == 1:
@@ -618,8 +621,8 @@ class BrainbowLoss(nn.Module):
             labels,
         )
         aff_losses = self._compute_loss_aff(
-            prediction[:, _N_LOC:_BRAINBOW_CHANNELS],
-            target[:, _N_LOC:_BRAINBOW_CHANNELS],
+            prediction[:, _N_LOC:_BOUNDARY_CHANNELS],
+            target[:, _N_LOC:_BOUNDARY_CHANNELS],
         )
         loss_aff = (
             self.weight_ce * aff_losses["ce"]

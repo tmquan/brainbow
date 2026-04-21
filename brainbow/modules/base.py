@@ -150,7 +150,7 @@ class BaseCircuitModule(pl.LightningModule):
 
         disabled_heads = frozenset(
             name
-            for name in ("semantic", "instance", "geometry", "brainbow")
+            for name in ("semantic", "instance", "geometry", "boundary")
             if _head_weight(loss_config, name, default=1.0) == 0
         )
         self._disabled_heads = disabled_heads
@@ -250,7 +250,7 @@ class BaseCircuitModule(pl.LightningModule):
             )
         needs_raw = (
             self.criterion.weight_geometry > 0
-            or getattr(self.criterion, "weight_brainbow", 0.0) > 0
+            or getattr(self.criterion, "weight_boundary", 0.0) > 0
         )
         if "image" in batch and needs_raw:
             targets["raw_image"] = batch["image"]

@@ -28,7 +28,10 @@ class BaseVistaModule(BaseCircuitModule):
     def _build_model(self, model_config: Dict[str, Any]) -> torch.nn.Module:
         return self._model_cls(
             in_channels=model_config.get("in_channels", 1),
-            num_classes=model_config.get("num_classes", 16),
+            num_classes=model_config.get(
+                "semantic_channels",
+                model_config.get("num_classes", 16),
+            ),
             instance_channels=model_config.get("instance_channels", 10),
             feature_size=model_config.get("feature_size", 64),
             encoder_name=model_config.get("encoder_name", "vista3d"),

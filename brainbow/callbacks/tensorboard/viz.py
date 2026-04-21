@@ -36,10 +36,10 @@ def _normalise(t: torch.Tensor) -> torch.Tensor:
         panel visually comparable across samples with different
         intensity distributions, but it also means that
         ``true/image`` can look brighter / more contrasted than the
-        brainbow ``pred/raw`` panel, which is shown via
+        boundary ``pred/raw`` panel, which is shown via
         ``clamp(0, 1)`` on the already-normalised reconstruction.
         Keep that in mind when comparing reconstruction quality
-        visually; the loss scalars (``brainbow/loss/raw``) are
+        visually; the loss scalars (``boundary/loss/raw``) are
         computed on the unstretched signal.
     """
     flat = rearrange(t, "b ... -> b (...)")                        # [B, N]

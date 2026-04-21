@@ -9,7 +9,7 @@ Ties together:
 
 …and exposes them behind a single ``nn.Module`` producing four
 co-registered task predictions (``semantic`` / ``instance`` /
-``geometry`` / ``brainbow``).
+``geometry`` / ``boundary``).
 """
 
 import logging
@@ -51,8 +51,8 @@ class CosmosTransfer3DWrapper(nn.Module):
     - ``instance``  [B, instance_channels, D, H, W]
     - ``geometry``  [B, G, D, H, W]  where G = 1 + S + S*(S+1)//2
                                      = 1 (raw) + 3 (dir) + 6 (cov upper-tri) = 10
-                                     (3-D; layout matches BrainbowLoss ch 0 = raw)
-    - ``brainbow``  [B, brainbow_channels, D, H, W]
+                                     (3-D; layout matches BoundaryLoss ch 0 = raw)
+    - ``boundary``  [B, boundary_channels, D, H, W]
       (1 raw + 9 min/avg/max RGB + 6 face-affinity by default = 16)
 
     Because Cosmos-Transfer2.5 is natively a video model, the depth axis
@@ -76,22 +76,22 @@ class CosmosTransfer3DWrapper(nn.Module):
     Example::
 
         >>> model = CosmosTransfer3DWrapper(
-        ...     in_channels=1, num_classes=16, variant="2B",
+        ...     in_channels=1, num_classes=1, variant="2B",
         ... )
         >>> x = torch.randn(1, 1, 32, 64, 64)
         >>> out = model(x)
-        >>> out["semantic"].shape   # [1, 16, 32, 64, 64]
+        >>> out["semantic"].shape   # [1, 1, 32, 64, 64]
         >>> out["instance"].shape   # [1, 10, 32, 64, 64]
         >>> out["geometry"].shape   # [1, 10, 32, 64, 64]  (raw=1 + cov_tri=6 + dir=3)
-        >>> out["brainbow"].shape   # [1, 16, 32, 64, 64]  (raw=1 + RGB=9 + aff=6)
+        >>> out["boundary"].shape   # [1, 16, 32, 64, 64]  (raw=1 + RGB=9 + aff=6)
     """
 
     def __init__(
         self,
         in_channels: int = 1,
-        num_classes: int = 16,
+        num_classes: int = 1,
         instance_channels: int = 10,
-        brainbow_channels: int = 16,
+        boundary_channels: int = 16,
         feature_size: int = 64,
         variant: str = "2B",
         checkpoint_variant: str = "post-trained",
@@ -122,15 +122,15 @@ class CosmosTransfer3DWrapper(nn.Module):
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.instance_channels = instance_channels
-        self.brainbow_channels = brainbow_channels
+        self.boundary_channels = boundary_channels
         self.feature_size = feature_size
         self.spatial_dims = _SPATIAL_DIMS
         self.dropout = dropout
 
         S = _SPATIAL_DIMS
         # Geometry head layout: raw (1) + cov upper-tri (S*(S+1)/2) + dir (S).
-        # Matches BrainbowLoss channel convention with raw at ch 0.
-        self.geom_channels = 1 + S * (S + 1) // 2 + S
+        # Matches BoundaryLoss channel convention with raw at ch 0.
+        self.geometry_channels = 1 + S * (S + 1) // 2 + S
 
         self._dtype = {
             "bf16": torch.bfloat16,
@@ -180,8 +180,8 @@ class CosmosTransfer3DWrapper(nn.Module):
             feature_size=feature_size,
             num_classes=num_classes,
             instance_channels=instance_channels,
-            geom_channels=self.geom_channels,
-            brainbow_channels=brainbow_channels,
+            geometry_channels=self.geometry_channels,
+            boundary_channels=boundary_channels,
             spatial_compression=self.cfg.spatial_compression,
             temporal_compression=self.cfg.temporal_compression,
             dropout=dropout,
@@ -190,7 +190,7 @@ class CosmosTransfer3DWrapper(nn.Module):
         )
         if self.decoder_adapter.to_latent is not None:
             self.decoder_adapter.to_latent.float()
-        for head_name in ("semantic", "instance", "geometry", "brainbow"):
+        for head_name in ("semantic", "instance", "geometry", "boundary"):
             if head_name not in self._disabled_heads:
                 getattr(self.decoder_adapter, f"head_{head_name}").float()
 
