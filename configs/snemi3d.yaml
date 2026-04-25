@@ -139,7 +139,7 @@ model:
   freeze_dit_backbone: 2
   freeze_vae_decoder: true
   gradient_checkpointing: false
-  dropout: 0.2
+  dropout: 0.0
 
 callbacks:
   cuda_empty_cache_before_val: true
