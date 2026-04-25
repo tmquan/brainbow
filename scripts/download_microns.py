@@ -35,14 +35,21 @@ Crop size estimates (mip0, uint8 EM + uint64 seg, uncompressed):
   2048³ =   8 GB EM +  64 GB seg  =   72 GB total
   4096³ =  64 GB EM + 512 GB seg  =  576 GB total
 
-Pre-defined splits (5 total: 4 train + 1 test, all 4096x4096x800):
+Pre-defined splits (12 total: 10 train + 2 test, all 4096x4096x800):
   Large disjoint regions at different XY positions and cortical depths.
 
   train01: ( 50000,  60000, 16000)   4096x4096x800  -- left, mid-Y
   train02: (110000,  60000, 18000)   4096x4096x800  -- right, mid-Y
   train03: ( 80000,  70000, 16500)   4096x4096x800  -- center, mid-Y
   train04: (140000,  80000, 17500)   4096x4096x800  -- far right, upper-Y
+  train05: ( 45000,  75000, 16500)   4096x4096x800  -- left, upper-mid-Y
+  train06: ( 95000,  50000, 18500)   4096x4096x800  -- center-right, low-Y
+  train07: (125000,  70000, 16500)   4096x4096x800  -- right, mid-Y
+  train08: ( 60000,  50000, 17500)   4096x4096x800  -- center-left, low-Y
+  train09: (130000,  50000, 17000)   4096x4096x800  -- far right, low-Y
+  train10: ( 90000,  85000, 18500)   4096x4096x800  -- center, upper-Y
   test01:  ( 70000,  90000, 17000)   4096x4096x800  -- center-left, upper-Y
+  test02:  (105000,  80000, 16500)   4096x4096x800  -- right, upper-Y
 
 File naming encodes coordinates:
   minnie65_mip0_4096x4096x800_x50000_y60000_z16000_volume.h5
@@ -51,7 +58,7 @@ File naming encodes coordinates:
 Uses cloud-volume to fetch from AWS / Google Cloud public buckets.
 
 Usage:
-    # Download all 5 pre-defined 4096x4096x800 splits (4 train + 1 test)
+    # Download all 12 pre-defined 4096x4096x800 splits (10 train + 2 test)
     python scripts/download_microns.py --split
 
     # Custom size and version
@@ -100,7 +107,7 @@ DEFAULT_SEG_VERSION = 1300
 # Pre-defined splits in disjoint regions of the minnie65 volume.
 # Coordinates are (X, Y, Z) in mip0 voxels.  All 4096 x 4096 x 800.
 #
-# 4 train + 1 test, all 4096x4096x800, disjoint.
+# 10 train + 2 test, all 4096x4096x800, disjoint.
 # All within the dense-tissue region (Y ≈ 50k–95k, X ≈ 40k–150k).
 _SZ = (4096, 4096, 800)
 SPLITS: Dict[str, Dict[str, Tuple[int, int, int]]] = {
@@ -108,7 +115,14 @@ SPLITS: Dict[str, Dict[str, Tuple[int, int, int]]] = {
     "train02": {"start": (110000, 60000, 18000), "size": _SZ},
     "train03": {"start": (80000,  70000, 16500), "size": _SZ},
     "train04": {"start": (140000, 80000, 17500), "size": _SZ},
+    "train05": {"start": (45000,  75000, 16500), "size": _SZ},
+    "train06": {"start": (95000,  50000, 18500), "size": _SZ},
+    "train07": {"start": (125000, 70000, 16500), "size": _SZ},
+    "train08": {"start": (60000,  50000, 17500), "size": _SZ},
+    "train09": {"start": (130000, 50000, 17000), "size": _SZ},
+    "train10": {"start": (90000,  85000, 18500), "size": _SZ},
     "test01":  {"start": (70000,  90000, 17000), "size": _SZ},
+    "test02":  {"start": (105000, 80000, 16500), "size": _SZ},
 }
 
 TRAIN_SPLITS = [k for k in SPLITS if k.startswith("train")]
@@ -218,7 +232,7 @@ def main() -> None:
     parser.add_argument(
         "--split", action="store_true",
         help=(
-            "Download all 5 pre-defined 4096x4096x800 splits (4 train + 1 test) from "
+            "Download all 12 pre-defined 4096x4096x800 splits (10 train + 2 test) from "
             "disjoint regions. Ignores --size and --start when set."
         ),
     )

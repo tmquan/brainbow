@@ -1,5 +1,14 @@
-# SNEMI3D Configuration
-# Trains CosmosTransfer3D on the SNEMI3D neuron EM dataset.
+# SNEMI3D + Neurons + MICrONS Configuration
+# Trains CosmosTransfer3D on SNEMI3D AC4, the neurons cylinder, and the
+# MICrONS minnie65 splits (10 train + 2 test).  Native resolutions are
+# harmonised via resolution_zoom (SNEMI3D / neurons 30x6x6 nm,
+# MICrONS 40x8x8 nm) so all crops live in the 30-40 nm Z, 6-8 nm XY
+# target range.
+#
+# Volumes (download_snemi3d.py --source all, download_microns.py --split):
+#   train: AC4 + neurons cylinder + MICrONS train01-10
+#   val:   AC4 + neurons cylinder + MICrONS test01 + test02
+#   test:  AC4 + neurons cylinder + MICrONS test01 + test02
 #
 # Usage:
 #   python scripts/train.py --config-name snemi3d
@@ -30,16 +39,23 @@ data:
   find_boundaries: 1.0
   pixel_size: [30, 6, 6]   # z, y, x in nm — SNEMI3D resolution
   min_foreground: 0.80
-  resolution_zoom_prob: 0.00
-  resolution_zoom_range: [[30, 30], [6, 6], [6, 6]]
+  # Resolution harmonisation across SNEMI3D/neurons (30x6x6 nm) and
+  # MICrONS (40x8x8 nm).  prefix -> [Z, Y, X] nm native resolution.
+  resolution_zoom_prob: 1.0
+  resolution_zoom_range: [[30, 40], [6, 8], [6, 8]]
+  resolution_map:
+    minnie65: [40, 8, 8]
+    AC: [30, 6, 6]
+    neurons: [30, 6, 6]
   # elastic_prob: 0.00
   # elastic_sigma_range: [5, 8]
   # elastic_magnitude_range: [50, 150]
 
   train_volumes:
+    # --- SNEMI3D (30x6x6 nm) ---
     # AC4 (SNEMI3D train, 1024×1024×100, 401 instance IDs)
     # Download: python scripts/download_snemi3d.py --source snemi
-    # Neurons full annotated cylinder (same 6×6×30 nm resolution)
+    # Neurons full annotated cylinder (same 30x6x6 nm resolution)
     # Download: python scripts/download_snemi3d.py --source neurons
     - vol: AC4_inputs
       seg: AC4_labels
@@ -47,6 +63,40 @@ data:
     - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
       seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
       root: data/SNEMI3D
+
+    # --- MICrONS (40x8x8 nm, 4096x4096x800 crops) ---
+    # Download: python scripts/download_microns.py --split
+    - vol: minnie65_mip0_4096x4096x800_x50000_y60000_z16000_volume
+      seg: minnie65_mip0_4096x4096x800_x50000_y60000_z16000_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x110000_y60000_z18000_volume
+      seg: minnie65_mip0_4096x4096x800_x110000_y60000_z18000_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x80000_y70000_z16500_volume
+      seg: minnie65_mip0_4096x4096x800_x80000_y70000_z16500_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x140000_y80000_z17500_volume
+      seg: minnie65_mip0_4096x4096x800_x140000_y80000_z17500_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x45000_y75000_z16500_volume
+      seg: minnie65_mip0_4096x4096x800_x45000_y75000_z16500_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x95000_y50000_z18500_volume
+      seg: minnie65_mip0_4096x4096x800_x95000_y50000_z18500_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x125000_y70000_z16500_volume
+      seg: minnie65_mip0_4096x4096x800_x125000_y70000_z16500_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x60000_y50000_z17500_volume
+      seg: minnie65_mip0_4096x4096x800_x60000_y50000_z17500_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x130000_y50000_z17000_volume
+      seg: minnie65_mip0_4096x4096x800_x130000_y50000_z17000_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_volume
+      seg: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_v1300_segmentation
+      root: data/MICRONS
+
   val_volumes:
     - vol: AC4_inputs
       seg: AC4_labels
@@ -54,6 +104,13 @@ data:
     - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
       seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
       root: data/SNEMI3D
+    - vol: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume
+      seg: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume
+      seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
+      root: data/MICRONS
+
   test_volumes:
     - vol: AC4_inputs
       seg: AC4_labels
@@ -61,6 +118,12 @@ data:
     - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
       seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
       root: data/SNEMI3D
+    - vol: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume
+      seg: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation
+      root: data/MICRONS
+    - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume
+      seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
+      root: data/MICRONS
 
 model:
   type: cosmostransfer3d
@@ -73,8 +136,8 @@ model:
   dtype: "bf16"
   pretrained: true              # auto-pull nvidia/Cosmos-Transfer2.5-2B from HF
   freeze_vae_encoder: true
-  freeze_dit_backbone: 1
-  freeze_vae_decoder: 5
+  freeze_dit_backbone: 2
+  freeze_vae_decoder: true
   gradient_checkpointing: false
   dropout: 0.2
 

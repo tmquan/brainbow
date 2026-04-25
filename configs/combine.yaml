@@ -1,20 +1,23 @@
 # Combined SNEMI3D + Neurons + MICrONS Configuration
-# Inherits everything from snemi3d.yaml, adds the full neurons cylinder
-# and MICrONS volumes, and harmonises native resolutions via resolution
-# zoom.
+# Inherits everything from snemi3d.yaml and overrides the volume lists
+# to drop SNEMI3D AC4 from train (train uses the full neurons cylinder
+# + the 10 MICrONS train splits) while keeping AC4 in val/test for
+# comparison against the original SNEMI3D benchmark.  Resolution
+# harmonisation (resolution_zoom_prob/range/map) is inherited from
+# snemi3d.yaml.
 #
 # Native resolutions (all share 5:1 Z:XY anisotropy):
 #   SNEMI3D / neurons: 30x6x6 nm    MICrONS: 40x8x8 nm
 #
 # Each dataset is zoomed from its native resolution into the 30-40 nm Z,
-# 6-8 nm XY target range via resolution_map (prefix -> [Z, Y, X] nm):
+# 6-8 nm XY target range:
 #   SNEMI3D/neurons (30x6x6) -> zooms out (0.75-1.0x)
 #   MICrONS         (40x8x8) -> zooms in  (1.0-1.33x)
 #
 # Volumes (download_snemi3d.py --source all, download_microns.py --split):
-#   train: neurons cylinder + MICrONS train01-04
-#   val:   SNEMI3D AC4       + MICrONS test01
-#   test:  SNEMI3D AC4       + MICrONS test01
+#   train: neurons cylinder       + MICrONS train01-10
+#   val:   SNEMI3D AC4            + MICrONS test01 + test02
+#   test:  SNEMI3D AC4            + MICrONS test01 + test02
 #
 # Usage:
 #   python scripts/train.py --config-name combine
@@ -41,13 +44,6 @@ project_name: brainbow
 #     bandwidth: [0.2, 0.5, 0.5]   # [Z, Y, X]; Z tighter to respect anisotropy
 
 data:
-  resolution_zoom_prob: 1.0
-  resolution_zoom_range: [[30, 40], [6, 8], [6, 8]]
-  resolution_map:
-    minnie65: [40, 8, 8]
-    AC: [30, 6, 6]
-    neurons: [30, 6, 6]
-
   train_volumes:
     - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
       seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
@@ -70,6 +66,30 @@ data:
       seg: minnie65_mip0_4096x4096x800_x140000_y80000_z17500_v1300_segmentation
       root: data/MICRONS
 
+    - vol: minnie65_mip0_4096x4096x800_x45000_y75000_z16500_volume
+      seg: minnie65_mip0_4096x4096x800_x45000_y75000_z16500_v1300_segmentation
+      root: data/MICRONS
+
+    - vol: minnie65_mip0_4096x4096x800_x95000_y50000_z18500_volume
+      seg: minnie65_mip0_4096x4096x800_x95000_y50000_z18500_v1300_segmentation
+      root: data/MICRONS
+
+    - vol: minnie65_mip0_4096x4096x800_x125000_y70000_z16500_volume
+      seg: minnie65_mip0_4096x4096x800_x125000_y70000_z16500_v1300_segmentation
+      root: data/MICRONS
+
+    - vol: minnie65_mip0_4096x4096x800_x60000_y50000_z17500_volume
+      seg: minnie65_mip0_4096x4096x800_x60000_y50000_z17500_v1300_segmentation
+      root: data/MICRONS
+
+    - vol: minnie65_mip0_4096x4096x800_x130000_y50000_z17000_volume
+      seg: minnie65_mip0_4096x4096x800_x130000_y50000_z17000_v1300_segmentation
+      root: data/MICRONS
+
+    - vol: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_volume
+      seg: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_v1300_segmentation
+      root: data/MICRONS
+
   val_volumes:
     - vol: AC4_inputs
       seg: AC4_labels
@@ -79,6 +99,10 @@ data:
       seg: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation
       root: data/MICRONS
 
+    - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume
+      seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
+      root: data/MICRONS
+
   test_volumes:
     - vol: AC4_inputs
       seg: AC4_labels
@@ -86,4 +110,8 @@ data:
 
     - vol: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume
       seg: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation
+      root: data/MICRONS
+
+    - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume
+      seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
       root: data/MICRONS
