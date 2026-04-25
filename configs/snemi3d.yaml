@@ -136,8 +136,8 @@ model:
   dtype: "bf16"
   pretrained: true              # auto-pull nvidia/Cosmos-Transfer2.5-2B from HF
   freeze_vae_encoder: true
-  freeze_dit_backbone: 2
-  freeze_vae_decoder: true
+  freeze_dit_backbone: false
+  freeze_vae_decoder: false
   gradient_checkpointing: false
   dropout: 0.0
 
