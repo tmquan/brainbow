@@ -1,22 +1,33 @@
-# SNEMI3D + Neurons + MICrONS Configuration
-# Trains CosmosTransfer3D on SNEMI3D AC4, the neurons cylinder, and the
-# MICrONS minnie65 splits (10 train + 2 test).  Native resolutions are
-# harmonised via resolution_zoom (SNEMI3D / neurons 30x6x6 nm,
-# MICrONS 40x8x8 nm) so all crops live in the 30-40 nm Z, 6-8 nm XY
-# target range.
+# =====================================================================
+# SNEMI3D + Neurons + MICrONS  --  CosmosTransfer3D training config
+# =====================================================================
 #
-# Volumes (download_snemi3d.py --source all, download_microns.py --split):
-#   train: AC4 + neurons cylinder + MICrONS train01-10
-#   val:   AC4 + neurons cylinder + MICrONS test01 + test02
-#   test:  AC4 + neurons cylinder + MICrONS test01 + test02
+# Trains CosmosTransfer3D jointly on three EM datasets at a harmonised
+# resolution so a single model sees all three:
 #
-# Usage:
+#   Dataset    Native res (Z, Y, X nm)   Source
+#   --------   -----------------------   --------------------------------
+#   SNEMI3D    30 x 6 x 6                scripts/download_snemi3d.py
+#   neurons    30 x 6 x 6                scripts/download_snemi3d.py
+#   MICrONS    40 x 8 x 8                scripts/download_microns.py
+#
+# `data.resolution_zoom_*` rescales every crop into the joint target
+# range Z = 30-40 nm, XY = 6-8 nm so the three sources are interchangeable.
+#
+# Splits used below:
+#   train : AC4 + neurons cylinder + 10 MICrONS minnie65 crops
+#   val   : AC4 + neurons cylinder + 2  MICrONS minnie65 crops
+#   test  : same as val
+#
+# Quick start
+# -----------
 #   python scripts/train.py --config-name snemi3d
 #   python scripts/train.py --config-name snemi3d data.batch_size=8
 #
-# Full resume (optimizer + epoch) after interruption:
+# Resume after a crash (optimizer, schedulers, epoch all restored):
 #   python scripts/train.py --config-name snemi3d \
 #     training.resume_from_checkpoint=outputs/checkpoints/last.ckpt
+# =====================================================================
 
 defaults:
   - default
@@ -25,129 +36,159 @@ experiment_name: snemi3d
 project_name: brainbow
 output_dir: outputs
 
+
+# ---------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------
 data:
   dataset: snemi3d
   data_root: data/SNEMI3D
+
+  # ---- Loader & batching ----
   batch_size: 4
-  num_workers: 16
+  num_workers: 8
   persistent_workers: true
-  cache_rate: 0.0
   pin_memory: true
-  slice_mode: false
-  num_samples: 16000
-  patch_size: [80, 256, 256]
-  find_boundaries: 1.0
-  pixel_size: [30, 6, 6]   # z, y, x in nm — SNEMI3D resolution
-  min_foreground: 0.80
-  # Resolution harmonisation across SNEMI3D/neurons (30x6x6 nm) and
-  # MICrONS (40x8x8 nm).  prefix -> [Z, Y, X] nm native resolution.
-  resolution_zoom_prob: 1.0
-  resolution_zoom_range: [[30, 40], [6, 8], [6, 8]]
-  resolution_map:
+  cache_rate: 0.0                 # 0 = stream from disk; raise if RAM allows
+
+  # ---- Sampling & patch geometry ----
+  slice_mode: false               # false = volumetric crops; true = 2-D slices
+  num_samples: 16000              # crops drawn per epoch (across all volumes)
+  patch_size: [80, 256, 256]      # (Z, Y, X) voxels
+  min_foreground: 0.80            # reject crops with <80% foreground voxels
+  find_boundaries: 1.0            # probability of computing instance boundaries
+
+  # ---- Resolution harmonisation ----
+  # SNEMI3D / neurons are 30x6x6 nm, MICrONS is 40x8x8 nm.  We zoom each
+  # crop into the joint range below so one model can train on all three.
+  pixel_size: [30, 6, 6]                              # (Z, Y, X) nm — base / SNEMI3D
+  resolution_zoom_prob: 1.0                           # always apply (joint training)
+  resolution_zoom_range: [[30, 40], [6, 8], [6, 8]]   # target per-axis nm range
+  resolution_map:                                     # volume-prefix -> native nm
+    AC:       [30, 6, 6]
+    neurons:  [30, 6, 6]
     minnie65: [40, 8, 8]
-    AC: [30, 6, 6]
-    neurons: [30, 6, 6]
-  # elastic_prob: 0.00
+
+  # Elastic deformation is disabled here; uncomment to enable.
+  # elastic_prob: 0.0
   # elastic_sigma_range: [5, 8]
   # elastic_magnitude_range: [50, 150]
 
+  # -------------------------------------------------------------------
+  # Train volumes
+  # -------------------------------------------------------------------
+  # Each entry pairs a raw `vol` with its instance-`seg` label volume,
+  # both stored under `root`.  MICrONS volume names embed the (x, y, z)
+  # crop origin -- the comment column is just that origin for at-a-glance
+  # scanning.
+  # -------------------------------------------------------------------
   train_volumes:
     # --- SNEMI3D (30x6x6 nm) ---
-    # AC4 (SNEMI3D train, 1024×1024×100, 401 instance IDs)
-    # Download: python scripts/download_snemi3d.py --source snemi
-    # Neurons full annotated cylinder (same 30x6x6 nm resolution)
-    # Download: python scripts/download_snemi3d.py --source neurons
+    # AC4: SNEMI3D train block, 1024 x 1024 x 100, 401 instance IDs.
+    #   Download: python scripts/download_snemi3d.py --source snemi
     - vol: AC4_inputs
       seg: AC4_labels
       root: data/SNEMI3D
+
+    # neurons: fully-annotated cylinder, same 30x6x6 nm resolution.
+    #   Download: python scripts/download_snemi3d.py --source neurons
     - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
       seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
       root: data/SNEMI3D
 
-    # --- MICrONS (40x8x8 nm, 4096x4096x800 crops) ---
-    # Download: python scripts/download_microns.py --split
-    - vol: minnie65_mip0_4096x4096x800_x50000_y60000_z16000_volume
+    # --- MICrONS minnie65 (40x8x8 nm, 4096x4096x800 crops) ---
+    #   Download: python scripts/download_microns.py --split
+    - vol: minnie65_mip0_4096x4096x800_x50000_y60000_z16000_volume          # train01
       seg: minnie65_mip0_4096x4096x800_x50000_y60000_z16000_v1300_segmentation
       root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x110000_y60000_z18000_volume
+    - vol: minnie65_mip0_4096x4096x800_x110000_y60000_z18000_volume         # train02
       seg: minnie65_mip0_4096x4096x800_x110000_y60000_z18000_v1300_segmentation
       root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x80000_y70000_z16500_volume
+    - vol: minnie65_mip0_4096x4096x800_x80000_y70000_z16500_volume          # train03
       seg: minnie65_mip0_4096x4096x800_x80000_y70000_z16500_v1300_segmentation
       root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x140000_y80000_z17500_volume
+    - vol: minnie65_mip0_4096x4096x800_x140000_y80000_z17500_volume         # train04
       seg: minnie65_mip0_4096x4096x800_x140000_y80000_z17500_v1300_segmentation
       root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x45000_y75000_z16500_volume
+    - vol: minnie65_mip0_4096x4096x800_x45000_y75000_z16500_volume          # train05
       seg: minnie65_mip0_4096x4096x800_x45000_y75000_z16500_v1300_segmentation
       root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x95000_y50000_z18500_volume
+    - vol: minnie65_mip0_4096x4096x800_x95000_y50000_z18500_volume          # train06
       seg: minnie65_mip0_4096x4096x800_x95000_y50000_z18500_v1300_segmentation
       root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x125000_y70000_z16500_volume
+    - vol: minnie65_mip0_4096x4096x800_x125000_y70000_z16500_volume         # train07
       seg: minnie65_mip0_4096x4096x800_x125000_y70000_z16500_v1300_segmentation
       root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x60000_y50000_z17500_volume
+    - vol: minnie65_mip0_4096x4096x800_x60000_y50000_z17500_volume          # train08
       seg: minnie65_mip0_4096x4096x800_x60000_y50000_z17500_v1300_segmentation
       root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x130000_y50000_z17000_volume
+    - vol: minnie65_mip0_4096x4096x800_x130000_y50000_z17000_volume         # train09
       seg: minnie65_mip0_4096x4096x800_x130000_y50000_z17000_v1300_segmentation
       root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_volume
+    - vol: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_volume          # train10
       seg: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_v1300_segmentation
       root: data/MICRONS
 
-  val_volumes:
+  # -------------------------------------------------------------------
+  # Val / test volumes  (same set; held out from train)
+  # -------------------------------------------------------------------
+  val_volumes: &eval_volumes
     - vol: AC4_inputs
       seg: AC4_labels
       root: data/SNEMI3D
     - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
       seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
       root: data/SNEMI3D
-    - vol: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume
+    - vol: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume          # test01
       seg: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation
       root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume
+    - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume         # test02
       seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
       root: data/MICRONS
 
-  test_volumes:
-    - vol: AC4_inputs
-      seg: AC4_labels
-      root: data/SNEMI3D
-    - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
-      seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
-      root: data/SNEMI3D
-    - vol: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume
-      seg: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation
-      root: data/MICRONS
-    - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume
-      seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
-      root: data/MICRONS
+  test_volumes: *eval_volumes
 
+
+# ---------------------------------------------------------------------
+# Model -- CosmosTransfer3D (Cosmos-Transfer2.5-2B backbone)
+# ---------------------------------------------------------------------
 model:
   type: cosmostransfer3d
-  in_channels: 1
-  semantic_channels: 1
-  instance_channels: 10
-  boundary_channels: 16
-  feature_size: 64
   variant: "2B"
   dtype: "bf16"
-  pretrained: true              # auto-pull nvidia/Cosmos-Transfer2.5-2B from HF
+  pretrained: true                # auto-pulls nvidia/Cosmos-Transfer2.5-2B from HF
+
+  # Output heads (channel counts must match the loss config below):
+  in_channels: 1                  #   raw EM   -> 1 channel
+  semantic_channels: 1            #   FG / BG  -> 1 channel
+  instance_channels: 10           #   embedding dimensionality
+  boundary_channels: 16           #   raw(1) + min/avg/max RGB(9) + aff(6)
+  feature_size: 64
+
+  # What to freeze.  Backbone is pretrained, so we adapt only the heads
+  # by default.  `freeze_dit_backbone: 2` freezes the first 2 DiT blocks.
   freeze_vae_encoder: true
   freeze_dit_backbone: 2
   freeze_vae_decoder: true
+
   gradient_checkpointing: false
   dropout: 0.0
 
+
+# ---------------------------------------------------------------------
+# Callbacks (overrides on top of default.yaml)
+# ---------------------------------------------------------------------
 callbacks:
-  cuda_empty_cache_before_val: true
+  cuda_empty_cache_before_val: true   # avoids val-peak polluting train pool
   image_logger:
     max_images: 8
 
+
+# ---------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------
 training:
-  max_epochs: 100
+  max_epochs: 50
   accelerator: auto
   devices: auto
   strategy: ddp
@@ -156,65 +197,81 @@ training:
   accumulate_grad_batches: 1
   limit_val_batches: 100
   num_sanity_val_steps: 2
-  log_every_n_steps: 50
+  log_every_n_steps: 100
   benchmark: true
-  # torch.compile on DiT backbone. false/null disables; true uses
-  # "reduce-overhead" (~1 min compile, good runtime); "max-autotune"
-  # gives best runtime but 5-15 min first-run compile.
+
+  # torch.compile on the DiT backbone:
+  #   false / null     -> off
+  #   true             -> "reduce-overhead"  (~1 min compile, good runtime)
+  #   "max-autotune"   -> best runtime, but 5-15 min first-run compile
   compile: "max-autotune"
   compile_fullgraph: true
+
   training_modes:
     - automatic
-  # Validation-time clusterer.  `bandwidth` and `normalize_embeddings`
-  # default to loss.delta_v / loss.normalize_embeddings.
+
+  # -------------------------------------------------------------------
+  # Validation-time clusterer
+  # -------------------------------------------------------------------
+  # Turns the per-voxel embedding into discrete instance IDs at val time.
+  # `bandwidth` and `normalize_embeddings` default to loss.delta_v and
+  # loss.normalize_embeddings respectively.
   #
-  # Options (fastest & most neuron-appropriate last):
-  #   - soft_meanshift : differentiable, mode-based; over-segments
-  #                      random embeddings early in training → pretty
-  #                      but misleading panels before ~2 k steps.
-  #   - hdbscan        : density-based, auto-K; honest but silent until
-  #                      the embedding separates.  Ignores spatial
-  #                      connectivity so two disconnected cells with
-  #                      similar mean embedding can merge.
-  #   - spatial_cc     : connected components on the per-voxel
-  #                      embedding-affinity graph (6-connectivity).
-  #                      Respects spatial connectivity, runs at full
-  #                      resolution, and accepts **per-axis** embedding
-  #                      thresholds (a list instead of a scalar) for
-  #                      anisotropic EM.  On 5:1 Z:XY stacks like
-  #                      SNEMI3D, neurons routinely touch across Z
-  #                      slices while being distinct cells; a tighter
-  #                      Z entry stops them from merging through one
-  #                      borderline-similar Z neighbour — the dominant
-  #                      failure mode of isotropic spatial_cc/HDBSCAN
-  #                      on this data.
+  # Choices (in rough order from "pretty early, misleading later" to
+  # "honest, neuron-appropriate"):
   #
-  # Backend picker (`backend: auto`) prefers:
-  #   1. self    : our self-contained CuPy RawKernel union-find
-  #                (Shiloach-Vishkin hook + pointer-jumping).  No
-  #                pylibcugraph / cusparse CSC<->CSR round-trip, so
-  #                it is both faster than option 2 and robust to cuML
-  #                installs missing pylibcugraph.
-  #   2. cupy    : cupyx.scipy.sparse.csgraph.connected_components
-  #                (needs pylibcugraph — kept for debugging parity).
-  #   3. scipy   : CPU round-trip.
-  # Use `backend: self` to force the kernel path (e.g. for DDP
+  #   soft_meanshift -- differentiable, mode-based.  Over-segments
+  #                     random embeddings, so panels look pretty but
+  #                     misleading before ~2k steps.  [current default]
+  #
+  #   hdbscan        -- density-based, auto-K.  Honest but silent until
+  #                     the embedding actually separates.  Ignores
+  #                     spatial connectivity, so two disconnected cells
+  #                     with similar mean embedding can merge.
+  #
+  #   spatial_cc     -- connected components on the per-voxel
+  #                     embedding-affinity graph (6-connectivity).
+  #                     Respects spatial connectivity, runs at full
+  #                     resolution, and accepts per-axis embedding
+  #                     thresholds (a list instead of a scalar) for
+  #                     anisotropic EM.  On 5:1 Z:XY stacks like
+  #                     SNEMI3D, neurons routinely touch across Z
+  #                     while being distinct cells; a tighter Z entry
+  #                     stops them merging through one borderline-
+  #                     similar Z neighbour -- the dominant failure
+  #                     mode of isotropic spatial_cc / HDBSCAN here.
+  #
+  # Backend picker (`backend: auto`) prefers, in order:
+  #   1. self  -- our self-contained CuPy RawKernel union-find
+  #               (Shiloach-Vishkin hook + pointer-jumping). No
+  #               pylibcugraph / cusparse round-trip; faster than 2
+  #               and robust to cuML installs missing pylibcugraph.
+  #   2. cupy  -- cupyx.scipy.sparse.csgraph.connected_components
+  #               (needs pylibcugraph; kept for debugging parity).
+  #   3. scipy -- CPU round-trip.
+  # Force the kernel path with `backend: self` (e.g. for DDP
   # reproducibility).
+  # -------------------------------------------------------------------
   clusterer:
-    name: soft_meanshift #spatial_cc
+    name: soft_meanshift
     min_cluster_size: 50
-    connectivity: 1            # 1 → 6-neighbour; else → 26-neighbour
-    backend: auto              # auto → self on CUDA, scipy on CPU
+    connectivity: 1               # 1 -> 6-neighbour, else 26-neighbour
+    backend: auto                 # auto -> self on CUDA, scipy on CPU
+    # Alternative config (uncomment to try spatial_cc):
     # name: spatial_cc
     # backend: self
     # min_cluster_size: 50
     # connectivity: 1
-    # bandwidth: [0.1, 0.5, 0.5]   # [Z, Y, X]; Z tighter to respect anisotropy
+    # bandwidth: [0.1, 0.5, 0.5]  # [Z, Y, X]; tighter Z respects 5:1 anisotropy
 
+
+# ---------------------------------------------------------------------
+# Optimizer
+# ---------------------------------------------------------------------
 optimizer:
   type: adamw
-  lr: 2e-4
-  dit_backbone_lr: 2e-5
+  lr: 2e-4                        # head / new-parameter LR
+  dit_backbone_lr: 2e-5           # 10x lower for the pretrained DiT backbone
   weight_decay: 1.0e-4
   scheduler:
     type: cosine_warmup
@@ -222,95 +279,108 @@ optimizer:
     T_max: 50
     eta_min: 1.0e-6
 
+
+# ---------------------------------------------------------------------
+# Loss
+# ---------------------------------------------------------------------
+# CombinedLoss = sum over heads of (head.weight * sub_loss(head)).
+#
+# Each head below is a mapping where:
+#   - `weight`        is the scalar that multiplies the head's loss.
+#                     Setting `weight: 0` disables the head entirely
+#                     (the sub-module is not even instantiated).
+#   - all other keys  are forwarded as kwargs to the corresponding
+#                     sub-loss module: SemanticLoss / InstanceLoss /
+#                     GeometryLoss / BoundaryLoss.
+# ---------------------------------------------------------------------
 loss:
-  # CombinedLoss = weight_semantic.weight * semantic + weight_instance.weight * instance
-  #              + weight_geometry.weight * geometry + weight_boundary.weight * boundary
-  # Each head's config is a mapping: ``weight`` is the head scalar (set to
-  # 0 to disable the head entirely -- the sub-module is not instantiated)
-  # and the remaining keys are forwarded as kwargs to the corresponding
-  # sub-loss (SemanticLoss / InstanceLoss / GeometryLoss / BoundaryLoss).
+  ignore_index: -100              # label value excluded from every loss term
+  learned_task_weights: false     # Kendall-style uncertainty weighting across heads
 
-  ignore_index: -100               # label value excluded from every loss term
-  learned_task_weights: false      # Kendall-style uncertainty weighting across heads
-
-  # -----------------------------------------------------------------
+  # -------------------------------------------------------------------
   # Semantic head -- binary foreground / background (sigmoid, 1 class)
-  # -----------------------------------------------------------------
+  # -------------------------------------------------------------------
+  # NOTE: SemanticLoss is sigmoid-only; the model wrapper applies sigmoid
+  #       to the semantic head before the loss / TB callbacks see it.
   weight_semantic:
-    weight: 1.0                    # head weight; 0 -> semantic head disabled (instance carries FG info)
-    # NOTE: SemanticLoss is sigmoid-only; the model wrapper applies sigmoid
-    #       to the semantic head before the loss / TB callbacks see it.
-    active_classes: 1              # only foreground is learnt for SNEMI3D
-    class_weights: [0.1]           # per-class CE weighting (down-weights FG to fight imbalance)
+    weight: 1.0                   # 0 -> head disabled (instance head carries FG info)
+    active_classes: 1             # only foreground is learnt for SNEMI3D
+    class_weights: [0.1]          # per-class CE weighting (down-weights FG vs BG imbalance)
     label_smoothing: 0.0
-    weight_ce: 1.0                 # cross-entropy sub-loss
-    weight_iou: 0.0                # IoU sub-loss (0 -> skipped)
-    weight_dice: 1.0               # Dice sub-loss (helps on heavily imbalanced FG)
+    weight_ce: 1.0                # cross-entropy sub-loss
+    weight_iou: 0.0               # IoU sub-loss (0 -> skipped)
+    weight_dice: 1.0              # Dice sub-loss (helps on heavy FG imbalance)
 
-  # -----------------------------------------------------------------
+  # -------------------------------------------------------------------
   # Instance head -- discriminative embedding (pull / push / norm)
-  # -----------------------------------------------------------------
+  # -------------------------------------------------------------------
   weight_instance:
-    weight: 1.0                    # head weight for the embedding loss
-    weight_pull: 1.0               # intra-cluster pull (voxels -> their centroid, hinge at delta_v)
-    weight_push: 1.0               # inter-cluster push (centroid <-> centroid, hinge at delta_d)
-    weight_norm: 0.001             # mild centroid-norm regulariser (prevents blowup)
-    delta_v: 0.5                   # pull margin: allowed intra-cluster radius
-    delta_d: 1.5                   # push margin: half the minimum centroid separation
-    normalize_embeddings: false    # L2-normalise embeddings before loss (cosine-like)
-    anchor_to_centroid: false      # anchor pull to running centroid instead of batch centroid
-    max_hard_pairs: 4096           # 0 = all pairs (memory grows ~K(K-1)/2 with
-                                   #   crops that contain hundreds of instances —
-                                   #   pushes the allocator high-water mark up
-                                   #   and feeds steady-state OOM drift);
-                                   # >0 = top-k hardest pairs only (bounded
-                                   #   memory + concentrates gradient on the
-                                   #   pairs that actually need separation).
-    weight_edge: 1.0               # per-voxel multiplier on boundary voxels (1.0 = off)
-    weight_bone: 1.0               # per-voxel multiplier on medial-axis voxels (1.0 = off)
+    weight: 1.0
+    weight_pull: 1.0              # intra-cluster: voxel -> centroid, hinge at delta_v
+    weight_push: 1.0              # inter-cluster: centroid <-> centroid, hinge at delta_d
+    weight_norm: 0.001            # mild centroid-norm regulariser (prevents blowup)
+    delta_v: 0.5                  # pull margin: allowed intra-cluster radius
+    delta_d: 1.5                  # push margin: half the minimum centroid separation
+    normalize_embeddings: false   # L2-normalise embeddings before loss (cosine-like)
+    anchor_to_centroid: false     # anchor pull to running centroid (vs batch centroid)
+    # Hard-pair mining for the push term.
+    #   0   -> use all pairs.  Memory grows ~K(K-1)/2 with crops that
+    #          contain hundreds of instances, pushing the allocator
+    #          high-water mark up and feeding steady-state OOM drift.
+    #   >0  -> top-k hardest pairs only.  Bounded memory and
+    #          concentrates gradient on pairs that actually need
+    #          separating.
+    max_hard_pairs: 4096
+    weight_edge: 1.0              # per-voxel multiplier on boundary voxels (1.0 = off)
+    weight_bone: 1.0              # per-voxel multiplier on medial-axis voxels (1.0 = off)
 
-  # -----------------------------------------------------------------
+  # -------------------------------------------------------------------
   # Geometry head -- direction field + covariance + raw reconstruction
-  # -----------------------------------------------------------------
+  # -------------------------------------------------------------------
   weight_geometry:
-    weight: 1.0                    # head weight; 0 -> geometry head disabled
-    dir_target: centroid           # direction-field target: "centroid" or "skeleton"
-    weight_dir: 1.0                # direction sub-loss
-    weight_cov: 1.0                # covariance sub-loss (shape/anisotropy)
-    weight_raw: 1.0                # raw-image reconstruction sub-loss (autoencoder-ish)
-    loss_dir: l1            # regression loss for direction (mse | l1 | smooth_l1)
-    loss_cov: l1            # regression loss for covariance (mse | l1 | smooth_l1)
-    loss_raw: l1            # regression loss for raw-intensity reconstruction
+    weight: 1.0
+    dir_target: centroid          # direction-field target: "centroid" or "skeleton"
+    weight_dir: 1.0               # direction sub-loss
+    weight_cov: 1.0               # covariance sub-loss (shape / anisotropy)
+    weight_raw: 1.0               # raw-image reconstruction sub-loss (autoencoder-ish)
+    loss_dir: l1                  # direction regression: mse | l1 | smooth_l1
+    loss_cov: l1                  # covariance regression: mse | l1 | smooth_l1
+    loss_raw: l1                  # raw-intensity regression: mse | l1 | smooth_l1
 
-  # -----------------------------------------------------------------
-  # Boundary head (formerly ``brainbow``) -- per-instance (min, avg,
-  # max) RGB colouring + per-voxel raw-intensity reconstruction + 6
-  # face-affinity channels (16 channels total).
-  # Channel layout (see brainbow/losses/boundary.py):
-  #   ch 0      := raw  (raw image intensity, per voxel)
-  #   ch 1-3    := min  (normalised (z, y, x) of each instance's bbox min)
-  #   ch 4-6    := avg  (normalised (z, y, x) centroid)
-  #   ch 7-9    := max  (normalised (z, y, x) of each instance's bbox max)
-  #   ch 10-15  := aff  (binary face-affinity to 6 neighbours in Z-Y-X
-  #                      order T/B/U/D/L/R with SAME-pad; supervised via
-  #                      CE + soft-Dice + soft-Jaccard on sigmoid)
-  # -----------------------------------------------------------------
+  # -------------------------------------------------------------------
+  # Boundary head (formerly "brainbow")  --  16 channels total
+  # -------------------------------------------------------------------
+  # Per-instance bbox/centroid colouring + raw reconstruction + 6 face
+  # affinities.  See brainbow/losses/boundary.py for details.
+  #
+  # Channel layout:
+  #   ch  0     := raw   (raw image intensity, per voxel)
+  #   ch  1- 3  := min   (normalised (z, y, x) of each instance's bbox min)
+  #   ch  4- 6  := avg   (normalised (z, y, x) centroid)
+  #   ch  7- 9  := max   (normalised (z, y, x) of each instance's bbox max)
+  #   ch 10-15  := aff   (binary face-affinity to 6 neighbours, T/B/U/D/L/R
+  #                       in Z-Y-X order, SAME-pad; supervised via
+  #                       CE + soft-Dice + soft-Jaccard on sigmoid)
+  #
+  # NOTE: The model wrapper applies sigmoid to channels 10-15 of the
+  #       boundary head before the loss / TB callbacks see them, so the
+  #       affinity sub-losses operate on per-channel binary probabilities.
+  # -------------------------------------------------------------------
   weight_boundary:
-    weight: 1.0                    # head weight; 0 -> boundary head disabled
-    loss_loc: l1            # regression loss for the 9 location channels
-    loss_raw: l1                   # regression loss for the raw channel
-    weight_min: 1.0                # sub-weight for min channels (ch 1-3)
-    weight_avg: 1.0                # sub-weight for avg channels (ch 4-6)
-    weight_max: 1.0                # sub-weight for max channels (ch 7-9)
-    weight_raw: 1.0                # sub-weight for raw channel  (ch 0)
-    # Affinity sub-losses (ch 10-15, T/B/U/D/L/R, Z-Y-X): CE + Dice + IoU.
-    # The model wrapper applies sigmoid to channels 10-15 of the boundary
-    # head before the loss / TB callbacks see them, so these sub-losses
-    # operate on per-channel binary probabilities directly.
+    weight: 1.0
+    # Location channels (1-9) and raw channel (0): regression sub-losses.
+    loss_loc: l1                  # regression loss for the 9 location channels
+    loss_raw: l1                  # regression loss for the raw channel
+    weight_min: 1.0               # sub-weight for min channels (ch 1-3)
+    weight_avg: 1.0               # sub-weight for avg channels (ch 4-6)
+    weight_max: 1.0               # sub-weight for max channels (ch 7-9)
+    weight_raw: 1.0               # sub-weight for raw channel  (ch 0)
+    foreground_only_loc: true     # location loss on FG voxels only (BG has no instance)
+
+    # Affinity channels (10-15): CE + Dice + IoU on binary probabilities.
     class_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]  # BCE pos_weight per aff channel
-    label_smoothing: 0.0           # kept for parity with SemanticLoss (no-op in sigmoid/BCE)
-    weight_ce: 1.0                 # BCE sub-loss on the 6 affinity channels (renamed from weight_aff)
-    weight_iou: 0.0                # soft-Jaccard sub-loss (MONAI DiceLoss jaccard=True)
-    weight_dice: 1.0               # soft-Dice sub-loss (preserves previous affinity behaviour)
-    foreground_only_loc: true      # apply location loss on foreground voxels only (bg has no instance)
-    aff_eps: 1.0e-5                # MONAI DiceLoss smoothing (smooth_nr=smooth_dr); MONAI default is 1e-5
+    label_smoothing: 0.0          # kept for parity with SemanticLoss (no-op for sigmoid/BCE)
+    weight_ce: 1.0                # BCE sub-loss on the 6 affinity channels
+    weight_iou: 0.0               # soft-Jaccard sub-loss (MONAI DiceLoss jaccard=True)
+    weight_dice: 1.0              # soft-Dice sub-loss (preserves previous affinity behaviour)
+    aff_eps: 1.0e-5               # MONAI DiceLoss smoothing (smooth_nr = smooth_dr); default 1e-5

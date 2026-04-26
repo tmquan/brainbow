@@ -75,7 +75,11 @@ _orig_torch_load = torch.load
 
 
 def _torch_load_trusted(*args: Any, **kwargs: Any) -> Any:
-    kwargs.setdefault("weights_only", False)
+    # Force-override: Lightning's checkpoint connector passes
+    # ``weights_only=True`` explicitly in newer versions, so a plain
+    # ``setdefault`` would be a no-op.  ``weights_only`` is keyword-only
+    # in ``torch.load``, so this kwargs assignment is sufficient.
+    kwargs["weights_only"] = False
     return _orig_torch_load(*args, **kwargs)
 
 
