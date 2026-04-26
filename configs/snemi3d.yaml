@@ -1,6 +1,7 @@
 # =====================================================================
 # SNEMI3D + Neurons + MICrONS  --  CosmosTransfer3D training config
 # =====================================================================
+# Inheritance chain:  default <- snemi3d
 #
 # Trains CosmosTransfer3D jointly on three EM datasets at a harmonised
 # resolution so a single model sees all three:
@@ -24,9 +25,13 @@
 #   python scripts/train.py --config-name snemi3d
 #   python scripts/train.py --config-name snemi3d data.batch_size=8
 #
-# Resume after a crash (optimizer, schedulers, epoch all restored):
+# Resuming a crashed run.  Lightning writes the timestamped resume
+# checkpoint as ``<output_dir>/<run_dir>/checkpoints/last.ckpt`` (the
+# exact ``run_dir`` is printed at the top of every run's log).  Pass
+# that path verbatim::
+#
 #   python scripts/train.py --config-name snemi3d \
-#     training.resume_from_checkpoint=outputs/checkpoints/last.ckpt
+#     training.resume_from_checkpoint=<output_dir>/<run_dir>/checkpoints/last.ckpt
 # =====================================================================
 
 defaults:
@@ -188,7 +193,7 @@ callbacks:
 # Training
 # ---------------------------------------------------------------------
 training:
-  max_epochs: 50
+  max_epochs: 61
   accelerator: auto
   devices: auto
   strategy: ddp

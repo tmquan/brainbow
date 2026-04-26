@@ -1,11 +1,17 @@
 """
-Tests for the combined segmentation loss used by every Lightning module.
+Tests for the combined segmentation loss + the standalone task losses
+that feed into it.
 """
 
 import pytest
 import torch
 
-from brainbow.losses import CombinedLoss
+from brainbow.losses import (
+    CombinedLoss,
+    GeometryLoss,
+    InstanceLoss,
+    SemanticLoss,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +171,140 @@ class TestCombinedLoss3D:
     def test_semantic_disabled_when_weight_zero(self) -> None:
         loss_fn = CombinedLoss(spatial_dims=3, weight_semantic=0.0)
         assert loss_fn.semantic_loss is None
+
+
+# ---------------------------------------------------------------------------
+# SemanticLoss (direct, no CombinedLoss orchestration)
+# ---------------------------------------------------------------------------
+
+class TestSemanticLoss:
+    """Direct exercises of :class:`SemanticLoss`.
+
+    Most of the existing coverage runs through :class:`CombinedLoss`
+    with ``weight_geometry: 0`` -- which is fine for integration but
+    leaves the direct-path return contract uncovered.
+    """
+
+    @pytest.fixture()
+    def probs(self) -> torch.Tensor:
+        # Already-sigmoided probabilities, [B, C, H, W].
+        torch.manual_seed(0)
+        return torch.sigmoid(torch.randn(2, 1, 8, 8))
+
+    @pytest.fixture()
+    def labels(self) -> torch.Tensor:
+        labels = torch.zeros(2, 8, 8, dtype=torch.long)
+        labels[:, :4, :4] = 1
+        return labels
+
+    def test_returns_loss_ce_iou_dice(self, probs, labels) -> None:
+        loss_fn = SemanticLoss(weight_ce=1.0, weight_iou=1.0, weight_dice=1.0)
+        out = loss_fn(probs, labels)
+        for k in ("loss", "ce", "iou", "dice"):
+            assert k in out
+
+    def test_zero_weights_skip_subloss(self, probs, labels) -> None:
+        loss_fn = SemanticLoss(weight_ce=1.0, weight_iou=0.0, weight_dice=0.0)
+        out = loss_fn(probs, labels)
+        # ``ce`` is unconditional; ``iou`` / ``dice`` short-circuit to 0.
+        assert out["iou"].item() == pytest.approx(0.0)
+        assert out["dice"].item() == pytest.approx(0.0)
+
+    def test_finite_and_non_negative(self, probs, labels) -> None:
+        loss_fn = SemanticLoss()
+        out = loss_fn(probs, labels)
+        assert out["loss"].isfinite()
+        assert out["loss"].item() >= 0.0
+
+    def test_active_classes_truncates(self) -> None:
+        probs = torch.sigmoid(torch.randn(1, 4, 8, 8))
+        labels = torch.zeros(1, 8, 8, dtype=torch.long)
+        loss_fn = SemanticLoss(active_classes=2)
+        out = loss_fn(probs, labels)
+        assert out["loss"].isfinite()
+
+
+# ---------------------------------------------------------------------------
+# InstanceLoss (direct)
+# ---------------------------------------------------------------------------
+
+class TestInstanceLoss:
+    @pytest.fixture()
+    def embed_and_label(self):
+        torch.manual_seed(1)
+        embed = torch.randn(2, 8, 16, 16, requires_grad=True)
+        label = torch.zeros(2, 16, 16, dtype=torch.long)
+        label[:, :8, :8] = 1
+        label[:, :8, 8:] = 2
+        return embed, label
+
+    def test_returns_loss_pull_push_norm(self, embed_and_label) -> None:
+        embed, label = embed_and_label
+        loss_fn = InstanceLoss(spatial_dims=2)
+        out = loss_fn(embed, label)
+        for k in ("loss", "pull", "push", "norm"):
+            assert k in out
+        assert out["loss"].isfinite()
+
+    def test_zero_instances(self) -> None:
+        loss_fn = InstanceLoss(spatial_dims=2)
+        embed = torch.randn(1, 4, 8, 8)
+        label = torch.zeros(1, 8, 8, dtype=torch.long)
+        out = loss_fn(embed, label)
+        assert out["loss"].isfinite()
+
+    def test_backward(self, embed_and_label) -> None:
+        embed, label = embed_and_label
+        loss_fn = InstanceLoss(spatial_dims=2, weight_pull=1.0, weight_push=1.0)
+        out = loss_fn(embed, label)
+        out["loss"].backward()
+        assert embed.grad is not None
+        assert torch.isfinite(embed.grad).all()
+
+
+# ---------------------------------------------------------------------------
+# GeometryLoss (direct)
+# ---------------------------------------------------------------------------
+
+class TestGeometryLoss:
+    @pytest.fixture()
+    def geometry_inputs(self):
+        torch.manual_seed(2)
+        # 2-D geometry head: raw(1) + cov(3) + dir(2) = 6 channels.
+        geom = torch.randn(1, 6, 16, 16, requires_grad=True)
+        ins_label = torch.zeros(1, 16, 16, dtype=torch.long)
+        ins_label[:, :8, :8] = 1
+        ins_label[:, 8:, 8:] = 2
+        raw = torch.randn(1, 1, 16, 16)
+        return geom, ins_label, raw
+
+    def test_returns_loss_dir_cov_raw(self, geometry_inputs) -> None:
+        geom, ins_label, raw = geometry_inputs
+        loss_fn = GeometryLoss(
+            spatial_dims=2,
+            weight_dir=1.0, weight_cov=1.0, weight_raw=1.0,
+        )
+        out = loss_fn(geom, ins_label, raw_image=raw)
+        for k in ("loss", "dir", "cov", "raw"):
+            assert k in out
+        assert out["loss"].isfinite()
+
+    def test_no_raw_image_skips_raw_subloss(self, geometry_inputs) -> None:
+        geom, ins_label, _ = geometry_inputs
+        loss_fn = GeometryLoss(
+            spatial_dims=2,
+            weight_dir=1.0, weight_cov=0.0, weight_raw=1.0,
+        )
+        out = loss_fn(geom, ins_label, raw_image=None)
+        # ``raw`` is short-circuited to zero when no image is provided.
+        assert out["raw"].item() == pytest.approx(0.0)
+
+    def test_backward(self, geometry_inputs) -> None:
+        geom, ins_label, raw = geometry_inputs
+        loss_fn = GeometryLoss(spatial_dims=2)
+        out = loss_fn(geom, ins_label, raw_image=raw)
+        out["loss"].backward()
+        assert geom.grad is not None
 
 
 if __name__ == "__main__":

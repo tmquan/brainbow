@@ -1,10 +1,26 @@
 """
-I/O utilities for loading and saving connectomics data.
+Volume I/O utilities.
 
-Provides:
-- find_folder: Smart file finder across supported formats
-- load_volume: Unified volume loading with auto format detection
-- save_volume: Unified volume saving with auto format detection
+Why this file exists
+--------------------
+A thin façade over :mod:`brainbow.preprocessors` that picks the right
+preprocessor by file suffix so callers don't have to.
+
+Public surface
+--------------
+* :func:`find_folder` -- recursively locate a file by basename or
+  extension under a search root.  Used by every dataset to resolve
+  ``vol`` / ``seg`` keys against ``data_root``.
+* :func:`load_volume` / :func:`save_volume` -- format-agnostic reader
+  / writer; suffix dispatches to a :class:`BasePreprocessor` subclass.
+* :func:`ensure_data` -- "make sure this is a numpy array" coerce with
+  a common error path.
+
+Extending this module
+---------------------
+A new format only needs a new :class:`BasePreprocessor` subclass; the
+suffix dispatch here will pick it up automatically once the class is
+registered in ``preprocessors/__init__.py``.
 """
 
 from pathlib import Path

@@ -18,7 +18,7 @@ emitted by :mod:`brainbow.callbacks.tensorboard`::
 """
 
 import math
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -37,9 +37,9 @@ def _split_head(
 ) -> Tuple[float, Dict[str, Any]]:
     """Split a head config into ``(head_weight, sub_kwargs)``.
 
-    Accepts either a scalar (legacy flat form -- only the head weight is
-    set, sub-kwargs come from the outer flat kwargs) or a mapping of the
-    form ``{weight: float, **sub_kwargs}`` (new nested form).
+    Accepts either a scalar (flat form -- only the head weight is set,
+    sub-kwargs come from the outer flat kwargs) or a mapping of the
+    form ``{weight: float, **sub_kwargs}`` (nested form, recommended).
     """
     if isinstance(cfg, Mapping):
         d = dict(cfg)
@@ -48,9 +48,9 @@ def _split_head(
     return float(cfg), {}
 
 
-# Legacy flat-kwarg groupings, used as a fallback when a head is passed
-# as a scalar (or omits a given key from its nested dict).  Keys map
-# 1:1 onto the sub-loss ``__init__`` parameter names.
+# Flat-kwarg groupings, used as a fallback when a head is passed as a
+# scalar (or omits a given key from its nested dict).  Keys map 1:1 onto
+# the sub-loss ``__init__`` parameter names.
 _SEMANTIC_FLAT_KEYS: Tuple[str, ...] = (
     "weight_ce", "weight_iou", "weight_dice",
     "class_weights", "active_classes", "label_smoothing",
@@ -60,11 +60,10 @@ _INSTANCE_FLAT_KEYS: Tuple[str, ...] = (
     "delta_v", "delta_d", "normalize_embeddings", "max_hard_pairs",
     "anchor_to_centroid", "centroid_scale",
 )
-# Legacy flat-kwarg prefix for the boundary head.  Historical configs
-# used ``brainbow_<key>``; the head was renamed to ``boundary`` but the
-# old prefix is still accepted so older configs keep loading.
+# Flat-kwarg prefix for the boundary head, used to disambiguate from
+# ``GeometryLoss``'s ``weight_raw`` etc.  Inside the nested mapping the
+# prefix is dropped (``weight_raw``, ``weight_min``, ...).
 _BOUNDARY_FLAT_PREFIX: str = "boundary_"
-_BOUNDARY_FLAT_PREFIX_LEGACY: str = "brainbow_"
 
 
 class CombinedLoss(nn.Module):
@@ -90,17 +89,13 @@ class CombinedLoss(nn.Module):
       it) so there is no ``semantic_mode`` knob; the same applies to the
       6 boundary affinity channels (``BoundaryLoss``).
 
-    - **Scalar float** (legacy flat form).  In this case the sub-loss
-      kwargs are read from the matching top-level flat kwargs
-      (e.g. ``weight_ce``, ``delta_v``, ``boundary_weight_raw``).  This
-      preserves compatibility with configs written against the pre-nest
-      signature.
-
-    For the ``boundary`` head the legacy flat kwargs are prefixed with
-    ``boundary_`` (the historical ``brainbow_`` prefix still works) to
-    avoid colliding with ``GeometryLoss``'s ``weight_raw``; inside the
-    nested mapping the prefix is dropped (``weight_raw``,
-    ``weight_min``, ...).
+    - **Scalar float** (flat form).  In this case the sub-loss kwargs
+      are read from the matching top-level flat kwargs
+      (e.g. ``weight_ce``, ``delta_v``, ``boundary_weight_raw``).
+      Boundary-head flat kwargs are prefixed with ``boundary_`` to
+      avoid colliding with ``GeometryLoss``'s ``weight_raw``; inside
+      the nested mapping the prefix is dropped (``weight_raw``,
+      ``weight_min``, ...).
 
     Args:
         spatial_dims: 2 or 3 (controls InstanceLoss / GeometryLoss).
@@ -109,7 +104,7 @@ class CombinedLoss(nn.Module):
         learned_task_weights: if ``True``, weights are learned via
             log-variances and the static weights become initialisations.
         ignore_index: label value excluded from every loss term.
-        **legacy_kwargs: flat sub-loss kwargs for the legacy form;
+        **flat_kwargs: flat sub-loss kwargs for the scalar form;
             unknown keys that don't match any of the four sub-losses are
             forwarded to :class:`GeometryLoss` (which ignores unknowns
             via its own ``**kwargs``).
@@ -121,21 +116,13 @@ class CombinedLoss(nn.Module):
         weight_semantic: HeadConfig = 1.0,
         weight_instance: HeadConfig = 1.0,
         weight_geometry: HeadConfig = 0.0,
-        weight_boundary: Optional[HeadConfig] = None,
+        weight_boundary: HeadConfig = 0.0,
         learned_task_weights: bool = False,
         ignore_index: int = -100,
-        **legacy_kwargs: Any,
+        **flat_kwargs: Any,
     ) -> None:
         super().__init__()
         self.spatial_dims = spatial_dims
-
-        # Back-compat: accept the old ``weight_brainbow`` key too.  If the
-        # caller passes both we honour ``weight_boundary`` (the new name)
-        # and silently ignore the legacy one.
-        if weight_boundary is None:
-            weight_boundary = legacy_kwargs.pop("weight_brainbow", 0.0)
-        else:
-            legacy_kwargs.pop("weight_brainbow", None)
 
         # Split head configs into (scalar_weight, nested_kwargs).
         w_sem, sem_nested = _split_head(weight_semantic, 1.0)
@@ -149,52 +136,32 @@ class CombinedLoss(nn.Module):
         self.weight_boundary = w_bnd
         self.learned_task_weights = learned_task_weights
 
-        # Partition legacy flat kwargs by target head.  Nested entries
-        # take priority; anything in ``legacy_kwargs`` only fills gaps.
-        sem_legacy = {
-            k: legacy_kwargs.pop(k) for k in _SEMANTIC_FLAT_KEYS
-            if k in legacy_kwargs
+        # Partition flat kwargs by target head.  Nested entries take
+        # priority; ``flat_kwargs`` only fills gaps.  Whatever remains
+        # after the semantic / instance / boundary partitions is
+        # interpreted as :class:`GeometryLoss`-bound (it is the only
+        # sub-loss that accepts ``**kwargs``-style overflow).
+        sem_flat = {
+            k: flat_kwargs.pop(k) for k in _SEMANTIC_FLAT_KEYS if k in flat_kwargs
         }
-        ins_legacy = {
-            k: legacy_kwargs.pop(k) for k in _INSTANCE_FLAT_KEYS
-            if k in legacy_kwargs
+        ins_flat = {
+            k: flat_kwargs.pop(k) for k in _INSTANCE_FLAT_KEYS if k in flat_kwargs
         }
-        bnd_legacy: Dict[str, Any] = {}
-        for k in list(legacy_kwargs.keys()):
-            for prefix in (_BOUNDARY_FLAT_PREFIX, _BOUNDARY_FLAT_PREFIX_LEGACY):
-                if k.startswith(prefix):
-                    bnd_legacy[k[len(prefix):]] = legacy_kwargs.pop(k)
-                    break
+        bnd_flat: Dict[str, Any] = {}
+        for k in list(flat_kwargs.keys()):
+            if k.startswith(_BOUNDARY_FLAT_PREFIX):
+                bnd_flat[k[len(_BOUNDARY_FLAT_PREFIX):]] = flat_kwargs.pop(k)
+        geom_flat = flat_kwargs
 
-        # Legacy alias: ``brainbow_weight_aff`` / ``boundary_weight_aff``
-        # was the single Dice-on-affinities sub-weight before the
-        # CE/Dice/IoU split.  Map it to ``weight_dice`` (its direct
-        # successor) unless the caller has already set ``weight_dice``
-        # explicitly.
-        if "weight_aff" in bnd_legacy:
-            legacy_aff = bnd_legacy.pop("weight_aff")
-            bnd_legacy.setdefault("weight_dice", legacy_aff)
-
-        # ``affinity_mode`` was the dead-end mode flag on BoundaryLoss
-        # (sigmoid-only in practice); silently drop it from both legacy
-        # flat kwargs and nested dicts so old configs keep loading.
-        bnd_legacy.pop("affinity_mode", None)
-
-        # Whatever remains (``dir_target``, ``weight_dir``, ``loss_dir``,
-        # etc.) is GeometryLoss-bound in the legacy flat form.
-        geom_legacy = legacy_kwargs
-
-        def _merge(legacy: Dict[str, Any], nested: Dict[str, Any]) -> Dict[str, Any]:
-            merged = dict(legacy)
+        def _merge(flat: Dict[str, Any], nested: Dict[str, Any]) -> Dict[str, Any]:
+            merged = dict(flat)
             merged.update(nested)
             return merged
 
-        sem_kwargs = _merge(sem_legacy, sem_nested)
-        ins_kwargs = _merge(ins_legacy, ins_nested)
-        geom_kwargs = _merge(geom_legacy, geom_nested)
-        bnd_kwargs = _merge(bnd_legacy, bnd_nested)
-        # Drop dead-end mode flag whether it came in via flat or nested.
-        bnd_kwargs.pop("affinity_mode", None)
+        sem_kwargs = _merge(sem_flat, sem_nested)
+        ins_kwargs = _merge(ins_flat, ins_nested)
+        geom_kwargs = _merge(geom_flat, geom_nested)
+        bnd_kwargs = _merge(bnd_flat, bnd_nested)
 
         if learned_task_weights:
             def _logvar(w: float) -> nn.Parameter:
@@ -206,12 +173,6 @@ class CombinedLoss(nn.Module):
             self.log_var_ins = _logvar(w_ins)
             self.log_var_geom = _logvar(w_geom)
             self.log_var_bnd = _logvar(w_bnd)
-
-        # SemanticLoss is sigmoid-only; silently drop any leftover
-        # ``semantic_mode`` / ``mode`` keys from old configs so that
-        # passing the legacy YAML doesn't raise an unexpected-kwarg error.
-        for dead in ("semantic_mode", "mode"):
-            sem_kwargs.pop(dead, None)
 
         self.semantic_loss: Optional[SemanticLoss] = (
             SemanticLoss(

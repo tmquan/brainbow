@@ -18,6 +18,27 @@ from brainbow.preprocessors.tiff import TIFFPreprocessor
 # BasePreprocessor (abstract)
 # ---------------------------------------------------------------------------
 
+def _make_dummy_preprocessor_cls(extensions: List[str] = (".x",), shape=(1,)):
+    """Build a minimal concrete BasePreprocessor for unit tests.
+
+    Avoids redefining the same dummy class in every test method, which
+    used to obscure what each test was actually checking.
+    """
+
+    class DummyPreprocessor(BasePreprocessor):
+        @property
+        def supported_extensions(self) -> List[str]:
+            return list(extensions)
+
+        def load(self, path, **kwargs):
+            return np.zeros(shape)
+
+        def validate(self, path) -> bool:
+            return True
+
+    return DummyPreprocessor
+
+
 class TestBasePreprocessor:
     """Tests for the abstract BasePreprocessor."""
 
@@ -26,117 +47,41 @@ class TestBasePreprocessor:
             BasePreprocessor()  # type: ignore[abstract]
 
     def test_concrete_subclass(self) -> None:
-        class DummyPreprocessor(BasePreprocessor):
-            @property
-            def supported_extensions(self) -> List[str]:
-                return [".dummy"]
-
-            def load(self, path, **kwargs):
-                return np.zeros(5)
-
-            def validate(self, path) -> bool:
-                return True
-
-        pp = DummyPreprocessor()
+        cls = _make_dummy_preprocessor_cls(extensions=[".dummy"], shape=(5,))
+        pp = cls()
         assert pp.supported_extensions == [".dummy"]
         assert pp.validate("any")
         np.testing.assert_array_equal(pp.load("any"), np.zeros(5))
 
     def test_to_tensor(self) -> None:
-        class DummyPreprocessor(BasePreprocessor):
-            @property
-            def supported_extensions(self) -> List[str]:
-                return [".x"]
-
-            def load(self, path, **kwargs):
-                return np.zeros(3)
-
-            def validate(self, path) -> bool:
-                return True
-
-        pp = DummyPreprocessor()
+        pp = _make_dummy_preprocessor_cls(shape=(3,))()
         arr = np.array([1.0, 2.0, 3.0], dtype=np.float32)
         t = pp.to_tensor(arr)
         assert isinstance(t, torch.Tensor)
         np.testing.assert_array_almost_equal(t.numpy(), arr)
 
     def test_to_tensor_with_dtype(self) -> None:
-        class DummyPreprocessor(BasePreprocessor):
-            @property
-            def supported_extensions(self):
-                return [".x"]
-
-            def load(self, path, **kwargs):
-                return np.zeros(1)
-
-            def validate(self, path):
-                return True
-
-        pp = DummyPreprocessor()
+        pp = _make_dummy_preprocessor_cls()()
         t = pp.to_tensor(np.array([1, 2, 3]), dtype=torch.float32)
         assert t.dtype == torch.float32
 
     def test_save_raises_by_default(self) -> None:
-        class DummyPreprocessor(BasePreprocessor):
-            @property
-            def supported_extensions(self):
-                return [".x"]
-
-            def load(self, path, **kwargs):
-                return np.zeros(1)
-
-            def validate(self, path):
-                return True
-
-        pp = DummyPreprocessor()
+        pp = _make_dummy_preprocessor_cls()()
         with pytest.raises(NotImplementedError):
             pp.save(np.zeros(1), "out.x")
 
     def test_check_file_exists_raises(self) -> None:
-        class DummyPreprocessor(BasePreprocessor):
-            @property
-            def supported_extensions(self):
-                return [".x"]
-
-            def load(self, path, **kwargs):
-                return np.zeros(1)
-
-            def validate(self, path):
-                return True
-
-        pp = DummyPreprocessor()
+        pp = _make_dummy_preprocessor_cls()()
         with pytest.raises(FileNotFoundError):
             pp._check_file_exists("/nonexistent/file.x")
 
     def test_check_extension_raises(self) -> None:
-        class DummyPreprocessor(BasePreprocessor):
-            @property
-            def supported_extensions(self):
-                return [".x"]
-
-            def load(self, path, **kwargs):
-                return np.zeros(1)
-
-            def validate(self, path):
-                return True
-
-        pp = DummyPreprocessor()
+        pp = _make_dummy_preprocessor_cls()()
         with pytest.raises(ValueError, match="Unsupported file extension"):
             pp._check_extension("file.wrong")
 
     def test_repr(self) -> None:
-        class DummyPreprocessor(BasePreprocessor):
-            @property
-            def supported_extensions(self):
-                return [".x", ".y"]
-
-            def load(self, path, **kwargs):
-                return np.zeros(1)
-
-            def validate(self, path):
-                return True
-
-        pp = DummyPreprocessor()
+        pp = _make_dummy_preprocessor_cls(extensions=[".x", ".y"])()
         r = repr(pp)
         assert "DummyPreprocessor" in r
         assert ".x" in r
@@ -144,19 +89,7 @@ class TestBasePreprocessor:
     def test_get_metadata(self, tmp_path: Path) -> None:
         f = tmp_path / "dummy.x"
         f.write_bytes(b"hello")
-
-        class DummyPreprocessor(BasePreprocessor):
-            @property
-            def supported_extensions(self):
-                return [".x"]
-
-            def load(self, path, **kwargs):
-                return np.zeros(1)
-
-            def validate(self, path):
-                return True
-
-        pp = DummyPreprocessor()
+        pp = _make_dummy_preprocessor_cls()()
         meta = pp.get_metadata(str(f))
         assert meta["filename"] == "dummy.x"
         assert meta["extension"] == ".x"

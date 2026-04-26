@@ -1,5 +1,32 @@
 """
-Base model class defining the interface for all segmentation models.
+Abstract base for backbone wrappers in :mod:`brainbow.models`.
+
+Why this file exists
+--------------------
+A "model wrapper" in brainbow is the *whole* network: encoder, decoder
+and the multiple task heads that produce ``semantic`` / ``instance`` /
+``geometry`` / ``boundary`` outputs.  This file declares the minimum
+contract every wrapper honours so that downstream code
+(:class:`brainbow.modules.base.BaseCircuitModule`,
+:class:`brainbow.callbacks.tensorboard.ImageLogger`,
+:func:`brainbow.inference.sliding_window_inference`) can stay agnostic
+of the specific backbone.
+
+Public surface
+--------------
+* :class:`BaseModel` -- abstract :class:`torch.nn.Module` whose
+  :meth:`forward` returns a ``Dict[str, Tensor]`` keyed by head name.
+
+Note on subclassing
+-------------------
+The two production wrappers (:class:`CosmosTransfer3DWrapper`,
+:class:`Vista3DWrapper`) currently inherit directly from
+:class:`torch.nn.Module` rather than :class:`BaseModel` (legacy reasons).
+The ``forward`` -> dict contract is still respected; the
+:meth:`get_output_channels` helper is only required when a future
+sliding-window or post-processing path needs head widths without a real
+forward pass.  New backbone wrappers are encouraged to inherit
+:class:`BaseModel` for consistency.
 """
 
 from abc import ABC, abstractmethod
@@ -10,12 +37,20 @@ import torch.nn as nn
 
 
 class BaseModel(nn.Module, ABC):
-    """
-    Abstract base class for segmentation models.
+    """Abstract base for backbone wrappers.
 
-    All models must implement:
-    - forward(): Main forward pass returning a dict with at least 'logits'
-    - get_output_channels(): Return number of output channels
+    Required overrides
+    ------------------
+    * :meth:`forward(x)` -- return a ``Dict[str, Tensor]`` keyed by head
+      name (e.g. ``"semantic"``, ``"instance"``, ``"geometry"``,
+      ``"boundary"``).  The convention used elsewhere in brainbow is
+      that **every present key is a logit / regression tensor of shape**
+      ``[B, C, *spatial]`` -- no activations are applied here so the
+      losses can stay numerically stable.
+    * :meth:`get_output_channels()` -- ``Dict[str, int]`` mapping head
+      name to channel width.  Used by sliding-window inference and the
+      image logger to allocate output buffers without a real forward
+      pass.
 
     Args:
         in_channels: Number of input channels.
@@ -36,15 +71,15 @@ class BaseModel(nn.Module, ABC):
 
     @abstractmethod
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass of the model.
+        """Forward pass.
 
         Args:
-            x: Input tensor of shape [B, C, ...spatial_dims...].
+            x: Input tensor ``[B, C, *spatial]``.
 
         Returns:
-            Dictionary containing model outputs. Must include 'logits' key
-            with the main output tensor.
+            Dict of ``{head_name: Tensor[B, head_channels, *spatial]}``.
+            By convention, no activation is applied -- losses receive
+            raw logits / regression outputs.
         """
         raise NotImplementedError
 

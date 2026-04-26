@@ -5,6 +5,38 @@ instance segmentation** of 3-D connectomics volumes, adapted from the
 `neurons` research codebase and built on top of NVIDIA's
 Cosmos-Transfer2.5 video-diffusion backbone (DiT + VAE).
 
+> **First time here?**  Start with [`doc/INDEX.md`](doc/INDEX.md), which
+> routes you to the right doc for the question you're asking.  TL;DR:
+> [`STRUCTURE.md`](doc/STRUCTURE.md) for the file map,
+> [`WALKTHROUGH.md`](doc/WALKTHROUGH.md) for what one batch actually
+> does, [`GOTCHAS.md`](doc/GOTCHAS.md) when something goes silently
+> wrong.
+
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    cli["python scripts/train.py<br/>--config-name boundary"] --> hydra["Hydra compose<br/>(default + snemi3d + combine + boundary)"]
+    hydra --> dm["LightningDataModule<br/>(LazyVolDataset + MONAI transforms)"]
+    hydra --> mod["LightningModule<br/>(CosmosTransfer3D / Vista3D)"]
+    hydra --> tr["Trainer<br/>(DDP, callbacks, logger)"]
+    dm --> tr
+    mod --> tr
+    tr --> step["training_step"]
+    step --> wrap["Backbone wrapper<br/>VAE -> DiT -> task heads"]
+    wrap -->|semantic, instance,<br/>geometry, boundary| loss["CombinedLoss"]
+    loss --> log["TensorBoard<br/>scalars + image panels"]
+```
+
+Two end-to-end backbones live under `brainbow/models/`:
+
+- **`CosmosTransfer3DWrapper`** — Cosmos-Transfer 2.5 DiT + Wan VAE; four heads
+  (semantic, instance, geometry, boundary).
+- **`Vista3DWrapper`** — SegResNetDS2; three heads (no boundary head).
+
+For the per-head channel layouts and the math behind each loss, see
+[`doc/ARCHITECT.md`](doc/ARCHITECT.md).
+
 ## What it does
 
 For every connected-component label `> 0` in a volumetric segmentation,
@@ -35,25 +67,21 @@ available and can be combined via weighted sums in `CombinedLoss`).
 
 ## Layout
 
+The full file-by-file map lives in [`doc/STRUCTURE.md`](doc/STRUCTURE.md).
+Skim of the top level:
+
 ```
 brainbow/
-├── configs/             # Hydra configs; see configs/boundary.yaml
-├── brainbow/            # importable package
-│   ├── losses/          # SemanticLoss, InstanceLoss, GeometryLoss,
-│   │   └── boundary.py  #   BoundaryLoss + build_boundary_target
-│   ├── models/          # CosmosTransfer3DWrapper, Vista3DWrapper
-│   ├── modules/         # Lightning modules (Cosmos-Transfer3D, Vista3D)
-│   ├── datasets/        # SNEMI3D, MICRONS, Neurons (base: CircuitDataset)
-│   ├── datamodules/     # matching LightningDataModule wrappers
-│   ├── transforms/      # MONAI-compatible 3-D volumetric augmentations
-│   ├── inference/       # soft-meanshift / HDBSCAN / spatial_cc clusterers
-│   ├── preprocessors/   # TIFF / HDF5 / NRRD / NIfTI loaders
-│   ├── metrics/         # ARI, AMI, VOI, TED, Dice, IoU
-│   └── visualizer/      # lightweight in-browser volume viewer
-├── scripts/train.py
-├── tests/
+├── configs/             Hydra configs (default → snemi3d → combine → boundary)
+├── brainbow/            importable package (losses, models, modules,
+│                        datasets, datamodules, transforms, inference,
+│                        preprocessors, metrics, visualizer, callbacks)
+├── doc/                 STRUCTURE / ORGANIZATION / ARCHITECT / WALKTHROUGH
+│                        / GOTCHAS / CONTRIBUTING / INDEX
+├── scripts/             train.py entry point + dataset downloaders
+├── tests/               pytest suite
 ├── pyproject.toml
-└── requirements.txt
+└── requirements.txt     pinned lockfile (see top-of-file for usage)
 ```
 
 ## Install
@@ -116,26 +144,46 @@ Watch the trajectory in TensorBoard under the `cuda_memory/*` tags
 from brainbow.losses import BoundaryLoss, build_boundary_target
 
 loss_fn = BoundaryLoss(
-    loss_loc="smooth_l1",    # regression loss on the 9 localisation channels
-    loss_raw="l1",           # regression loss on channel 0 (raw intensity)
-    weight_min=1.0,
-    weight_avg=1.0,
-    weight_max=1.0,
-    weight_raw=1.0,
-    weight_aff=1.0,          # soft-Dice on sigmoid(face-affinity logits)
-    foreground_only_loc=True,
+    loss_loc="smooth_l1",    # regression loss for the 9 localisation channels
+    loss_raw="l1",            # regression loss for channel 0 (raw intensity)
+    weight_min=1.0,           # bounding-box min RGB (channels 1-3)
+    weight_avg=1.0,           # centroid RGB           (channels 4-6)
+    weight_max=1.0,           # bounding-box max RGB   (channels 7-9)
+    weight_raw=1.0,           # raw-intensity regression
+    weight_dice=1.0,          # soft-Dice on sigmoid(face-affinity logits)
+    weight_ce=0.0,            # optional binary CE on the 6 affinity channels
+    weight_iou=0.0,           # optional soft-IoU     on the 6 affinity channels
+    aff_eps=1.0e-5,           # smoothing in the soft-Dice denominator
+    foreground_only_loc=True, # mask the 9 localisation channels by labels > 0
 )
 
 # prediction: [B, 16, D, H, W]  |  labels: [B, D, H, W]  |  image: [B, D, H, W]
 out = loss_fn(prediction, labels, image)
-# out -> {"loss", "raw", "min", "avg", "max", "aff"}
+# out -> {"loss", "raw", "min", "avg", "max", "aff",
+#         "aff_ce", "aff_dice", "aff_iou"}
 ```
+
+The ``aff`` term aggregates ``weight_dice * aff_dice + weight_ce * aff_ce
++ weight_iou * aff_iou`` so you can mix Dice / CE / IoU on the six face-
+affinity channels without breaking the rest of the loss dict.
 
 ## Tests
 
 ```bash
 pytest tests/ -q
 ```
+
+## Where to look first
+
+| You want to ...                                                | Open                                                          |
+| -------------------------------------------------------------- | ------------------------------------------------------------- |
+| Skim the codebase before doing anything                        | [`doc/STRUCTURE.md`](doc/STRUCTURE.md)                        |
+| Understand what one training batch actually does               | [`doc/WALKTHROUGH.md`](doc/WALKTHROUGH.md)                    |
+| Know each head's math + channel layout                         | [`doc/ARCHITECT.md`](doc/ARCHITECT.md)                        |
+| See every config knob with provenance                          | [`configs/example_annotated.yaml`](configs/example_annotated.yaml) |
+| Add a new dataset / loss / backbone / transform                | [`doc/CONTRIBUTING.md`](doc/CONTRIBUTING.md)                  |
+| Debug a silent failure (UMAP→PCA, head dropping, freeze, ...)  | [`doc/GOTCHAS.md`](doc/GOTCHAS.md)                            |
+| Tour all docs at once                                          | [`doc/INDEX.md`](doc/INDEX.md)                                |
 
 ## License
 

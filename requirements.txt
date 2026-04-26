@@ -1,6 +1,27 @@
-# Neurons - pinned dependencies
-# Generated from conda env 'brainbow' (Python 3.12.12, CUDA 13.0)
-# Install: pip install -r requirements.txt
+# brainbow -- pinned runtime dependencies (lockfile).
+#
+# Role of this file
+# -----------------
+# This is the *frozen* version of every package needed to reproduce the
+# CUDA-13 / Python-3.12 development environment.  It bundles together
+# the core runtime, the Cosmos backbone, the GPU (RAPIDS) extras, the
+# download-script helpers, the optional visualizer, AND the dev/test
+# tooling -- in other words, every ``[project.optional-dependencies]``
+# group from ``pyproject.toml`` rolled into one installable manifest.
+#
+# When to use which file
+# ----------------------
+#   * ``pip install -r requirements.txt``      -- bit-for-bit reproduction
+#                                                of the dev environment.
+#   * ``pip install -e ".[cosmos,dev]"``       -- permissive lower bounds,
+#                                                pulled from pyproject.toml.
+#   * ``pip install -e ".[cosmos,gpu-cu13,viz,scripts,dev]"``
+#                                              -- equivalent of this lockfile
+#                                                without the exact pins.
+#
+# Keep ``pyproject.toml`` as the single source of truth for the package's
+# logical dependency *groups*; this file just freezes specific resolved
+# versions on top of that.
 
 # Core deep learning
 --extra-index-url https://download.pytorch.org/whl/cu130
@@ -76,7 +97,3 @@ tqdm==4.66.5
 # Dev / testing
 pytest==9.0.2
 pytest-cov==7.0.0
-
-# Notebooks
-ipykernel>=6.29.0
-nbformat==5.10.4

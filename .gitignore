@@ -209,6 +209,8 @@ __marimo__/
 # Project data and training artefacts
 #   `data/`    : symlinked raw HDF5 volumes (MICRONS, SNEMI3D, ...)
 #   `outputs/` : Hydra run dirs, TensorBoard logs, checkpoints, predictions
+#   `logs/`    : default ``log_dir`` for TensorBoard (see configs/default.yaml)
 data/
 outputs/
+logs/
 *.ckpt

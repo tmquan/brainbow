@@ -2,8 +2,8 @@
 
 Two end-to-end wrappers live under `brainbow/models/`:
 
-1. [`CosmosTransfer3DWrapper`](#1-cosmostransfer3dwrapper) — EM → pretrained Wan VAE → Cosmos-Transfer 2.5 DiT → VISTA task heads. **Four heads** (semantic, instance, geometry, brainbow).
-2. [`Vista3DWrapper`](#2-vista3dwrapper) — EM → SegResNetDS2 → VISTA task heads. **Three heads** (semantic, instance, geometry; no brainbow).
+1. [`CosmosTransfer3DWrapper`](#1-cosmostransfer3dwrapper) — EM → pretrained Wan VAE → Cosmos-Transfer 2.5 DiT → VISTA task heads. **Four heads** (semantic, instance, geometry, boundary).
+2. [`Vista3DWrapper`](#2-vista3dwrapper) — EM → SegResNetDS2 → VISTA task heads. **Three heads** (semantic, instance, geometry; no boundary head).
 
 Every channel count below mirrors `configs/default.yaml`. Parameter counts are
 approximate; use `model.get_num_parameters(trainable_only=…)` on a loaded
@@ -52,7 +52,7 @@ instance for exact numbers.
    ├─ head_semantic  (VistaTaskHead3D, 64 → 16)                ≈ 0.7 M params
    ├─ head_instance  (VistaTaskHead3D, 64 → 10)                ≈ 0.7 M params
    ├─ head_geometry  (VistaTaskHead3D, 64 → 10)                ≈ 0.7 M params
-   └─ head_brainbow  (VistaTaskHead3D, 64 → 16)                ≈ 0.7 M params
+   └─ head_boundary  (VistaTaskHead3D, 64 → 16)                ≈ 0.7 M params
 ```
 
 ### 1.2 Channel map
@@ -152,19 +152,19 @@ The phased-schedule machinery lives in
 ### 1.7 Default-combine parameter budget
 
 With `configs/combine.yaml` (inherits `snemi3d.yaml`:
-`freeze_vae_encoder: true`, `freeze_dit_backbone: 1`, `freeze_vae_decoder: true`,
+`freeze_vae_encoder: true`, `freeze_dit_backbone: 2`, `freeze_vae_decoder: true`,
 pretrained HF Cosmos-Transfer 2B loaded):
 
-| Component                    | Total    | Epoch 0 trainable | Epoch 1+ trainable |
-|------------------------------|---------:|------------------:|-------------------:|
-| VAE encoder                  | ~50 M    | 0                 | 0                  |
-| DiT backbone                 | ~2.30 B  | 0                 | ~2.30 B            |
-| `feature_projector`          | ~1.1 M   | ~1.1 M            | ~1.1 M             |
-| `to_latent`                  | ~1 K     | ~1 K              | ~1 K               |
-| VAE decoder body (frozen)    | ~70 M    | 0                 | 0                  |
-| VAE decoder shim (last up-block + norm) | ~3 M | ~3 M          | ~3 M               |
-| 4 × `VistaTaskHead3D`        | ~3 M     | ~3 M              | ~3 M               |
-| **Total**                    | **~2.43 B** | **~7 M**       | **~2.31 B**        |
+| Component                    | Total    | Epochs 0-1 trainable | Epoch 2+ trainable |
+|------------------------------|---------:|---------------------:|-------------------:|
+| VAE encoder                  | ~50 M    | 0                    | 0                  |
+| DiT backbone                 | ~2.30 B  | 0                    | ~2.30 B            |
+| `feature_projector`          | ~1.1 M   | ~1.1 M               | ~1.1 M             |
+| `to_latent`                  | ~1 K     | ~1 K                 | ~1 K               |
+| VAE decoder body (frozen)    | ~70 M    | 0                    | 0                  |
+| VAE decoder shim (last up-block + norm) | ~3 M | ~3 M             | ~3 M               |
+| 4 × `VistaTaskHead3D`        | ~3 M     | ~3 M                 | ~3 M               |
+| **Total**                    | **~2.43 B** | **~7 M**          | **~2.31 B**        |
 
 The `_fallback_down` module (`brainbow/modules/cosmos_transfer_2_5/base.py`:
 73-74) is only active when no HF VAE is loaded — in the pretrained path it is
@@ -172,9 +172,9 @@ frozen and contributes zero trainable params.
 
 ### 1.8 Practical training implications
 
-- Epoch 0 trains **~7 M params** — learns how to read DiT features through a
+- Epochs 0-1 train **~7 M params** — learns how to read DiT features through a
   clean pipeline. Converges quickly, no overfit risk.
-- Epoch 1+ trains **~2.31 B params** — the full DiT joins with its own LR
+- Epoch 2+ trains **~2.31 B params** — the full DiT joins with its own LR
   group (`optimizer.dit_backbone_lr`). Requires
   `model.gradient_checkpointing: true`, otherwise memory ≈ weights + grads +
   AdamW moments + activations easily exceeds 80 GB.

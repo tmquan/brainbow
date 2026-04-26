@@ -1,20 +1,51 @@
 """
-Gaussian-weighted sliding window inference for volumetric segmentation.
+Gaussian-weighted sliding-window inference for volumetric segmentation.
 
-Supports three aggregation strategies:
-- **gaussian**: 3D Gaussian weighting for smooth blending (default)
-- **average**: uniform weighting
-- **max**: voxel-wise maximum probability
+Why this file exists
+--------------------
+Patch-based inference is the only practical way to evaluate a 3-D
+volume that exceeds the GPU memory budget.  This module slides a
+configurable window across the volume, runs the model on each patch,
+and blends the per-patch predictions back into a full-volume output
+using one of three weight strategies:
 
-Handles the dual-head Vista architecture (semantic logits + instance
-embeddings) with separate aggregation for each head.
+* ``gaussian`` -- 3-D Gaussian taper (default).  Smoothest blend at
+  patch borders, cheapest enough to be the everyday choice.
+* ``average``  -- uniform weight.  Cheaper still, slightly more visible
+  patch borders.
+* ``max``      -- voxel-wise maximum.  Useful for one-hot semantic
+  logits where you want the most-confident patch to win.
+
+Public surface
+--------------
+* :func:`sliding_window_inference` -- main entry point.  Accepts
+  either a single-tensor model output (legacy semantic-only mode) or a
+  ``Dict[str, Tensor]`` with any of the four standard heads
+  (``semantic`` / ``instance`` / ``geometry`` / ``boundary``).
+
+Head-aggregation rules
+----------------------
+On the dict path the function discovers every head present in a dummy
+forward pass and allocates one accumulator per head.  All heads are
+blended with the same weighting strategy (``gaussian`` / ``average``
+/ ``max``).  Heads other than ``semantic`` are returned under their
+own key (``instance_embeddings`` is preserved for back-compat); see
+:func:`sliding_window_inference` for the exact return contract.
 """
 
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from einops import rearrange, reduce
+
+
+# Names of head keys we know how to aggregate.  The first one ever
+# detected becomes "the semantic head" for the back-compat
+# ``semantic_probs`` return key; all others are returned under their
+# own name (and ``instance`` keeps the legacy ``instance_embeddings``
+# alias to avoid breaking older callers).
+_KNOWN_HEADS: Tuple[str, ...] = ("semantic", "instance", "geometry", "boundary")
 
 
 def create_gaussian_weight(
@@ -44,6 +75,42 @@ def create_gaussian_weight(
     return gaussian
 
 
+def _detect_heads(dummy_out) -> List[str]:
+    """Return the list of standard heads present in the model output.
+
+    Falls back to ``["semantic"]`` for legacy single-tensor outputs.
+    Unknown extra dict keys are ignored.
+    """
+    if not isinstance(dummy_out, dict):
+        return ["semantic"]
+    heads = [h for h in _KNOWN_HEADS if h in dummy_out]
+    if not heads:
+        if "logits" in dummy_out:
+            return ["semantic"]
+        raise ValueError(
+            "sliding_window_inference: model returned a dict with none of "
+            f"the known heads {_KNOWN_HEADS}; got keys "
+            f"{sorted(dummy_out.keys())}."
+        )
+    return heads
+
+
+def _extract_head(
+    head: str, outputs, *, is_dict: bool,
+) -> torch.Tensor:
+    """Pull a single head from a model output, applying softmax to legacy logits."""
+    if not is_dict:
+        return F.softmax(outputs, dim=1)
+    if head in outputs:
+        return outputs[head]
+    if head == "semantic" and "logits" in outputs:
+        return F.softmax(outputs["logits"], dim=1)
+    raise KeyError(
+        f"sliding_window_inference: head '{head}' missing from model output "
+        f"(got {sorted(outputs.keys())})."
+    )
+
+
 def sliding_window_inference(
     model: torch.nn.Module,
     volume: torch.Tensor,
@@ -57,14 +124,15 @@ def sliding_window_inference(
 ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
     """Perform sliding window inference on a 3D volume.
 
-    If the model returns a dict with ``"semantic"`` and ``"instance"``
-    keys (Vista architecture), both heads are aggregated and returned.
-    Otherwise returns semantic probability maps only.
+    The function discovers which of the standard heads (``semantic``,
+    ``instance``, ``geometry``, ``boundary``) the model returns and
+    aggregates each one independently using the same weighting
+    strategy.
 
     Args:
         model: Segmentation model.
-        volume: Input volume [C, D, H, W] or [D, H, W].
-        patch_size: Size of patches (D, H, W).
+        volume: Input volume ``[C, D, H, W]`` or ``[D, H, W]``.
+        patch_size: Size of patches ``(D, H, W)``.
         stride: Stride between patches.  Default: ``patch_size // 2``.
         aggregation: ``"gaussian"``, ``"average"``, or ``"max"``.
         batch_size: Patches per forward pass.
@@ -73,9 +141,15 @@ def sliding_window_inference(
         progress: Show tqdm progress bar.
 
     Returns:
-        If model returns dict: ``{"semantic_probs": [C, D, H, W],
-        "instance_embeddings": [E, D, H, W]}``.
-        Otherwise: ``[num_classes, D, H, W]`` probability tensor.
+        Single-tensor model output (legacy mode):
+            ``[num_classes, D, H, W]`` softmax probabilities.
+
+        Dict model output (Vista / Cosmos):
+            A dict containing one entry per detected head plus the
+            ``_positions`` / ``_padding`` metadata used by the
+            stitching code.  ``semantic_probs`` and
+            ``instance_embeddings`` are kept as aliases for
+            ``semantic`` / ``instance`` to preserve back-compat.
     """
     was_training = model.training
     model.eval()
@@ -83,7 +157,7 @@ def sliding_window_inference(
     if volume.dim() == 3:
         volume = rearrange(volume, "d h w -> 1 d h w")
     volume = volume.to(device)
-    C, D, H, W = volume.shape
+    _, D, H, W = volume.shape
     pd, ph, pw = patch_size
 
     if stride is None:
@@ -106,24 +180,20 @@ def sliding_window_inference(
         dummy = rearrange(volume[:, :pd, :ph, :pw], "c d h w -> 1 c d h w")
         dummy_out = model(dummy)
 
-    is_dual = isinstance(dummy_out, dict) and "semantic" in dummy_out and "instance" in dummy_out
+    is_dict = isinstance(dummy_out, dict)
+    heads = _detect_heads(dummy_out)
 
-    if is_dual:
-        num_classes = dummy_out["semantic"].shape[1]
-        instance_channels = dummy_out["instance"].shape[1]
-    else:
-        logits = dummy_out if not isinstance(dummy_out, dict) else dummy_out.get("logits", dummy_out.get("semantic"))
-        num_classes = logits.shape[1]
-        instance_channels = 0
-
-    sem_output = torch.zeros((num_classes, D_pad, H_pad, W_pad), device=device)
-    sem_weight = torch.zeros((1, D_pad, H_pad, W_pad), device=device)
-
-    if is_dual:
-        emb_output = torch.zeros(
-            (instance_channels, D_pad, H_pad, W_pad), device=device,
-        )
-        emb_weight = torch.zeros((1, D_pad, H_pad, W_pad), device=device)
+    head_channels = {
+        h: _extract_head(h, dummy_out, is_dict=is_dict).shape[1] for h in heads
+    }
+    head_output = {
+        h: torch.zeros((c, D_pad, H_pad, W_pad), device=device)
+        for h, c in head_channels.items()
+    }
+    head_weight = {
+        h: torch.zeros((1, D_pad, H_pad, W_pad), device=device)
+        for h in heads
+    }
 
     if aggregation == "gaussian":
         patch_w = create_gaussian_weight(patch_size, sigma_scale, device)
@@ -164,69 +234,50 @@ def sliding_window_inference(
             ], dim=0)
 
             outputs = model(patches)
+            outputs_is_dict = isinstance(outputs, dict)
 
             # Brainbow model wrappers apply sigmoid to the semantic head
-            # before returning, so ``outputs["semantic"]`` is already a
-            # tensor of per-channel probabilities -- no extra activation
-            # needed here.  External / legacy models that still return
-            # raw logits under ``"logits"`` go through the softmax path
-            # below.
-            if is_dual:
-                sem_probs = outputs["semantic"]
-                ins_emb = outputs["instance"]
-            elif isinstance(outputs, dict):
-                if "semantic" in outputs:
-                    sem_probs = outputs["semantic"]
-                else:
-                    sem_probs = F.softmax(outputs["logits"], dim=1)
-                ins_emb = None
-            else:
-                sem_probs = F.softmax(outputs, dim=1)
-                ins_emb = None
+            # before returning, so ``outputs["semantic"]`` is already
+            # per-channel probabilities -- no extra activation needed
+            # for it.  Legacy models returning raw logits under
+            # ``"logits"`` still go through the softmax path inside
+            # ``_extract_head``.  Other heads (instance / geometry /
+            # boundary) are written through unchanged.
+            head_pred = {
+                h: _extract_head(h, outputs, is_dict=outputs_is_dict)
+                for h in heads
+            }
 
             for idx, (ds, hs, ws) in enumerate(batch_pos):
                 sl = (slice(None), slice(ds, ds + pd), slice(hs, hs + ph), slice(ws, ws + pw))
-
-                if aggregation == "max":
-                    sem_output[sl] = torch.max(sem_output[sl], sem_probs[idx])
-                else:
-                    sem_output[sl] += sem_probs[idx] * patch_w
-                    sem_weight[(slice(None),) + sl[1:]] += patch_w
-
-                if is_dual and ins_emb is not None:
+                weight_sl = (slice(None),) + sl[1:]
+                for h in heads:
+                    pred = head_pred[h][idx]
                     if aggregation == "max":
-                        patch_max = reduce(sem_probs[idx], "c ... -> ...", "max")
-                        out_max = reduce(
-                            sem_output[:, ds:ds + pd, hs:hs + ph, ws:ws + pw],
-                            "c ... -> ...", "max",
-                        )
-                        mask = patch_max > out_max
-                        emb_output[:, ds:ds + pd, hs:hs + ph, ws:ws + pw] = torch.where(
-                            rearrange(mask, "... -> 1 ..."),
-                            ins_emb[idx],
-                            emb_output[:, ds:ds + pd, hs:hs + ph, ws:ws + pw],
-                        )
+                        head_output[h][sl] = torch.max(head_output[h][sl], pred)
                     else:
-                        emb_output[sl] += ins_emb[idx] * patch_w
-                        emb_weight[(slice(None),) + sl[1:]] += patch_w
+                        head_output[h][sl] += pred * patch_w
+                        head_weight[h][weight_sl] += patch_w
 
     if aggregation != "max":
-        sem_output = sem_output / (sem_weight + 1e-8)
-        if is_dual:
-            emb_output = emb_output / (emb_weight + 1e-8)
+        for h in heads:
+            head_output[h] = head_output[h] / (head_weight[h] + 1e-8)
 
-    sem_output = sem_output[:, :D, :H, :W]
+    for h in heads:
+        head_output[h] = head_output[h][:, :D, :H, :W]
 
     if was_training:
         model.train()
 
-    if is_dual:
-        emb_output = emb_output[:, :D, :H, :W]
-        return {
-            "semantic_probs": sem_output,
-            "instance_embeddings": emb_output,
-            "_positions": positions,
-            "_padding": (pad_d, pad_h, pad_w),
-        }
+    if not is_dict:
+        return head_output["semantic"]
 
-    return sem_output
+    out: Dict[str, torch.Tensor] = dict(head_output)
+    # Back-compat aliases used by older callers / tests.
+    if "semantic" in out:
+        out["semantic_probs"] = out["semantic"]
+    if "instance" in out:
+        out["instance_embeddings"] = out["instance"]
+    out["_positions"] = positions
+    out["_padding"] = (pad_d, pad_h, pad_w)
+    return out

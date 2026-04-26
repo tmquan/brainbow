@@ -1,4 +1,8 @@
+# =====================================================================
 # Combined SNEMI3D + Neurons + MICrONS Configuration
+# =====================================================================
+# Inheritance chain:  default <- snemi3d <- combine
+#
 # Inherits everything from snemi3d.yaml and overrides the volume lists
 # to drop SNEMI3D AC4 from train (train uses the full neurons cylinder
 # + the 10 MICrONS train splits) while keeping AC4 in val/test for

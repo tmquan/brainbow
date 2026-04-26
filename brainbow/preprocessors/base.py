@@ -1,5 +1,31 @@
 """
-Base preprocessor class defining the interface for all data format handlers.
+Abstract base for connectomics file-format preprocessors.
+
+Why this file exists
+--------------------
+Each subclass isolates the I/O quirks of one format (HDF5 chunked
+reads, NRRD headers, multi-page TIFF, NIfTI) so the rest of brainbow
+can speak in plain :class:`numpy.ndarray`.
+
+Public surface
+--------------
+* :class:`BasePreprocessor` -- the abstract class itself.
+
+Required overrides
+------------------
+* :attr:`supported_extensions` -- tuple of suffixes (e.g.
+  ``(".h5", ".hdf5")``).
+* :meth:`load(path)` -- read a file into a :class:`numpy.ndarray`.
+* :meth:`validate(path)` -- ``True`` if this preprocessor can read it.
+
+Optional overrides
+------------------
+* :meth:`save(path, data)` -- writing back is optional.  The base class
+  raises :class:`NotImplementedError` for read-only formats; that's a
+  legitimate state, not a bug.
+* :meth:`get_metadata`, :meth:`get_shape` -- the base implementations
+  read the full file via :meth:`load`.  Override for cheap header-only
+  paths on large files.
 """
 
 from abc import ABC, abstractmethod

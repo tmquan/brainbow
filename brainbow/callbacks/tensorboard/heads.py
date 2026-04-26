@@ -349,7 +349,7 @@ def _log_predictions(
     projection_algorithm: str = "pca",
     projection_backend: str = "auto",
     boundary_target: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+) -> None:
     """Log a standard set of prediction visualisations to TensorBoard.
 
     Emits, under ``ctx.prefix`` = ``{stage}/{mode}``:
@@ -395,10 +395,6 @@ def _log_predictions(
             cuML on CUDA, else a CPU fallback.  ``"cuml"`` forces GPU.
         boundary_target: optional ``[n, 16, D, H, W]`` ground-truth map
             to log alongside the boundary prediction.
-
-    Returns:
-        ``[n, 3, H, W]`` grayscale image repeated to RGB (reused by
-        geometry overlays and available for future prompt overlays).
     """
     if ctx.head is not None:
         raise ValueError(
@@ -427,8 +423,6 @@ def _log_predictions(
     _log_boundary(
         tb, ctx, preds, n, epoch, boundary_target=boundary_target,
     )
-
-    return img_gray
 
 
 __all__ = [

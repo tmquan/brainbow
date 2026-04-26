@@ -5,26 +5,121 @@ Brainbow training entry point.
 Loads a Hydra config, builds the datamodule + Lightning module + trainer,
 then calls ``trainer.fit(...)``.
 
+The default Hydra config name is ``default`` (see ``configs/default.yaml``)
+which runs SNEMI3D-shaped data with all four loss heads.  Two recipes
+are recommended for everyday use:
+
+* ``--config-name snemi3d``   -- SNEMI3D only, three-head recipe.
+* ``--config-name boundary``  -- multi-dataset (combine.yaml), 16-channel
+  boundary head only.
+
 Examples
 --------
-    # Train with the default config (brainbow loss on SNEMI3D)
-    python scripts/train.py
-
-    # Train with a specific config
     python scripts/train.py --config-name snemi3d
-
-    # Override parameters via CLI
+    python scripts/train.py --config-name boundary
     python scripts/train.py --config-name snemi3d data.batch_size=8 training.max_epochs=200
-
-    # Fast development run
     python scripts/train.py training.fast_dev_run=true
+    python scripts/train.py --config-name snemi3d +ckpt_path=outputs/<run>/checkpoints/last.ckpt
+
+Code layout
+-----------
+* :func:`_install_runtime_patches` -- side-effects deferred out of import.
+* :func:`build_datamodule`         -- ``cfg`` -> :class:`LightningDataModule`.
+* :func:`build_module`             -- ``cfg`` -> :class:`LightningModule`.
+* :func:`build_trainer`            -- ``cfg`` -> :class:`pl.Trainer`.
+* :func:`setup_callbacks` / :func:`setup_logger` / :func:`setup_profiler`
+  -- the three plug-in lists composed into the Trainer.
+* :func:`run_fit_with_recovery`    -- ``trainer.fit`` wrapped with a
+  crash-recovery checkpoint on the rank-0 process.
+* :func:`main`                     -- Hydra entry point that wires it
+  all together.
 """
+
+from __future__ import annotations
 
 import collections
 import datetime
+import inspect
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
+
+import hydra
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+    ModelSummary,
+    RichProgressBar,
+)
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+from pytorch_lightning.profilers import (
+    AdvancedProfiler,
+    PyTorchProfiler,
+    SimpleProfiler,
+)
+from pytorch_lightning.strategies import DDPStrategy, FSDPStrategy
+import torch
+from omegaconf import DictConfig, ListConfig, OmegaConf
+from omegaconf.base import ContainerMetadata
+from omegaconf.nodes import AnyNode, ValueNode
+from rich.console import Console
+
+console = Console()
+
+
+# ----------------------------------------------------------------------
+# Runtime patches (deferred out of import time)
+# ----------------------------------------------------------------------
+
+
+def _install_runtime_patches() -> None:
+    """Install the global side-effects this script depends on.
+
+    These were previously executed at import time, which made ``import
+    scripts.train`` (e.g. from a notebook or a test) silently mutate the
+    global ``torch`` module and the warning filters.  Calling this from
+    :func:`main` keeps the import side-effect-free.
+
+    The patches are:
+
+    * Allow-list a handful of (Lightning-friendly) types for
+      ``torch.load``'s weights-only unpickler.
+    * Force ``weights_only=False`` on ``torch.load`` because Lightning
+      checkpoints pickle ``defaultdict`` / ``DictConfig`` instances that
+      the safe unpickler refuses even with the allow-list above.
+    * Silence a handful of noisy warnings emitted by Lightning / MONAI
+      that we cannot fix upstream.
+    * Bump ``set_float32_matmul_precision`` so TF32 matmuls are allowed.
+    """
+    torch.serialization.add_safe_globals([
+        Any,
+        dict,
+        collections.defaultdict,
+        DictConfig, ListConfig, ContainerMetadata, ValueNode, AnyNode,
+    ])
+
+    _orig_torch_load = torch.load
+
+    def _torch_load_trusted(*args: Any, **kwargs: Any) -> Any:
+        kwargs["weights_only"] = False
+        return _orig_torch_load(*args, **kwargs)
+
+    torch.load = _torch_load_trusted  # type: ignore[assignment]
+
+    warnings.filterwarnings("ignore", message=r".*isinstance.*LeafSpec.*is deprecated.*")
+    warnings.filterwarnings("ignore", message=r".*AccumulateGrad.*stream.*mismatch.*")
+    warnings.filterwarnings("ignore", message=".*lru_cache.*", category=UserWarning)
+    warnings.filterwarnings("ignore", message=r".*sync_dist=True.*when logging on epoch level.*")
+    warnings.filterwarnings("ignore", message=r".*module.*in eval mode at the start of training.*")
+
+    torch.set_float32_matmul_precision("high")
+
+
+# ----------------------------------------------------------------------
+# Config helpers
+# ----------------------------------------------------------------------
 
 
 def _head_weight_scalar(loss_cfg: Any, head: str, default: float = 0.0) -> float:
@@ -40,83 +135,17 @@ def _head_weight_scalar(loss_cfg: Any, head: str, default: float = 0.0) -> float
         return float(v.get("weight", default))
     return float(v)
 
-warnings.filterwarnings("ignore", message=r".*isinstance.*LeafSpec.*is deprecated.*")
-warnings.filterwarnings("ignore", message=r".*AccumulateGrad.*stream.*mismatch.*")
-warnings.filterwarnings("ignore", message=".*lru_cache.*", category=UserWarning)
-warnings.filterwarnings("ignore", message=r".*sync_dist=True.*when logging on epoch level.*")
-warnings.filterwarnings("ignore", message=r".*module.*in eval mode at the start of training.*")
-
-import hydra
-import pytorch_lightning as pl
-from pytorch_lightning.profilers import AdvancedProfiler, PyTorchProfiler, SimpleProfiler
-from pytorch_lightning.strategies import DDPStrategy, FSDPStrategy
-import torch
-from omegaconf import DictConfig, ListConfig, OmegaConf
-from omegaconf.base import ContainerMetadata
-from omegaconf.nodes import ValueNode, AnyNode
-
-torch.serialization.add_safe_globals([
-    Any,
-    dict,
-    collections.defaultdict,
-    DictConfig, ListConfig, ContainerMetadata, ValueNode, AnyNode,
-])
-
-# PyTorch >= 2.6 made ``weights_only=True`` the default for ``torch.load``.
-# Lightning checkpoints pickle non-tensor objects (``collections.defaultdict``
-# in callback / metric state, ``DictConfig`` for hparams, optimizer state
-# with custom types) that the weights-only unpickler refuses on top of the
-# ``add_safe_globals`` allow-list above -- e.g. ``defaultdict`` is whitelisted
-# as a *type*, but the ``SETITEM`` opcode is hardcoded to only accept
-# ``dict / OrderedDict / Counter`` as the target, so resume still fails.
-# Our checkpoints come from our own runs, so default to ``weights_only=False``
-# at the entry point.  Callers can still pass ``weights_only=True`` explicitly.
-_orig_torch_load = torch.load
-
-
-def _torch_load_trusted(*args: Any, **kwargs: Any) -> Any:
-    # Force-override: Lightning's checkpoint connector passes
-    # ``weights_only=True`` explicitly in newer versions, so a plain
-    # ``setdefault`` would be a no-op.  ``weights_only`` is keyword-only
-    # in ``torch.load``, so this kwargs assignment is sufficient.
-    kwargs["weights_only"] = False
-    return _orig_torch_load(*args, **kwargs)
-
-
-torch.load = _torch_load_trusted  # type: ignore[assignment]
-
-from pytorch_lightning.callbacks import (
-    EarlyStopping,
-    LearningRateMonitor,
-    ModelCheckpoint,
-    ModelSummary,
-    RichProgressBar,
-)
-from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
-
-torch.set_float32_matmul_precision("high")
-
-
-# ----------------------------------------------------------------------
-# Factories
-# ----------------------------------------------------------------------
-
-_DATAMODULE_KWARGS = (
-    "data_root", "batch_size", "num_workers", "cache_rate", "pin_memory",
-    "persistent_workers", "train_volumes", "val_volumes", "test_volumes",
-    "find_boundaries", "pixel_size", "min_foreground", "compute_geometry",
-    "elastic_prob", "elastic_sigma_range", "elastic_magnitude_range",
-    "resolution_zoom_prob", "resolution_zoom_range", "resolution_map",
-    "image_size", "slice_mode", "num_samples", "patch_size",
-    "include_clefts", "include_mito",
-)
-
 
 def _to_vol_list(val):
     """Convert an OmegaConf volume list to a list of plain dicts."""
     if val is None:
         return None
     return [dict(v) if hasattr(v, "keys") else v for v in val]
+
+
+# ----------------------------------------------------------------------
+# Builders
+# ----------------------------------------------------------------------
 
 
 def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
@@ -165,7 +194,7 @@ def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
     }
 
 
-def get_datamodule(cfg: DictConfig) -> pl.LightningDataModule:
+def build_datamodule(cfg: DictConfig) -> pl.LightningDataModule:
     """Instantiate the datamodule selected by ``cfg.data.dataset``."""
     from brainbow.datamodules import (
         MICRONSDataModule,
@@ -186,15 +215,12 @@ def get_datamodule(cfg: DictConfig) -> pl.LightningDataModule:
         )
 
     kwargs = _build_datamodule_kwargs(cfg)
-    # Each DataModule ignores kwargs it doesn't declare, so we filter to
-    # avoid TypeError on older DataModule signatures.
-    import inspect
     accepted = set(inspect.signature(cls).parameters)
     kwargs = {k: v for k, v in kwargs.items() if k in accepted and v is not None}
     return cls(**kwargs)
 
 
-def get_module(cfg: DictConfig) -> pl.LightningModule:
+def build_module(cfg: DictConfig) -> pl.LightningModule:
     """Instantiate the Lightning module selected by ``cfg.model.type``."""
     from brainbow.modules import (
         Vista3DModule,
@@ -224,6 +250,43 @@ def get_module(cfg: DictConfig) -> pl.LightningModule:
         loss_config=dict(cfg.get("loss", {})),
         training_config=dict(cfg.get("training", {})),
     )
+
+
+# Back-compat aliases for callers that imported the old names.
+get_datamodule = build_datamodule
+get_module = build_module
+
+
+def _maybe_compile(module: pl.LightningModule, cfg: DictConfig) -> None:
+    """Wrap the trainable DiT backbone with ``torch.compile`` when enabled.
+
+    Only the trainable DiT backbone is compiled, not the whole wrapper:
+    compiling frozen subgraphs under DDP runs them in ``inference_mode``,
+    which produces tensors that cannot be saved for backward.
+
+    ``training.compile`` accepts:
+        false / null        -> no compile (fastest startup)
+        true                -> mode="reduce-overhead"
+        "max-autotune"      -> best runtime, 5-15 min first compile
+        "reduce-overhead"   -> ~1 min compile
+        "default"           -> minimal overhead, minimal speedup
+
+    ``training.compile_fullgraph`` (default false) forces a single graph
+    (no graph breaks); safer to leave off on DDP runs.
+    """
+    compile_cfg = cfg.get("training", {}).get("compile", False)
+    if not compile_cfg:
+        return
+
+    mode = compile_cfg if isinstance(compile_cfg, str) else "reduce-overhead"
+    fullgraph = bool(cfg.get("training", {}).get("compile_fullgraph", False))
+    dit = getattr(getattr(module, "model", None), "dit", None)
+    if dit is not None:
+        module.model.dit = torch.compile(dit, mode=mode, fullgraph=fullgraph)
+        console.log(f"torch.compile enabled on DiT backbone (mode={mode}, fullgraph={fullgraph})")
+    else:
+        module.model = torch.compile(module.model, mode=mode, fullgraph=fullgraph)
+        console.log(f"torch.compile enabled on full model (mode={mode}, fullgraph={fullgraph})")
 
 
 def setup_callbacks(cfg: DictConfig) -> List[pl.Callback]:
@@ -356,114 +419,16 @@ def setup_strategy(cfg: DictConfig):
     return strategy_name
 
 
-# ----------------------------------------------------------------------
-# Checkpoint loading
-# ----------------------------------------------------------------------
-
-def _resolve_checkpoint(cfg: DictConfig, module: pl.LightningModule) -> Optional[str]:
-    """Pick up an existing checkpoint, either full-resume or weights-only."""
+def build_trainer(
+    cfg: DictConfig,
+    *,
+    callbacks: List[pl.Callback],
+    logger: Any,
+    profiler: Any,
+) -> pl.Trainer:
+    """Construct the :class:`pl.Trainer` from ``cfg.training``."""
     training_cfg = cfg.training
-    resume_ckpt = training_cfg.get("resume_from_checkpoint")
-    weights_only_ckpt = cfg.get("ckpt_path")
-
-    if resume_ckpt and weights_only_ckpt:
-        raise ValueError(
-            "Use either training.resume_from_checkpoint (full Lightning resume) "
-            "or +ckpt_path= (weights-only warm start), not both."
-        )
-
-    if resume_ckpt:
-        print(f"\nFull Lightning resume from: {resume_ckpt}")
-        return str(resume_ckpt)
-
-    if weights_only_ckpt:
-        print(f"Loading model weights from checkpoint: {weights_only_ckpt}")
-        ckpt = torch.load(weights_only_ckpt, map_location="cpu", weights_only=False)
-        state_dict = ckpt.get("state_dict", ckpt)
-        missing, unexpected = module.load_state_dict(state_dict, strict=False)
-        if missing:
-            print(f"  Missing keys: {len(missing)}")
-        if unexpected:
-            print(f"  Unexpected keys: {len(unexpected)}")
-        print("  Model weights loaded (optimiser state skipped).")
-
-    return None
-
-
-# ----------------------------------------------------------------------
-# Main
-# ----------------------------------------------------------------------
-
-@hydra.main(version_base=None, config_path="../configs", config_name="default")
-def main(cfg: DictConfig) -> None:
-    print("=" * 60)
-    print("Brainbow - Connectomics Segmentation Training")
-    print("=" * 60)
-    print("\nConfiguration:")
-    print(OmegaConf.to_yaml(cfg))
-
-    # Unique per-run output directory.
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = Path(cfg.get("output_dir", "outputs")) / f"{timestamp}_{cfg.get('experiment_name', 'run')}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    OmegaConf.update(cfg, "output_dir", str(run_dir), force_add=True)
-    print(f"\nRun directory: {run_dir}")
-
-    seed = cfg.get("seed", 42)
-    pl.seed_everything(seed, workers=True)
-    print(f"Random seed: {seed}")
-
-    datamodule = get_datamodule(cfg)
-    print(f"\nDataModule: {datamodule.__class__.__name__}")
-    print(f"  Dataset:    {cfg.data.get('dataset', 'snemi3d')}")
-    print(f"  Data root:  {cfg.data.get('data_root', 'data')}")
-    print(f"  Batch size: {cfg.data.get('batch_size', 4)}")
-
-    module = get_module(cfg)
-    print(f"\nModule: {module.__class__.__name__}")
-
-    backbone_loaded = getattr(getattr(module, "model", None), "_backbone_loaded", None)
-    if backbone_loaded is False:
-        print(
-            "  WARNING: pretrained backbone was NOT loaded — model will train "
-            "from random init.  Check HuggingFace cache, network access, and "
-            "diffusers version."
-        )
-
-    # ``torch.compile``: only compile the trainable DiT backbone.  Compiling
-    # the whole wrapper causes torch.compile+DDP to run frozen subgraphs in
-    # inference_mode, producing tensors that cannot be saved for backward.
-    #
-    # ``training.compile`` accepts:
-    #   false / null        -> no compile (fastest startup)
-    #   true                -> mode="reduce-overhead" (fast compile, good runtime)
-    #   "max-autotune"      -> best runtime, 5-15 min first compile
-    #   "reduce-overhead"   -> ~1 min compile, ~10-20% slower than max-autotune
-    #   "default"           -> minimal overhead, minimal speedup
-    # ``training.compile_fullgraph`` (default false) forces a single graph
-    # (no graph breaks); safer to leave off on DDP runs.
-    compile_cfg = cfg.get("training", {}).get("compile", False)
-    if compile_cfg:
-        mode = compile_cfg if isinstance(compile_cfg, str) else "reduce-overhead"
-        fullgraph = bool(cfg.get("training", {}).get("compile_fullgraph", False))
-        dit = getattr(getattr(module, "model", None), "dit", None)
-        if dit is not None:
-            module.model.dit = torch.compile(dit, mode=mode, fullgraph=fullgraph)
-            print(f"  torch.compile enabled on DiT backbone (mode={mode}, fullgraph={fullgraph})")
-        else:
-            module.model = torch.compile(module.model, mode=mode, fullgraph=fullgraph)
-            print(f"  torch.compile enabled on full model (mode={mode}, fullgraph={fullgraph})")
-
-    callbacks = setup_callbacks(cfg)
-    logger = setup_logger(cfg)
-    profiler = setup_profiler(cfg)
-    print(f"\nCallbacks: {len(callbacks)} registered")
-    print(f"Logger:    {cfg.get('logger', 'tensorboard')}")
-    if profiler is not None:
-        print(f"Profiler:  {profiler.__class__.__name__}")
-
-    training_cfg = cfg.training
-    trainer = pl.Trainer(
+    return pl.Trainer(
         max_epochs=training_cfg.get("max_epochs", 100),
         accelerator=training_cfg.get("accelerator", "auto"),
         devices=training_cfg.get("devices", 1),
@@ -486,48 +451,166 @@ def main(cfg: DictConfig) -> None:
         fast_dev_run=training_cfg.get("fast_dev_run", False),
     )
 
-    print("\nTrainer initialised:")
-    print(f"  Max epochs:   {training_cfg.get('max_epochs', 100)}")
-    print(f"  Accelerator:  {training_cfg.get('accelerator', 'auto')}")
-    print(f"  Devices:      {training_cfg.get('devices', 1)}")
-    print(f"  Precision:    {training_cfg.get('precision', '32-true')}")
 
-    print("\n" + "=" * 60)
-    print("Starting Training")
-    print("=" * 60 + "\n")
+# ----------------------------------------------------------------------
+# Checkpoint loading
+# ----------------------------------------------------------------------
 
-    fit_ckpt_path = _resolve_checkpoint(cfg, module)
 
-    interrupted = False
+def _resolve_checkpoint(cfg: DictConfig, module: pl.LightningModule) -> Optional[str]:
+    """Pick up an existing checkpoint, either full-resume or weights-only.
+
+    Returns the path to pass to ``trainer.fit(..., ckpt_path=...)`` for
+    full-resume, or ``None`` after applying a weights-only load in-place.
+    """
+    training_cfg = cfg.training
+    resume_ckpt = training_cfg.get("resume_from_checkpoint")
+    weights_only_ckpt = cfg.get("ckpt_path")
+
+    if resume_ckpt and weights_only_ckpt:
+        raise ValueError(
+            "Use either training.resume_from_checkpoint (full Lightning resume) "
+            "or +ckpt_path= (weights-only warm start), not both."
+        )
+
+    if resume_ckpt:
+        console.log(f"Full Lightning resume from: {resume_ckpt}")
+        return str(resume_ckpt)
+
+    if weights_only_ckpt:
+        console.log(f"Loading model weights from checkpoint: {weights_only_ckpt}")
+        ckpt = torch.load(weights_only_ckpt, map_location="cpu", weights_only=False)
+        state_dict = ckpt.get("state_dict", ckpt)
+        missing, unexpected = module.load_state_dict(state_dict, strict=False)
+        if missing:
+            console.log(f"  Missing keys: {len(missing)}")
+        if unexpected:
+            console.log(f"  Unexpected keys: {len(unexpected)}")
+        console.log("Model weights loaded (optimiser state skipped).")
+
+    return None
+
+
+# ----------------------------------------------------------------------
+# Fit + crash recovery
+# ----------------------------------------------------------------------
+
+
+def run_fit_with_recovery(
+    trainer: pl.Trainer,
+    module: pl.LightningModule,
+    datamodule: pl.LightningDataModule,
+    *,
+    ckpt_path: Optional[str],
+    output_dir: Path,
+) -> bool:
+    """Call ``trainer.fit`` with a crash-recovery checkpoint on rank 0.
+
+    Returns ``True`` if the run completed normally, ``False`` if it was
+    interrupted by ``KeyboardInterrupt``.  Other exceptions propagate
+    after the recovery checkpoint is written.
+    """
     try:
-        trainer.fit(module, datamodule, ckpt_path=fit_ckpt_path)
+        trainer.fit(module, datamodule, ckpt_path=ckpt_path)
+        return True
     except KeyboardInterrupt:
-        print("\n\nTraining interrupted by user.")
-        interrupted = True
+        console.log("[yellow]Training interrupted by user.[/yellow]")
+        return False
     except Exception as exc:
-        print(f"\n\nTraining failed: {exc}")
+        console.log(f"[red]Training failed: {exc}[/red]")
         if trainer.global_rank == 0:
-            recovery = Path(cfg.output_dir) / "checkpoints" / "crash_recovery.ckpt"
+            recovery = output_dir / "checkpoints" / "crash_recovery.ckpt"
             recovery.parent.mkdir(parents=True, exist_ok=True)
             try:
                 trainer.save_checkpoint(str(recovery))
-                print(f"Recovery checkpoint written to {recovery}")
-            except Exception as save_err:
-                print(f"Could not save recovery checkpoint: {save_err}")
+                console.log(f"Recovery checkpoint written to {recovery}")
+            except Exception as save_err:  # noqa: BLE001 -- best effort
+                console.log(f"[red]Could not save recovery checkpoint: {save_err}[/red]")
         raise
+
+
+# ----------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------
+
+
+@hydra.main(version_base=None, config_path="../configs", config_name="default")
+def main(cfg: DictConfig) -> None:
+    _install_runtime_patches()
+
+    console.rule("Brainbow - Connectomics Segmentation Training")
+    console.print("\n[bold]Configuration:[/bold]")
+    console.print(OmegaConf.to_yaml(cfg))
+
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = Path(cfg.get("output_dir", "outputs")) / f"{timestamp}_{cfg.get('experiment_name', 'run')}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    OmegaConf.update(cfg, "output_dir", str(run_dir), force_add=True)
+    console.log(f"Run directory: {run_dir}")
+
+    seed = cfg.get("seed", 42)
+    pl.seed_everything(seed, workers=True)
+    console.log(f"Random seed: {seed}")
+
+    datamodule = build_datamodule(cfg)
+    console.log(f"DataModule: {datamodule.__class__.__name__}")
+    console.log(f"  Dataset:    {cfg.data.get('dataset', 'snemi3d')}")
+    console.log(f"  Data root:  {cfg.data.get('data_root', 'data')}")
+    console.log(f"  Batch size: {cfg.data.get('batch_size', 4)}")
+
+    module = build_module(cfg)
+    console.log(f"Module: {module.__class__.__name__}")
+
+    backbone_loaded = getattr(getattr(module, "model", None), "_backbone_loaded", None)
+    if backbone_loaded is False:
+        console.log(
+            "[yellow]WARNING: pretrained backbone was NOT loaded - model will train "
+            "from random init.  Check HuggingFace cache, network access, and "
+            "diffusers version.[/yellow]"
+        )
+
+    _maybe_compile(module, cfg)
+
+    callbacks = setup_callbacks(cfg)
+    logger = setup_logger(cfg)
+    profiler = setup_profiler(cfg)
+    console.log(f"Callbacks: {len(callbacks)} registered")
+    console.log(f"Logger:    {cfg.get('logger', 'tensorboard')}")
+    if profiler is not None:
+        console.log(f"Profiler:  {profiler.__class__.__name__}")
+
+    trainer = build_trainer(cfg, callbacks=callbacks, logger=logger, profiler=profiler)
+
+    training_cfg = cfg.training
+    console.log("Trainer initialised:")
+    console.log(f"  Max epochs:   {training_cfg.get('max_epochs', 100)}")
+    console.log(f"  Accelerator:  {training_cfg.get('accelerator', 'auto')}")
+    console.log(f"  Devices:      {training_cfg.get('devices', 1)}")
+    console.log(f"  Precision:    {training_cfg.get('precision', '32-true')}")
+
+    console.rule("Starting Training")
+
+    fit_ckpt_path = _resolve_checkpoint(cfg, module)
+    completed = run_fit_with_recovery(
+        trainer,
+        module,
+        datamodule,
+        ckpt_path=fit_ckpt_path,
+        output_dir=Path(cfg.output_dir),
+    )
 
     if trainer.global_rank == 0:
         final_path = Path(cfg.output_dir) / "checkpoints" / "final_model.ckpt"
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        if interrupted:
-            print("\nWARNING: saving checkpoint from an interrupted run — "
-                  "weights may be partially updated.")
+        if not completed:
+            console.log(
+                "[yellow]WARNING: saving checkpoint from an interrupted run - "
+                "weights may be partially updated.[/yellow]"
+            )
         trainer.save_checkpoint(str(final_path))
-        print(f"\nFinal model saved: {final_path}")
+        console.log(f"Final model saved: {final_path}")
 
-    print("\n" + "=" * 60)
-    print("Training Complete")
-    print("=" * 60)
+    console.rule("Training Complete")
 
 
 if __name__ == "__main__":

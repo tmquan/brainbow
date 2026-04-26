@@ -267,7 +267,11 @@ class LazyVolDataset(Dataset):
             with open(p, "r") as f:
                 data = json.load(f)
             return float(data["min"]), float(data["max"])
-        except Exception:
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            # OSError: race with concurrent writer / unreadable file.
+            # ValueError / json.JSONDecodeError: corrupted sidecar.
+            # KeyError: schema mismatch (older format).  In all cases
+            # we treat the cache as cold and force a recompute.
             return None
 
     def _write_norm_cache(self, handle: _VolumeHandle, vmin: float, vmax: float) -> None:

@@ -127,7 +127,7 @@ point_sampling.py        # GT-mask -> click-point dict
 __init__.py      # re-exports ImageLogger
 tags.py          # TagContext: {stage}/{mode}/[{head}/]{panel}
 geometry.py      # geometry-head visual helpers
-heads.py         # _log_semantic / _log_instance / _log_geometry / _log_brainbow
+heads.py         # _log_semantic / _log_instance / _log_geometry / _log_boundary
 viz.py           # colour-map, overlay, tile builders
 image_logger.py  # ImageLogger callback (the public class)
 ```
@@ -255,7 +255,7 @@ where
 - `stage` ∈ `{"train", "val", "test"}`,
 - `mode`  ∈ `{"automatic", "prompted", ...}` (single-value today,
   structured so `prompted` can slot in later),
-- `head`  ∈ `{"semantic", "instance", "geometry", "brainbow"}` or
+- `head`  ∈ `{"semantic", "instance", "geometry", "boundary"}` or
   `None` for mode-level panels,
 - `panel` is the concrete image / scalar name.
 
@@ -276,15 +276,17 @@ the child's overrides.  The real chain (parent → child) is::
 - `default.yaml`: every knob with a sensible default.  Also the
   canonical home for **shared model / loss hyperparameters**
   (e.g. `model.boundary_channels`).
-- `snemi3d.yaml`: SNEMI3D volume list + per-dataset training overrides
-  (batch size, augmentation mix, dense `loss:` block whose comments
-  document every head and sub-weight).
-- `combine.yaml`: extends `snemi3d.yaml` with the full multi-dataset
-  volume list (SNEMI3D + neurons + MICrONS) and the harmonising
-  `resolution_zoom_*` knobs.
-- `boundary.yaml`: project-level entry point.  Inherits from
-  `combine.yaml` and flips the loss weights so only the Boundary head
-  (formerly ``brainbow``) is active.
+- `snemi3d.yaml`: SNEMI3D volume list + the bulk of the model / loss
+  hyperparameters (batch size, augmentation mix, dense `loss:` block
+  whose comments document every head and sub-weight, and the
+  `resolution_zoom_*` knobs that harmonise resolutions across datasets
+  once `combine.yaml` adds neurons / MICrONS).
+- `combine.yaml`: inherits `snemi3d.yaml` and **replaces** its volume
+  lists with a multi-dataset mix (SNEMI3D + neurons + MICrONS train,
+  with SNEMI3D held out for val/test).  Drops AC4 from train so it can
+  serve as the canonical SNEMI3D val volume.
+- `boundary.yaml`: project-level recipe.  Inherits from `combine.yaml`
+  and flips the loss weights so only the Boundary head is active.
 
 **Convention:** a parameter lives in the *most general* config where
 it's meaningful.  Things that don't depend on the dataset go in
@@ -294,11 +296,19 @@ project-scoped knobs (which heads to enable) go in `boundary.yaml`.
 Loss-weight blocks are densely commented (see `configs/snemi3d.yaml`
 `loss:` block) so newcomers can learn the loss by reading the config.
 Boundary-head sub-weights are prefixed (`boundary_weight_raw`,
-`boundary_weight_min|avg|max|aff`) to keep them disambiguated from
-GeometryLoss's own `weight_raw` inside `CombinedLoss.__init__`.  The
-``aff`` sub-loss (soft-Dice on sigmoid face-affinity logits for the 6
-neighbours in Z-Y-X order T/B/U/D/L/R) is tuned via `boundary_weight_aff` and
-`boundary_aff_eps`.
+`boundary_weight_min|avg|max|aff`) in the *flat* form to keep them
+disambiguated from GeometryLoss's own `weight_raw` inside
+`CombinedLoss.__init__`.  The ``aff`` sub-loss (soft-Dice on sigmoid
+face-affinity logits for the 6 neighbours in Z-Y-X order T/B/U/D/L/R)
+is tuned via `boundary_weight_aff` and `boundary_aff_eps`.
+
+`snemi3d.yaml` uses the **nested** loss schema (one mapping per head,
+e.g. ``weight_semantic: { weight: 1.0, ... }``) which keeps every
+head-scoped knob next to its weight.  `default.yaml` and `boundary.yaml`
+use a **flat** schema (``weight_semantic: 0.0``,
+``boundary_weight_aff: 1.0``); both forms are accepted by
+:class:`brainbow.losses.CombinedLoss`.  When in doubt, copy the nested
+form from `snemi3d.yaml`.
 
 ---
 

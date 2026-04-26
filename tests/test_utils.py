@@ -2,7 +2,6 @@
 Tests for utility functions.
 """
 
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -10,12 +9,7 @@ import pytest
 import torch
 
 from brainbow.utils.io import find_folder, load_volume, save_volume, ensure_data, SUPPORTED_EXTENSIONS
-from brainbow.transforms.label import (
-    relabel_after_crop,
-    relabel_sequential,
-    relabel_connected_components_2d,
-    relabel_connected_components_3d,
-)
+from brainbow.transforms.label import Labeld
 from brainbow.utils.clustering import cluster_embeddings_meanshift
 from brainbow.metrics.instance import (
     _prepare_flat_labels,
@@ -125,60 +119,41 @@ class TestLoadSaveVolume:
             load_volume("/nonexistent/path.h5")
 
 
-class TestRelabelSequential:
-    """Tests for relabel_sequential."""
+class TestLabeld:
+    """Tests for the :class:`Labeld` MapTransform.
 
-    def test_basic_relabeling(self) -> None:
-        """Test sequential relabeling."""
-        labels = torch.tensor([0, 5, 0, 5, 12, 12, 0])
-        result = relabel_sequential(labels)
-        expected = torch.tensor([0, 1, 0, 1, 2, 2, 0])
-        assert torch.equal(result, expected)
+    ``Labeld`` is the post-crop / post-deformation cleanup that
+    splits any label whose voxels are no longer connected.  These
+    tests exercise the basic 2-D and 3-D shapes that the rest of the
+    pipeline relies on.
+    """
 
-    def test_all_background(self) -> None:
-        """Test with all background."""
-        labels = torch.zeros(10, dtype=torch.long)
-        result = relabel_sequential(labels)
-        assert torch.equal(result, labels)
+    def _apply(self, labels: torch.Tensor, spatial_dims: int, **kwargs) -> torch.Tensor:
+        tx = Labeld(keys="lbl", spatial_dims=spatial_dims, **kwargs)
+        return tx({"lbl": labels})["lbl"]
 
-    def test_already_sequential(self) -> None:
-        """Test with already sequential labels."""
-        labels = torch.tensor([0, 1, 1, 2, 2, 3, 0])
-        result = relabel_sequential(labels)
-        assert torch.equal(result, labels)
-
-
-class TestRelabelAfterCrop:
-    """Tests for relabel_after_crop."""
-
-    def test_2d_relabeling(self) -> None:
-        """Test 2D connected component relabeling."""
+    def test_2d_disconnected_same_label_split(self) -> None:
         labels = torch.zeros(10, 10, dtype=torch.long)
         labels[0:3, 0:3] = 5
-        labels[7:10, 7:10] = 5  # Same label, disconnected
+        labels[7:10, 7:10] = 5  # same id, two disjoint regions
+        result = self._apply(labels, spatial_dims=2)
+        # background + 2 components.
+        assert torch.unique(result).numel() == 3
 
-        result = relabel_after_crop(labels, spatial_dims=2)
-        unique = torch.unique(result)
-        assert len(unique) == 3  # background + 2 components
-
-    def test_3d_relabeling(self) -> None:
-        """Test 3D connected component relabeling."""
+    def test_3d_two_instances_preserved(self) -> None:
         labels = torch.zeros(4, 10, 10, dtype=torch.long)
         labels[:, 0:3, 0:3] = 1
         labels[:, 7:10, 7:10] = 2
+        result = self._apply(labels, spatial_dims=3)
+        assert torch.unique(result).numel() == 3
 
-        result = relabel_after_crop(labels, spatial_dims=3)
-        unique = torch.unique(result)
-        assert len(unique) == 3  # background + 2 instances
-
-    def test_batch_relabeling(self) -> None:
-        """Test batch relabeling."""
-        labels = torch.zeros(2, 10, 10, dtype=torch.long)
-        labels[0, 0:5, 0:5] = 1
-        labels[1, 5:10, 5:10] = 2
-
-        result = relabel_after_crop(labels, spatial_dims=2)
-        assert result.shape == labels.shape
+    def test_min_voxels_drops_slivers(self) -> None:
+        labels = torch.zeros(10, 10, dtype=torch.long)
+        labels[0:3, 0:3] = 1     # 9 voxels
+        labels[5, 5] = 2          # 1 voxel — should be dropped
+        result = self._apply(labels, spatial_dims=2, min_voxels=5)
+        # Only background + the larger blob survive.
+        assert torch.unique(result).numel() == 2
 
 
 class TestComputeMetricsPoint:
@@ -298,94 +273,6 @@ class TestSaveVolumeFormats:
         save_volume(data, path, format="npy")
         loaded = load_volume(path, format="npy")
         np.testing.assert_array_almost_equal(data, loaded)
-
-
-class TestRelabelConnectedComponents:
-    """Tests for connected component relabeling."""
-
-    def test_2d_single_component(self) -> None:
-        labels = torch.zeros(10, 10, dtype=torch.long)
-        labels[2:5, 2:5] = 1
-        result = relabel_connected_components_2d(labels)
-        assert torch.unique(result).numel() == 2  # bg + 1 component
-
-    def test_2d_two_disconnected_same_label(self) -> None:
-        labels = torch.zeros(10, 10, dtype=torch.long)
-        labels[0:2, 0:2] = 1
-        labels[8:10, 8:10] = 1
-        result = relabel_connected_components_2d(labels)
-        unique = torch.unique(result)
-        assert unique.numel() == 3  # bg + 2 components
-
-    def test_2d_batch(self) -> None:
-        labels = torch.zeros(2, 10, 10, dtype=torch.long)
-        labels[0, 0:3, 0:3] = 1
-        labels[1, 7:10, 7:10] = 2
-        result = relabel_connected_components_2d(labels)
-        assert result.shape == (2, 10, 10)
-
-    def test_3d_single_component(self) -> None:
-        labels = torch.zeros(4, 8, 8, dtype=torch.long)
-        labels[:, 2:5, 2:5] = 1
-        result = relabel_connected_components_3d(labels)
-        assert torch.unique(result).numel() == 2
-
-    def test_3d_batch(self) -> None:
-        labels = torch.zeros(2, 4, 8, 8, dtype=torch.long)
-        labels[0, :, 0:3, 0:3] = 1
-        labels[1, :, 5:8, 5:8] = 2
-        result = relabel_connected_components_3d(labels)
-        assert result.shape == (2, 4, 8, 8)
-
-    def test_all_background(self) -> None:
-        labels = torch.zeros(8, 8, dtype=torch.long)
-        result = relabel_connected_components_2d(labels)
-        assert torch.equal(result, labels)
-
-
-class TestRelabelAfterCropExtended:
-    """Extended tests for relabel_after_crop."""
-
-    def test_invalid_spatial_dims_raises(self) -> None:
-        labels = torch.zeros(5, 5, dtype=torch.long)
-        with pytest.raises(ValueError, match="spatial_dims must be 2 or 3"):
-            relabel_after_crop(labels, spatial_dims=4)
-
-    def test_custom_connectivity_2d(self) -> None:
-        labels = torch.zeros(10, 10, dtype=torch.long)
-        labels[0:3, 0:3] = 1
-        labels[7:10, 7:10] = 1
-        result_4 = relabel_after_crop(labels, spatial_dims=2, connectivity=4)
-        assert torch.unique(result_4).numel() == 3
-
-    def test_custom_connectivity_3d(self) -> None:
-        labels = torch.zeros(4, 10, 10, dtype=torch.long)
-        labels[:, 0:3, 0:3] = 1
-        result_6 = relabel_after_crop(labels, spatial_dims=3, connectivity=6)
-        assert torch.unique(result_6).numel() == 2
-
-
-class TestRelabelSequentialExtended:
-    """Extended tests for relabel_sequential."""
-
-    def test_negative_labels_ignored(self) -> None:
-        labels = torch.tensor([-1, 0, 5, 10])
-        result = relabel_sequential(labels)
-        assert result[1].item() == 0
-        assert result[2].item() == 1
-        assert result[3].item() == 2
-
-    def test_custom_start_label(self) -> None:
-        labels = torch.tensor([0, 10, 0, 20])
-        result = relabel_sequential(labels, start_label=5)
-        assert result[0].item() == 0
-        assert result[1].item() == 5
-        assert result[3].item() == 6
-
-    def test_single_element(self) -> None:
-        labels = torch.tensor([42])
-        result = relabel_sequential(labels)
-        assert result[0].item() == 1
 
 
 class TestPrepareFlatLabels:

@@ -1,5 +1,11 @@
 """
-NRRD format preprocessor for handling NRRD (Nearly Raw Raster Data) files.
+NRRD preprocessor.
+
+Reads / writes ``.nrrd`` (Nearly Raw Raster Data) files via
+:mod:`pynrrd`.  Used primarily by MICRONS volumes, where the raw EM
+ships as NRRD chunks.
+
+See :class:`brainbow.preprocessors.BasePreprocessor` for the contract.
 """
 
 from pathlib import Path

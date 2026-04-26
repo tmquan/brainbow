@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 from brainbow.transforms.find_boundaries import find_boundaries as _find_boundaries
 
+from brainbow.datasets._patches import generate_patch_indices
 from brainbow.datasets.base import CircuitDataset
 from brainbow.preprocessors import HDF5Preprocessor, NRRDPreprocessor, TIFFPreprocessor
 from brainbow.utils.io import find_folder
@@ -98,23 +99,31 @@ class MICRONSDataset(CircuitDataset):
             return {"vol": vols[0]["vol"], "seg": vols[0]["seg"]}
         return {"vol": "volume", "seg": "segmentation"}
 
-    def _load_volume(self, base_name: str, required: bool = True) -> Optional[np.ndarray]:
+    def _load_volume(
+        self,
+        base_name: str,
+        required: bool = True,
+        root_dir: Optional[Path] = None,
+    ) -> Optional[np.ndarray]:
         """
         Load volume data from file.
 
         Args:
             base_name: Base filename without extension.
             required: If True, raise error when not found.
+            root_dir: Override the dataset root for this volume (used by
+                ``vol_spec["root"]`` for parity with SNEMI3D / Neurons).
 
         Returns:
             Numpy array containing volume data, or None if not found.
         """
-        path = find_folder(self.root_dir, base_name)
+        search_dir = root_dir if root_dir is not None else self.root_dir
+        path = find_folder(search_dir, base_name)
 
         if path is None:
             if required:
                 raise FileNotFoundError(
-                    f"Could not find data file '{base_name}' in {self.root_dir}.\n"
+                    f"Could not find data file '{base_name}' in {search_dir}.\n"
                     f"Expected one of: {base_name}.h5, {base_name}.tiff, {base_name}.nrrd"
                 )
             return None
@@ -133,50 +142,7 @@ class MICRONSDataset(CircuitDataset):
         patch_size: Tuple[int, int, int],
         overlap: float,
     ) -> List[Tuple[slice, slice, slice]]:
-        """
-        Generate indices for extracting overlapping 3D patches.
-
-        Args:
-            volume_shape: Shape of the full volume (z, y, x).
-            patch_size: Size of each patch (z, y, x).
-            overlap: Overlap fraction between patches.
-
-        Returns:
-            List of (z_slice, y_slice, x_slice) tuples.
-        """
-        all_dim_indices: List[List[Tuple[int, int]]] = []
-
-        for dim in range(3):
-            vol_size = volume_shape[dim]
-            patch_dim = patch_size[dim]
-            stride = max(1, int(patch_dim * (1 - overlap)))
-
-            dim_indices: List[Tuple[int, int]] = []
-            start = 0
-            while start < vol_size:
-                end = min(start + patch_dim, vol_size)
-                if end - start < patch_dim and start > 0:
-                    start = max(0, end - patch_dim)
-                dim_indices.append((start, end))
-                if end >= vol_size:
-                    break
-                start += stride
-
-            all_dim_indices.append(dim_indices)
-
-        patch_indices: List[Tuple[slice, slice, slice]] = []
-        for z_start, z_end in all_dim_indices[0]:
-            for y_start, y_end in all_dim_indices[1]:
-                for x_start, x_end in all_dim_indices[2]:
-                    patch_indices.append(
-                        (
-                            slice(z_start, z_end),
-                            slice(y_start, y_end),
-                            slice(x_start, x_end),
-                        )
-                    )
-
-        return patch_indices
+        return generate_patch_indices(volume_shape, patch_size, overlap)
 
     def _prepare_data(self) -> List[Dict[str, Any]]:
         """Prepare data dictionaries from volume list."""
@@ -184,16 +150,22 @@ class MICRONSDataset(CircuitDataset):
         total_slices = 0
 
         for vol_spec in self._get_volume_list():
-            inputs = self._load_volume(str(vol_spec["vol"]))
+            vol_root = Path(vol_spec["root"]) if "root" in vol_spec else None
+            inputs = self._load_volume(str(vol_spec["vol"]), root_dir=vol_root)
             if inputs is None:
-                raise FileNotFoundError(f"Could not load volume '{vol_spec['vol']}' from {self.root_dir}")
+                raise FileNotFoundError(
+                    f"Could not load volume '{vol_spec['vol']}' from "
+                    f"{vol_root or self.root_dir}"
+                )
             inputs = inputs.astype(np.float32)
             vmin, vmax = float(inputs.min()), float(inputs.max())
             if vmax > vmin:
                 inputs = (inputs - vmin) / (vmax - vmin)
 
             labels: Optional[np.ndarray] = None
-            labels = self._load_volume(str(vol_spec["seg"]), required=False)
+            labels = self._load_volume(
+                str(vol_spec["seg"]), required=False, root_dir=vol_root,
+            )
             if labels is not None:
                 labels = labels.astype(np.int64)
 

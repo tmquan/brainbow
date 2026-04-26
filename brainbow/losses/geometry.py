@@ -22,10 +22,9 @@ from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange, reduce
 
-from brainbow.losses._common import canonical_regression_name
+from brainbow.losses._common import canonical_regression_name, regression_loss_fn
 
 
 def upper_tri_channels_to_matrix(
@@ -243,14 +242,15 @@ class GeometryLoss(nn.Module):
         loss_type: str,
         reduction: str = "mean",
     ) -> torch.Tensor:
-        """Regression with the canonical name resolution and smooth-L1 beta."""
-        if loss_type == "mse":
-            return F.mse_loss(pred, target, reduction=reduction)
-        if loss_type == "l1":
-            return F.l1_loss(pred, target, reduction=reduction)
-        return F.smooth_l1_loss(
-            pred, target, beta=self.smooth_l1_beta, reduction=reduction,
-        )
+        """Regression dispatched through :func:`regression_loss_fn`.
+
+        ``smooth_l1`` carries an extra ``beta`` knob that is unique to
+        this loss; the other variants ignore it harmlessly.
+        """
+        fn = regression_loss_fn(loss_type)
+        if canonical_regression_name(loss_type) == "smooth_l1":
+            return fn(pred, target, beta=self.smooth_l1_beta, reduction=reduction)
+        return fn(pred, target, reduction=reduction)
 
     def _compute_loss_fg(
         self,

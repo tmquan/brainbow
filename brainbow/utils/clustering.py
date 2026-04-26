@@ -1338,7 +1338,7 @@ def cluster_offsets_hough(
         threshold=threshold,
         min_votes=min_votes,
     )
-    labels = voter(offsets, foreground_mask)
+    labels, _soft, _centers = voter(offsets, foreground_mask)
 
     if not batched:
         labels = rearrange(labels, "1 ... -> ...")

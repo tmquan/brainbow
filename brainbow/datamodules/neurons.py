@@ -102,43 +102,33 @@ class NeuronsDataModule(CircuitDataModule):
         if not self._use_lazy:
             return super().setup(stage)
 
-        from brainbow.datasets.lazy import LazyVolDataset
-
         num_samples = self.num_samples or 16000
         read_size = self._effective_read_size()
 
         if stage == "fit" or stage is None:
-            train_vols = self.train_volumes or []
-            if train_vols:
-                self.train_dataset = LazyVolDataset(
-                    root_dir=self.data_root,
-                    volumes=train_vols,
-                    patch_size=read_size,
-                    transform=self.get_train_transforms(),
-                    num_samples=num_samples,
-                    min_foreground=self.min_foreground,
+            if not self.train_volumes:
+                raise ValueError(
+                    "NeuronsDataModule requires `train_volumes` to be a non-empty "
+                    "list in lazy 3-D patch mode; got %r.  Set it in your YAML "
+                    "(e.g. `data.train_volumes: [{vol: ..., seg: ...}]`) or "
+                    "switch to slice mode (`slice_mode: true`)."
+                    % (self.train_volumes,)
                 )
-            val_vols = self.val_volumes or train_vols
-            if val_vols:
-                self.val_dataset = LazyVolDataset(
-                    root_dir=self.data_root,
-                    volumes=val_vols,
-                    patch_size=self.patch_size,
-                    transform=self.get_val_transforms(),
-                    num_samples=num_samples,
-                    min_foreground=self.min_foreground,
-                )
+            val_vols = self.val_volumes or self.train_volumes
+            self.train_dataset = self._build_lazy_split(
+                self.train_volumes, read_size,
+                self.get_train_transforms(), num_samples,
+            )
+            self.val_dataset = self._build_lazy_split(
+                val_vols, self.patch_size,
+                self.get_val_transforms(), num_samples,
+            )
 
         if stage == "test" or stage is None:
-            test_vols = self.test_volumes or self.train_volumes or []
-            if test_vols:
-                self.test_dataset = LazyVolDataset(
-                    root_dir=self.data_root,
-                    volumes=test_vols,
-                    patch_size=self.patch_size,
-                    transform=self.get_val_transforms(),
-                    num_samples=num_samples,
-                    min_foreground=self.min_foreground,
-                )
+            test_vols = self.test_volumes or self.train_volumes
+            self.test_dataset = self._build_lazy_split(
+                test_vols, self.patch_size,
+                self.get_val_transforms(), num_samples,
+            )
 
         logger.info("NeuronsDataModule: using LazyVolDataset (~0 MB base RAM per rank)")

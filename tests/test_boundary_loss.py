@@ -1,10 +1,6 @@
 """
 Tests for BoundaryLoss and its 16-channel target construction.
 
-(Formerly ``test_brainbow_loss.py`` -- the loss was renamed from
-``BrainbowLoss`` to ``BoundaryLoss`` because the 6 face-affinity
-channels carry the instance-boundary supervision signal.)
-
 The target map encodes, per voxel:
   - channel  0     : raw image intensity at that voxel (dense, everywhere)
   - channels 1-3   : normalised min (bbox-min (z, y, x)) of the instance
@@ -359,19 +355,6 @@ class TestBoundaryInCombinedLoss:
         )}
         with pytest.raises(KeyError):
             loss(preds, {"labels": labels, "semantic_labels": (labels > 0).long()})
-
-    def test_combined_loss_legacy_weight_brainbow_kwarg(self) -> None:
-        """Legacy ``weight_brainbow`` kwarg should still enable the head."""
-        from brainbow.losses import CombinedLoss
-
-        loss = CombinedLoss(
-            spatial_dims=3,
-            weight_semantic=0.0, weight_instance=0.0, weight_geometry=0.0,
-            weight_brainbow=1.0,
-        )
-        assert loss.boundary_loss is not None
-        assert loss.weight_boundary == 1.0
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

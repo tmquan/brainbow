@@ -1,5 +1,10 @@
 """
-TIFF format preprocessor for handling TIFF stacks and multi-page TIFF files.
+TIFF preprocessor.
+
+Reads / writes single-page and multi-page ``.tif`` / ``.tiff`` files
+via :mod:`tifffile`.  Multi-page TIFFs are returned as ``[Z, Y, X]``.
+
+See :class:`brainbow.preprocessors.BasePreprocessor` for the contract.
 """
 
 from pathlib import Path

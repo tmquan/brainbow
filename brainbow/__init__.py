@@ -56,6 +56,11 @@ from brainbow.losses import (
     SemanticLoss,
     build_boundary_target,
 )
+from brainbow.models import (
+    BaseModel,
+    CosmosTransfer3DWrapper,
+    Vista3DWrapper,
+)
 from brainbow.modules import (
     BaseCircuitModule,
     BaseCosmosModule,
@@ -86,7 +91,11 @@ __all__ = [
     "InstanceLoss",
     "SemanticLoss",
     "build_boundary_target",
-    # Modules
+    # Models (backbone wrappers)
+    "BaseModel",
+    "CosmosTransfer3DWrapper",
+    "Vista3DWrapper",
+    # Modules (Lightning)
     "BaseCircuitModule",
     "BaseCosmosModule",
     "BaseVistaModule",

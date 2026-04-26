@@ -1,5 +1,14 @@
 """
-HDF5 format preprocessor for handling HDF5 datasets and hierarchical structures.
+HDF5 preprocessor.
+
+Reads (and writes) ``.h5`` / ``.hdf5`` files.  Multiple datasets per
+file are supported; :meth:`HDF5Preprocessor.load` accepts either an
+explicit ``key=`` or a heuristic (the first dataset whose ``ndim``
+matches ``main`` / ``volume`` / ``raw`` / ``data``).
+
+Used by every ``CircuitDataset`` leaf for both raw EM and segmentation
+volumes.  See :class:`brainbow.preprocessors.BasePreprocessor` for the
+contract.
 """
 
 from pathlib import Path
@@ -115,12 +124,15 @@ class HDF5Preprocessor(BasePreprocessor):
 
         except KeyError:
             raise
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
+            # OSError: file truncated / unreadable / not HDF5.
+            # ValueError: invalid slice or dtype mismatch.
+            # RuntimeError: h5py wraps several low-level HDF5 errors here.
             raise ValueError(
                 f"Failed to load HDF5 file: {path}\n"
                 f"Error: {e}\n"
                 f"Ensure the file is a valid HDF5 format."
-            )
+            ) from e
 
     def validate(self, path: str) -> bool:
         """

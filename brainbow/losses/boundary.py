@@ -59,7 +59,11 @@ import torch.nn as nn
 from einops import rearrange, reduce, repeat
 from monai.losses import DiceLoss
 
-from brainbow.losses._common import canonical_regression_name, regression_loss_fn
+from brainbow.losses._common import (
+    canonical_regression_name,
+    regression_loss_fn,
+    stable_bce_on_probs,
+)
 
 
 _BOUNDARY_CHANNELS: int = 16
@@ -548,22 +552,15 @@ class BoundaryLoss(nn.Module):
         zero = pred.new_zeros(())
         out: Dict[str, torch.Tensor] = {"ce": zero, "dice": zero, "iou": zero}
         if self.weight_ce > 0:
-            # BCE log math is numerically fragile under ``bf16-mixed``:
-            # once the wrapper applies sigmoid, near-saturated logits come
-            # out as ``p = 1`` in bf16 (bf16 mantissa is ~3 decimal digits
-            # near 1, so any ``p > ~0.992`` rounds to exactly 1), which
-            # makes ``log(1 - p) = -inf`` and poisons the step to NaN.
-            # Do the log in fp32 so the clamp below actually has teeth.
-            eps = 1e-7
-            p = pred.float().clamp(eps, 1.0 - eps)
-            t = target.float()
-            if self._aff_pos_weight is not None:
-                pw = self._aff_pos_weight.to(p.dtype)
-                # ``pos_weight`` re-weights the *positive* term only, mirroring
-                # ``BCEWithLogitsLoss(pos_weight=...)`` so old configs port.
-                per_voxel = -(pw * t * p.log() + (1.0 - t) * (1.0 - p).log())
-            else:
-                per_voxel = -(t * p.log() + (1.0 - t) * (1.0 - p).log())
+            # See ``stable_bce_on_probs`` -- the model wrapper applies
+            # sigmoid before the loss sees the affinity channels, and bf16
+            # autocast rounds ``p > ~0.992`` to exactly ``1``, so we need
+            # the fp32 + eps-clamped path.  SAME-pad means every voxel has
+            # a valid target (boundary self-connected) so ``.mean()`` is
+            # the correct reduction.
+            per_voxel = stable_bce_on_probs(
+                pred, target, pos_weight=self._aff_pos_weight,
+            )
             out["ce"] = per_voxel.mean()
         if self.weight_dice > 0:
             out["dice"] = self._aff_dice(pred, target)

@@ -9,6 +9,11 @@ description = "A modular PyTorch Lightning infrastructure for connectomics resea
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
+# Core runtime dependencies.  These are the imports actually exercised
+# by ``import brainbow`` and by the standard training / inference path.
+# Optional features (Cosmos backbone, GPU acceleration, the JS
+# visualizer, download scripts) live in ``[project.optional-dependencies]``
+# below so a vanilla install stays slim.
 dependencies = [
     "torch>=2.1.0",
     "pytorch-lightning>=2.1.0",
@@ -23,6 +28,8 @@ dependencies = [
     "numpy>=1.24.0",
     "scipy>=1.11.0",
     "scikit-learn>=1.3.0",
+    "scikit-image>=0.21.0",  # CPU fallback for transforms.label / find_boundaries / covariance
+    "tqdm>=4.65.0",          # sliding-window progress bar (lazily imported)
     "wandb>=0.15.0",
     "tensorboard>=2.14.0",
     "rich>=13.0.0",
@@ -30,14 +37,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Cosmos-Predict2.5 backbone (DiT + VAE).  Pulls HuggingFace + diffusers.
 cosmos = [
     "diffusers>=0.37.0",
     "huggingface_hub>=1.6.0",
     "safetensors>=0.7.0",
     "accelerate>=1.13.0",
 ]
-# NVIDIA RAPIDS wheels for GPU clustering (cuML HDBSCAN) and GPU
-# transforms (cupy-backed EDT / gaussian / connected components).
+# NVIDIA RAPIDS wheels for GPU clustering (cuML HDBSCAN / MeanShift)
+# and GPU transforms (cupy-backed EDT / gaussian / connected components).
 # Must be installed via NVIDIA's index, e.g.:
 #   pip install -e ".[gpu-cu13]" --extra-index-url https://pypi.nvidia.com
 gpu-cu13 = [
@@ -48,14 +56,19 @@ gpu-cu12 = [
     "cupy-cuda12x>=13.0",
     "cuml-cu12>=25.10",
 ]
+# Download helpers in ``scripts/download_*.py``.
+scripts = [
+    "cloud-volume>=10.4.0",
+    "requests>=2.31.0",
+]
+# Optional viewer (``brainbow.visualizer``) and richer figures.
+viz = [
+    "Pillow>=10.0.0",
+    "plotly>=5.24.0",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
-]
-notebooks = [
-    "jupyter>=1.0.0",
-    "nbformat>=4.2.0",
-    "ipykernel>=6.0.0",
 ]
 
 [tool.setuptools.packages.find]

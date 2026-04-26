@@ -7,24 +7,28 @@ For each foreground instance, computes the 2nd-order spatial statistics
 entries at every pixel of the instance.
 """
 
-from typing import Dict
-
 import numpy as np
-import torch
 from monai.config import KeysCollection
-from monai.transforms import MapTransform
 
+from brainbow.transforms._region_field import RegionFieldTransformd
 from brainbow.transforms.edt import _use_gpu
 
 
 def _regionprops(label_np: np.ndarray):
-    """Run regionprops — cucim GPU when available, skimage CPU otherwise."""
+    """Run regionprops — cucim GPU when available, skimage CPU otherwise.
+
+    The cucim path can fail at *any* of: cupy/cucim import (missing
+    package on a CPU-only build), CUDA-side allocation (OOM on a busy
+    device), or kernel launch (driver mismatch).  Each of these
+    surfaces as a different exception class, so we catch the union of
+    them rather than bare ``Exception`` and fall through to skimage.
+    """
     if _use_gpu():
         try:
             import cupy as cp
             from cucim.skimage.measure import regionprops
             return regionprops(cp.asarray(label_np))
-        except Exception:
+        except (ImportError, ModuleNotFoundError, MemoryError, RuntimeError):
             pass
     from skimage.measure import regionprops
     return regionprops(label_np)
@@ -91,7 +95,7 @@ def compute_covariance_field(
     return cov_field
 
 
-class Covarianced(MapTransform):
+class Covarianced(RegionFieldTransformd):
     """Compute per-pixel spatial covariance field for instance labels.
 
     Reads instance labels from each key and stores the covariance field
@@ -105,37 +109,16 @@ class Covarianced(MapTransform):
         normalized: Normalize covariance by its trace.
     """
 
+    output_suffix = "_covariance"
+
     def __init__(
         self,
         keys: KeysCollection,
         spatial_dims: int = 3,
         normalized: bool = True,
     ) -> None:
-        super().__init__(keys)
-        self.spatial_dims = spatial_dims
+        super().__init__(keys, spatial_dims=spatial_dims)
         self.normalized = normalized
 
-    def __call__(self, data: Dict) -> Dict:
-        d = dict(data)
-
-        for key in self.key_iterator(d):
-            arr = d[key]
-            is_tensor = isinstance(arr, torch.Tensor)
-
-            if is_tensor:
-                device = arr.device
-                label_np = arr.cpu().numpy()
-            else:
-                label_np = np.asarray(arr)
-
-            while label_np.ndim > self.spatial_dims:
-                label_np = label_np[0]
-
-            cov = compute_covariance_field(label_np, normalized=self.normalized)
-
-            if is_tensor:
-                cov = torch.from_numpy(cov).to(device)
-
-            d[f"{key}_covariance"] = cov
-
-        return d
+    def _compute(self, label_np: np.ndarray) -> np.ndarray:
+        return compute_covariance_field(label_np, normalized=self.normalized)

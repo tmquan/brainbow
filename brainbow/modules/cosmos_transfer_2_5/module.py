@@ -13,8 +13,15 @@ from brainbow.modules.cosmos_transfer_2_5.base import BaseCosmosModule
 class CosmosTransfer3DModule(BaseCosmosModule):
     """Cosmos-Transfer2.5 3-D volumetric segmentation module.
 
-    Three output heads: ``semantic`` ``[B, C, D, H, W]``,
-    ``instance`` ``[B, E, D, H, W]``, ``geometry`` ``[B, G, D, H, W]``.
+    Four output heads:
+
+    * ``semantic`` ``[B, L, D, H, W]``      -- per-voxel class logits.
+    * ``instance`` ``[B, E, D, H, W]``      -- discriminative embedding.
+    * ``geometry`` ``[B, G, D, H, W]``      -- raw + cov-upper-tri + dir.
+    * ``boundary`` ``[B, C, D, H, W]``      -- raw + min/avg/max RGB + 6 face-affinity.
+
+    Heads with weight ``0`` in the loss config are not constructed; see
+    :class:`brainbow.losses.CombinedLoss`.
     """
 
     _model_cls = CosmosTransfer3DWrapper

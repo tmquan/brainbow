@@ -1,3 +1,44 @@
 """
-Inference utilities for connectomics segmentation (not yet implemented).
+Inference utilities for connectomics segmentation.
+
+This subpackage holds the **post-training** path: turn a trained model
+plus a (possibly very large) volume into a discrete instance-id map.
+
+Public surface
+--------------
+- :func:`brainbow.inference.sliding_window.sliding_window_inference`
+  -- patch-wise blended inference over volumes that don't fit on the GPU.
+- :func:`brainbow.inference.clusterer.build_clusterer`
+  -- factory for the per-instance clustering step (mean-shift, HDBSCAN,
+  spatial connected-components, Hough voting, ...).
+- :class:`brainbow.inference.clusterer.SoftMeanShift` and the other
+  ``*Clusterer`` classes that ``build_clusterer`` returns.
+
+Extending this module
+---------------------
+A new clusterer should subclass
+:class:`brainbow.inference.clusterer._BaseUnsupervisedClusterer` and
+register itself in :func:`build_clusterer`.  Sliding-window aggregation
+of new prediction heads is handled in :mod:`sliding_window` -- see the
+``geometry`` / ``boundary`` branches there for examples.
 """
+
+from brainbow.inference.clusterer import (
+    HDBSCANClusterer,
+    HoughVoting,
+    MeanShiftClusterer,
+    SoftMeanShift,
+    SpatialCCClusterer,
+    build_clusterer,
+)
+from brainbow.inference.sliding_window import sliding_window_inference
+
+__all__ = [
+    "HDBSCANClusterer",
+    "HoughVoting",
+    "MeanShiftClusterer",
+    "SoftMeanShift",
+    "SpatialCCClusterer",
+    "build_clusterer",
+    "sliding_window_inference",
+]

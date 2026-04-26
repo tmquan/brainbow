@@ -35,6 +35,8 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from monai.losses import DiceLoss
 
+from brainbow.losses._common import stable_bce_on_probs
+
 
 class SemanticLoss(nn.Module):
     """Weighted sum of CE + IoU + Dice on per-voxel sigmoid probabilities.
@@ -215,18 +217,12 @@ class SemanticLoss(nn.Module):
         """
         target, valid_mask = self._build_target_onehot(probs, class_labels)
 
-        eps = 1e-7
-        p = probs.float().clamp(eps, 1.0 - eps)
-        t = target.float()
         if self._pos_weight is not None:
-            shape = [1, p.shape[1]] + [1] * (p.dim() - 2)
-            pw = self._pos_weight.view(*shape).to(p.dtype)
-            # ``pos_weight`` re-weights the *positive* term only -- mirrors
-            # the semantics of ``BCEWithLogitsLoss(pos_weight=...)`` so
-            # configs carry over unchanged.
-            per_voxel = -(pw * t * p.log() + (1.0 - t) * (1.0 - p).log())
+            shape = [1, probs.shape[1]] + [1] * (probs.dim() - 2)
+            pw = self._pos_weight.view(*shape)
         else:
-            per_voxel = -(t * p.log() + (1.0 - t) * (1.0 - p).log())
+            pw = None
+        per_voxel = stable_bce_on_probs(probs, target, pos_weight=pw)
 
         if valid_mask is not None:
             per_voxel = per_voxel * valid_mask.to(per_voxel.dtype)

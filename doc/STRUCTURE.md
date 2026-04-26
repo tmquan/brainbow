@@ -36,7 +36,7 @@ chain is `default → <dataset> → <project>`.
 | `default.yaml`        | Every knob with a sensible default.  Base for every experiment.             |
 | `snemi3d.yaml`        | SNEMI3D dataset overrides + shared **model/loss** hyperparameters.          |
 | `combine.yaml`        | Multi-dataset training (SNEMI3D + neurons + MICrONS).                       |
-| `brainbow.yaml`       | Project-level entry: selects which dataset base to inherit from.            |
+| `boundary.yaml`       | Project-level recipe: trains only the 16-channel boundary head.             |
 
 ---
 
@@ -50,20 +50,25 @@ applicable or directly: `python scripts/<name>.py`.
 | `scripts/train.py`             | Hydra-driven training loop (Lightning Trainer).   |
 | `scripts/download_snemi3d.py`  | Fetch SNEMI3D volumes via cloudvolume.            |
 | `scripts/download_microns.py`  | Fetch MICrONS volumes + segmentations.            |
-| `scripts/download_zenodo_582636.py` | Fetch the Kasthuri / SNEMI legacy raw.       |
+| `scripts/download_zenodo_582636.py` | Generic Zenodo downloader, currently pointing at record 582636 (X-ray uCT of an assembly of rice grains, used as a 3D instance-segmentation benchmark with densely touching objects). |
 
 ---
 
 ## Tests
 
-| File                               | Covers                                              |
-| ---------------------------------- | --------------------------------------------------- |
-| `tests/test_losses.py`             | Semantic / Instance / Geometry / Combined.          |
-| `tests/test_boundary_loss.py`      | BoundaryLoss + `build_boundary_target`.             |
-| `tests/test_datasets.py`           | `CircuitDataset` leaves (volume loading, splits).   |
-| `tests/test_datamodules.py`        | `CircuitDataModule` leaves (augmentation pipeline). |
-| `tests/test_preprocessors.py`      | HDF5 / NRRD / TIFF / NfTy converters.               |
-| `tests/test_utils.py`              | label / io / parallel helpers.                      |
+| File                               | Covers                                                     |
+| ---------------------------------- | ---------------------------------------------------------- |
+| `tests/test_losses.py`             | `CombinedLoss` 2-D and 3-D end-to-end (forward, gradients). |
+| `tests/test_boundary_loss.py`      | `BoundaryLoss` + `build_boundary_target` (CPU / CUDA agree, channel layout, edge cases). |
+| `tests/test_datasets.py`           | `CircuitDataset` abstract contract (resolution, anisotropy, length virtualisation). |
+| `tests/test_datamodules.py`        | `CircuitDataModule` augmentation pipeline (via a synthetic in-memory dataset). |
+| `tests/test_preprocessors.py`      | HDF5 / NRRD / TIFF / NfTy converters.                      |
+| `tests/test_utils.py`              | label / io / parallel helpers.                             |
+
+Tests for `SemanticLoss`, `InstanceLoss`, `GeometryLoss` (each in
+isolation), the freeze schedule, `build_clusterer`, and
+`sliding_window_inference` are added in Phase 5 of the audit overhaul
+(see [`doc/CONTRIBUTING.md`](./CONTRIBUTING.md) once it lands).
 
 ---
 
@@ -185,7 +190,7 @@ concrete `module.py`.
 | `callbacks/tensorboard/`          | `ImageLogger` — hierarchical TB visualisation (package).                |
 | `callbacks/tensorboard/image_logger.py` | `ImageLogger` callback (the public class).                        |
 | `callbacks/tensorboard/tags.py`   | `TagContext` — single source of `{stage}/{mode}/[{head}/]{panel}`.      |
-| `callbacks/tensorboard/heads.py`  | `_log_semantic` / `_log_instance` / `_log_geometry` / `_log_brainbow`.  |
+| `callbacks/tensorboard/heads.py`  | `_log_semantic` / `_log_instance` / `_log_geometry` / `_log_boundary`.  |
 | `callbacks/tensorboard/geometry.py` | Direction-quiver + covariance-glyph rendering helpers.                |
 | `callbacks/tensorboard/viz.py`    | Colour-map, overlay, tile builders.                                     |
 

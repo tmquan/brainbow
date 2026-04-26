@@ -8,13 +8,10 @@ The centroid computation is GPU-accelerated via cucim/cupy when
 available (see :mod:`brainbow.transforms.edt`).
 """
 
-from typing import Dict
-
 import numpy as np
-import torch
 from monai.config import KeysCollection
-from monai.transforms import MapTransform
 
+from brainbow.transforms._region_field import RegionFieldTransformd
 from brainbow.transforms.edt import centroid as _centroid
 
 
@@ -66,7 +63,7 @@ def compute_direction_field(
     return direction
 
 
-class Directiond(MapTransform):
+class Directiond(RegionFieldTransformd):
     """Compute per-pixel direction field toward instance centroids.
 
     Reads instance labels from each key and stores the direction field
@@ -80,38 +77,16 @@ class Directiond(MapTransform):
         normalize: Normalise direction vectors to unit length.
     """
 
+    output_suffix = "_direction"
+
     def __init__(
         self,
         keys: KeysCollection,
         spatial_dims: int = 3,
         normalize: bool = True,
     ) -> None:
-        super().__init__(keys)
-        self.spatial_dims = spatial_dims
+        super().__init__(keys, spatial_dims=spatial_dims)
         self.normalize = normalize
 
-    def __call__(self, data: Dict) -> Dict:
-        d = dict(data)
-
-        for key in self.key_iterator(d):
-            arr = d[key]
-            is_tensor = isinstance(arr, torch.Tensor)
-
-            if is_tensor:
-                device = arr.device
-                label_np = arr.cpu().numpy()
-            else:
-                label_np = np.asarray(arr)
-
-            # Strip leading non-spatial dims (channel) to get [*spatial]
-            while label_np.ndim > self.spatial_dims:
-                label_np = label_np[0]
-
-            direction = compute_direction_field(label_np, normalize=self.normalize)
-
-            if is_tensor:
-                direction = torch.from_numpy(direction).to(device)
-
-            d[f"{key}_direction"] = direction
-
-        return d
+    def _compute(self, label_np: np.ndarray) -> np.ndarray:
+        return compute_direction_field(label_np, normalize=self.normalize)

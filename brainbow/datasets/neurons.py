@@ -7,11 +7,12 @@ downsampled 2× in XY to match.
 """
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from brainbow.transforms.find_boundaries import find_boundaries as _find_boundaries
 
+from brainbow.datasets._patches import generate_patch_indices
 from brainbow.datasets.base import CircuitDataset
 from brainbow.preprocessors import HDF5Preprocessor, TIFFPreprocessor
 from brainbow.utils.io import find_folder
@@ -115,34 +116,8 @@ class NeuronsDataset(CircuitDataset):
         volume_shape: tuple,
         patch_size: tuple,
         overlap: float,
-    ) -> List[tuple]:
-        all_dim_indices: List[List[tuple]] = []
-        for dim in range(3):
-            vol_size = volume_shape[dim]
-            patch_dim = patch_size[dim]
-            stride = max(1, int(patch_dim * (1 - overlap)))
-            dim_indices: List[tuple] = []
-            start = 0
-            while start < vol_size:
-                end = min(start + patch_dim, vol_size)
-                if end - start < patch_dim and start > 0:
-                    start = max(0, end - patch_dim)
-                dim_indices.append((start, end))
-                if end >= vol_size:
-                    break
-                start += stride
-            all_dim_indices.append(dim_indices)
-
-        patch_indices: List[tuple] = []
-        for z_start, z_end in all_dim_indices[0]:
-            for y_start, y_end in all_dim_indices[1]:
-                for x_start, x_end in all_dim_indices[2]:
-                    patch_indices.append((
-                        slice(z_start, z_end),
-                        slice(y_start, y_end),
-                        slice(x_start, x_end),
-                    ))
-        return patch_indices
+    ) -> List[Tuple[slice, slice, slice]]:
+        return generate_patch_indices(volume_shape, patch_size, overlap)
 
     def _prepare_data(self) -> List[Dict[str, Any]]:
         data_list: List[Dict[str, Any]] = []

@@ -1,0 +1,264 @@
+# =====================================================================
+# Brainbow -- Example Annotated Config
+# =====================================================================
+# This file is the *materialised* result of:
+#
+#     defaults:
+#       - default      <- configs/default.yaml
+#       - snemi3d      <- configs/snemi3d.yaml      (defaults: [default])
+#       - combine      <- configs/combine.yaml      (defaults: [snemi3d])
+#       - boundary     <- configs/boundary.yaml     (defaults: [combine])
+#
+# i.e. what Hydra hands to ``main(cfg)`` when you run::
+#
+#     python scripts/train.py --config-name boundary
+#
+# Every key is annotated with its source so you can find the right
+# layer to edit.  Source labels:
+#
+#   D = configs/default.yaml
+#   S = configs/snemi3d.yaml   (overrides D)
+#   C = configs/combine.yaml   (overrides S; mostly volume lists)
+#   B = configs/boundary.yaml  (overrides C)
+#
+# This file is **for reading only**, NOT for training.  Edit the layer
+# YAMLs, not this one.  See ``doc/ORGANIZATION.md`` ("Hydra config
+# layering") and ``doc/STRUCTURE.md`` ("configs/") for the philosophy.
+# =====================================================================
+
+# ----- Experiment metadata -------------------------------------------
+experiment_name: boundary           # B  (D=brainbow, S=snemi3d, B=boundary)
+project_name: brainbow              # D
+output_dir: outputs                 # S
+seed: 42                            # D
+logger: tensorboard                 # D  (tensorboard | wandb)
+log_dir: logs                       # D
+
+# ---------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------
+data:
+  dataset: snemi3d                  # D, S, C   (single-source dispatcher key)
+  data_root: data/SNEMI3D           # S
+  batch_size: 4                     # S  (D=4)
+  num_workers: 8                    # S  (D=16)
+  cache_rate: 0.0                   # S  (D=0.5; 0=stream from disk)
+  pin_memory: true                  # D, S
+  persistent_workers: true          # D, S
+  image_size: null                  # D
+  slice_mode: false                 # S  (D=true; volumetric crops, not 2-D)
+  num_samples: 16000                # S  (D=null; crops/epoch across volumes)
+
+  # ----- Patch geometry -----
+  patch_size: [80, 256, 256]        # S  (Z, Y, X) voxels
+  min_foreground: 0.80              # S  reject crops with <80% FG voxels
+  find_boundaries: 1.0              # S  (D=0.0; probability of computing boundaries)
+
+  # ----- Resolution harmonisation -----
+  pixel_size: [30, 6, 6]            # S  (Z, Y, X) nm; SNEMI3D native
+  resolution_zoom_prob: 1.0         # S  (D=0.0; always apply for joint training)
+  resolution_zoom_range:            # S
+    - [30, 40]                      #     Z target nm range
+    - [6, 8]                        #     Y target nm range
+    - [6, 8]                        #     X target nm range
+  resolution_map:                   # S  per-volume native nm; prefix-matched
+    AC:       [30, 6, 6]            #     SNEMI3D
+    neurons:  [30, 6, 6]            #     neurons cylinder
+    minnie65: [40, 8, 8]            #     MICrONS
+
+  # ----- Elastic deformation (off by default) -----
+  elastic_prob: 0.0                 # D
+  elastic_sigma_range: [35, 50]     # D
+  elastic_magnitude_range: [10, 40] # D
+
+  # ----- Volumes -----
+  # ``train_volumes`` is the union of SNEMI3D AC4, the neurons cylinder,
+  # and 10 MICrONS minnie65 crops.  See snemi3d.yaml for the full list.
+  train_volumes: [...]              # S  (10+2 entries; truncated for readability)
+  val_volumes:   [...]              # S, C  (held out from train)
+  test_volumes:  [...]              # S      (= val_volumes)
+
+# ---------------------------------------------------------------------
+# Model -- CosmosTransfer3D (Cosmos-Transfer2.5-2B backbone)
+# ---------------------------------------------------------------------
+model:
+  type: cosmostransfer3d            # D, S   (cosmostransfer3d | vista3d)
+  variant: "2B"                     # S
+  dtype: "bf16"                     # S
+  pretrained: true                  # D, S   (auto-pull HF weights on first run)
+
+  in_channels: 1                    # D, S   raw EM
+  semantic_channels: 1              # D, S   FG/BG sigmoid
+  instance_channels: 10             # D, S   per-voxel embedding dim
+  boundary_channels: 16             # D, S   raw(1)+min/avg/max(9)+aff(6)
+  feature_size: 64                  # D, S
+  dropout: 0.0                      # S  (D=0.2)
+
+  # ----- Freezing schedule -----
+  freeze_vae_encoder: true          # S
+  freeze_dit_backbone: 2            # S  freeze first 2 DiT blocks
+  freeze_vae_decoder: true          # S
+  gradient_checkpointing: false     # S
+
+# ---------------------------------------------------------------------
+# Optimizer
+# ---------------------------------------------------------------------
+optimizer:
+  type: adamw                       # D, S
+  lr: 2.0e-4                        # S  (D=1e-3; head / new-parameter LR)
+  dit_backbone_lr: 2.0e-5           # S  10x lower for the pretrained DiT
+  weight_decay: 1.0e-4              # D, S
+  scheduler:
+    type: cosine_warmup             # S  (D=cosine; warmup variant)
+    warmup_epochs: 2                # S
+    T_max: 50                       # S  (D=100; matches max_epochs)
+    eta_min: 1.0e-6                 # D, S
+
+# ---------------------------------------------------------------------
+# Loss  -- nested-mapping schema
+# ---------------------------------------------------------------------
+# Each head below is a mapping where ``weight: 0`` disables the head
+# entirely (the sub-module is not even constructed; see GOTCHAS #3).
+# Boundary.yaml turns off the semantic / instance / geometry heads to
+# isolate the new boundary head; flip them back on for joint training.
+# ---------------------------------------------------------------------
+loss:
+  ignore_index: -100                # S  label value excluded from every loss
+  learned_task_weights: false       # S  Kendall uncertainty weighting
+
+  # ----- Semantic head (sigmoid, FG/BG) -----
+  weight_semantic:                  # B  (S=full mapping; B sets weight=0)
+    weight: 0.0                     # B  (S=1.0; head disabled here)
+    active_classes: 1               # S
+    class_weights: [0.1]            # S
+    label_smoothing: 0.0            # S
+    weight_ce: 1.0                  # S
+    weight_iou: 0.0                 # S
+    weight_dice: 1.0                # S
+
+  # ----- Instance head (discriminative embedding) -----
+  weight_instance:                  # B  (S=full mapping; B sets weight=0)
+    weight: 0.0                     # B  (S=1.0; head disabled here)
+    weight_pull: 1.0                # S  intra-cluster hinge
+    weight_push: 1.0                # S  inter-cluster hinge
+    weight_norm: 0.001              # S  centroid-norm regulariser
+    delta_v: 0.5                    # S  pull margin
+    delta_d: 1.5                    # S  push margin
+    normalize_embeddings: false     # S  L2-normalise pre-loss
+    anchor_to_centroid: false       # S
+    max_hard_pairs: 4096            # S  top-K hard-pair mining; 0=all
+    weight_edge: 1.0                # S
+    weight_bone: 1.0                # S
+
+  # ----- Geometry head (direction + cov + raw) -----
+  weight_geometry:                  # B  (S=full mapping; B sets weight=0)
+    weight: 0.0                     # B  (S=1.0; head disabled here)
+    dir_target: centroid            # S  centroid | skeleton
+    weight_dir: 1.0                 # S
+    weight_cov: 1.0                 # S
+    weight_raw: 1.0                 # S
+    loss_dir: l1                    # S  mse | l1 | smooth_l1
+    loss_cov: l1                    # S
+    loss_raw: l1                    # S
+
+  # ----- Boundary head (16ch; the active head in this config) -----
+  weight_boundary:                  # B  (S=full mapping; B keeps weight=1)
+    weight: 1.0                     # B  active
+    loss_loc: smooth_l1             # B  (S=l1; regression loss for ch 1-9)
+    loss_raw: l1                    # B  regression loss for ch 0
+    weight_min: 1.0                 # B
+    weight_avg: 1.0                 # B
+    weight_max: 1.0                 # B
+    weight_raw: 1.0                 # B
+    foreground_only_loc: true       # B  loc loss on FG voxels only
+    class_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]  # S  BCE pos_weight per aff ch
+    label_smoothing: 0.0            # S
+    weight_ce: 1.0                  # S  BCE on 6 affinity channels
+    weight_iou: 0.0                 # S  soft-Jaccard
+    weight_dice: 1.0                # S  soft-Dice
+    aff_eps: 1.0e-5                 # B  (S=1e-5; MONAI smooth_nr = smooth_dr)
+
+# ---------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------
+training:
+  training_modes:                   # D, S  (only "automatic" is wired today)
+    - automatic
+  max_epochs: 50                    # S  (D=100)
+  accelerator: auto                 # D, S
+  devices: auto                     # D, S
+  strategy: ddp                     # D, S  (DDP for even GPU mem distribution)
+  precision: bf16-mixed             # D, S
+  gradient_clip_val: 1.0            # D, S
+  accumulate_grad_batches: 1        # D, S
+  val_check_interval: 1.0           # D
+  limit_val_batches: 100            # S  (D=10)
+  check_val_every_n_epoch: 1        # D
+  num_sanity_val_steps: 2           # D, S
+  log_every_n_steps: 100            # S  (D=50)
+  enable_progress_bar: true         # D
+  enable_model_summary: true        # D
+  deterministic: false              # D
+  benchmark: true                   # D, S
+
+  # torch.compile on the DiT backbone (Cosmos only; no-op on Vista).
+  compile: "max-autotune"           # S  (D=false; "max-autotune" or true)
+  compile_fullgraph: true           # S  (D=false; see GOTCHAS #13)
+
+  fast_dev_run: false               # D
+  profiler: null                    # D
+  resume_from_checkpoint: null      # D  full Lightning resume path
+
+  # ----- Validation-time clusterer -----
+  clusterer:
+    name: soft_meanshift            # D, S  see GOTCHAS #1 about UMAP fallbacks
+    min_cluster_size: 50            # S
+    connectivity: 1                 # S  1=6-nbr, else 26-nbr
+    backend: auto                   # S  auto | self | cuml | scipy
+
+# ---------------------------------------------------------------------
+# Callbacks
+# ---------------------------------------------------------------------
+callbacks:
+  checkpoint:
+    enabled: true                   # D
+    dirpath: null                   # D  null -> Lightning default
+    filename: "{epoch:02d}-{val/automatic/loss:.4f}"  # D
+    save_top_k: 3                   # D
+    monitor: val/automatic/loss     # D
+    mode: min                       # D
+    save_last: true                 # D
+    verbose: true                   # D
+
+  early_stopping:
+    enabled: false                  # D
+    monitor: val/automatic/loss     # D
+    patience: 20                    # D
+    mode: min                       # D
+    verbose: true                   # D
+    min_delta: 0.0                  # D
+
+  lr_monitor:
+    enabled: true                   # D
+
+  image_logger:
+    enabled: true                   # D
+    every_n_epochs: 1               # D
+    max_images: 8                   # S  (D=4)
+    projection_algorithm: pca       # D  pca | svd | umap (UMAP -> PCA fallback)
+    projection_backend: auto        # D  auto | cuml | torch | umap-learn
+
+  cuda_empty_cache_before_val: true # S  (D=false; helps train/val mem peaks)
+
+  memory_logger:
+    enabled: true                   # D
+    log_every_n_steps: null         # D  null -> inherit training.log_every_n_steps
+
+# =====================================================================
+# Where to look next
+# =====================================================================
+#  - doc/WALKTHROUGH.md  -- end-to-end "follow one batch" narrative
+#  - doc/GOTCHAS.md      -- silent failures these knobs can trigger
+#  - doc/CONTRIBUTING.md -- recipes for adding a new dataset / loss / backbone
+#  - doc/ARCHITECT.md    -- channel layouts & math for every head
+# =====================================================================

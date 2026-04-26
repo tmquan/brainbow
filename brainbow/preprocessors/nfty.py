@@ -1,8 +1,10 @@
 """
-NIfTI format preprocessor for handling .nii and .nii.gz volumes.
+NIfTI preprocessor.
 
-Used for connectomics volumes stored as NIfTI, e.g. EM images and
-segmentation labels in NIfTI format (nnU-Net convention).
+Reads / writes ``.nii`` and ``.nii.gz`` volumes via :mod:`nibabel`.
+Used for connectomics volumes stored in the nnU-Net convention.
+
+See :class:`brainbow.preprocessors.BasePreprocessor` for the contract.
 """
 
 from pathlib import Path

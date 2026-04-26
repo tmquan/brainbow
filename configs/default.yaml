@@ -1,5 +1,24 @@
-# Brainbow Default Configuration
-# Base configuration for all connectomics training tasks.
+# =====================================================================
+# Brainbow -- root config (`default`)
+# =====================================================================
+# Inheritance chain
+# -----------------
+#   default        <-- you are here
+#     └── snemi3d  (CosmosTransfer3D + SNEMI3D / neurons / MICrONS)
+#           └── combine   (drops AC4 from train, keeps it in val)
+#                 └── boundary  (enables Boundary head, disables others)
+#
+# Every concrete recipe inherits from this file via ``defaults: [- default]``
+# (or transitively through ``snemi3d`` / ``combine``).  Keys here are the
+# safe, dataset-agnostic defaults; per-recipe tuning lives in the child.
+#
+# To see the exact merged tree for any recipe::
+#
+#   python scripts/show_config.py --config-name <recipe>
+#
+# (or open ``configs/example_annotated.yaml`` for a pre-rendered
+# ``default + snemi3d + boundary`` example with per-line provenance.)
+# =====================================================================
 
 # Experiment metadata
 experiment_name: brainbow
@@ -10,9 +29,15 @@ seed: 42
 logger: tensorboard  # Options: tensorboard, wandb
 log_dir: logs
 
+# Optional: weights-only warm start (loaded *before* trainer.fit).
+# Pass via the CLI (e.g. ``+ckpt_path=outputs/<run>/checkpoints/last.ckpt``)
+# or set here directly.  Mutually exclusive with
+# ``training.resume_from_checkpoint`` (full-state Lightning resume).
+ckpt_path: null
+
 # Data configuration
 data:
-  dataset: snemi3d  # Options: snemi3d, microns
+  dataset: snemi3d  # Options: snemi3d, microns, neurons
   data_root: data
   batch_size: 4
   num_workers: 16
@@ -33,6 +58,10 @@ data:
   train_volumes: null  # List of {vol, seg} dicts; null = dataset defaults
   val_volumes: null    # Defaults to train_volumes
   test_volumes: null   # Defaults to train_volumes
+  # MICRONS-only: include cleft / mitochondria channels in the input volume.
+  # Ignored by other datasets.
+  include_clefts: true
+  include_mito: false
 
 # Model configuration
 model:
@@ -59,34 +88,56 @@ optimizer:
     T_max: 100
     eta_min: 1.0e-6
 
-# Loss configuration
+# Loss configuration -- nested per-head schema.
+#
+# Each ``weight_<head>`` is either a scalar (head's overall weight; all
+# sub-loss kwargs default) OR a mapping ``{weight: ..., <kwarg>: ...}``
+# whose entries are forwarded to the head's sub-loss constructor.
+#
+# Recipes that need to override a single sub-loss kwarg can use the
+# nested form OR the legacy flat form (e.g. ``weight_ce`` at top level
+# is routed to the semantic head; ``boundary_*`` keys are routed to the
+# boundary head); both still work and produce identical results.
 loss:
-  # SemanticLoss is sigmoid-only (multi-label per-channel binary); the
-  # model wrapper applies sigmoid to the semantic head before the loss
-  # sees it.  Likewise BoundaryLoss treats channels 10-15 as
-  # already-sigmoided per-direction binary affinities.
-  active_classes: null        # null = all channels; set to N to only train the first N semantic channels
-  weight_semantic: 1.0
-  weight_ce: 1.0
-  weight_iou: 1.0
-  weight_dice: 1.0
-  weight_instance: 1.0
-  weight_pull: 1.0
-  weight_push: 1.0
-  weight_norm: 0.001
-  delta_v: 0.5
-  delta_d: 1.5
-  weight_edge: 10.0
-  weight_bone: 10.0
-  weight_geometry: 0.0
-  dir_target: centroid         # centroid or skeleton
-  weight_dir: 1.0
-  weight_cov: 0.0
-  weight_raw: 1.0
-  loss_dir: smooth_l1          # smooth_l1 (robust offsets), mse, or l1
-  loss_cov: mse                # mse (Frobenius-norm), l1, or smooth_l1
-  loss_raw: l1                 # l1 (sharp reconstruction), mse, or smooth_l1
-  ignore_index: -100
+  ignore_index: -100              # label value excluded from every loss term
+  learned_task_weights: false     # Kendall-style uncertainty weighting across heads
+
+  # Semantic head (sigmoid; multi-label binary per channel).  The model
+  # wrapper applies sigmoid to the semantic head before the loss sees it.
+  weight_semantic:
+    weight: 1.0
+    active_classes: null          # null = all channels; N = only first N
+    weight_ce: 1.0                # binary cross-entropy on sigmoid probs
+    weight_iou: 1.0               # soft-Jaccard
+    weight_dice: 1.0              # soft-Dice
+
+  # Instance head (discriminative embedding; pull / push / norm).
+  weight_instance:
+    weight: 1.0
+    weight_pull: 1.0              # intra-cluster pull, hinge at delta_v
+    weight_push: 1.0              # inter-cluster push, hinge at delta_d
+    weight_norm: 0.001            # mild centroid-norm regulariser
+    delta_v: 0.5
+    delta_d: 1.5
+    weight_edge: 10.0             # per-voxel multiplier on boundary voxels
+    weight_bone: 10.0             # per-voxel multiplier on medial-axis voxels
+
+  # Geometry head (direction + covariance + raw).
+  weight_geometry:
+    weight: 0.0                   # disabled by default; enable per-recipe
+    dir_target: centroid          # "centroid" or "skeleton"
+    weight_dir: 1.0
+    weight_cov: 0.0
+    weight_raw: 1.0
+    loss_dir: smooth_l1           # smooth_l1 / mse / l1
+    loss_cov: mse                 # mse / l1 / smooth_l1
+    loss_raw: l1                  # l1 / mse / smooth_l1
+
+  # Boundary head (16-channel; raw + min/avg/max + 6 affinities).  Off
+  # by default; the ``boundary`` recipe enables it and disables the
+  # other three.
+  weight_boundary:
+    weight: 0.0
 
 # Training configuration
 training:

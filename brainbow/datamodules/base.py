@@ -1,5 +1,31 @@
 """
-Base DataModule for connectomics datasets.
+Base PyTorch Lightning DataModule for connectomics datasets.
+
+Why this file exists
+--------------------
+Every dataset in brainbow shares the same MONAI augmentation pipeline,
+the same train/val/test DataLoader plumbing, and the same hooks for
+loss-target precomputation (instance relabel after crop, direction /
+covariance fields, find-boundaries).  Keeping all of that in one place
+means a new dataset is a 30-50 line subclass that only declares
+``dataset_class``.
+
+Public surface
+--------------
+* :class:`CircuitDataModule` -- shared base.
+
+Required overrides for subclasses
+---------------------------------
+* :attr:`dataset_class` -- a :class:`CircuitDataset` subclass.
+
+Optional overrides
+------------------
+* :meth:`_get_dataset_kwargs` -- add per-dataset kwargs to the
+  ``__init__`` of :attr:`dataset_class`.
+* :meth:`_instance_transforms`, :meth:`_semantic_transforms`,
+  :meth:`_geometry_transforms` -- inject extra label-target transforms
+  before the volume is handed to the loss.
+* :meth:`_get_spatial_dims` -- 3 by default; override for 2-D datasets.
 """
 
 from abc import ABC
@@ -8,24 +34,29 @@ from typing import Dict, List, Optional, Tuple, Type, Union
 import torch
 import pytorch_lightning as pl
 from monai.transforms import (
-    CenterSpatialCropd,
     Compose,
-    EnsureChannelFirstd,
+    CenterSpatialCropd,
     EnsureTyped,
-    Rand3DElasticd,
-    RandAdjustContrastd,
-    RandFlipd,
-    RandGaussianNoised,
-    RandRotate90d,
-    RandSpatialCropd,
+    EnsureChannelFirstd,
     Resized,
+    RandFlipd,
     SpatialPadd,
+    RandRotate90d,
+    Rand3DElasticd,
+    RandSpatialCropd,
+    RandAdjustContrastd,
+    RandGaussianNoised,
 )
 
 from brainbow.datasets.base import CircuitDataset
 from brainbow.transforms import (
-    FindBoundariesd, Labeld, Directiond, Covarianced,
-    RandSpatialCropForegroundd, RandResolutionZoomd, RandTransposeXYd,
+    FindBoundariesd, 
+    Labeld, 
+    Directiond, 
+    Covarianced,
+    RandTransposeXYd,
+    RandResolutionZoomd, 
+    RandSpatialCropForegroundd, 
 )
 
 
@@ -438,6 +469,41 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
                 transform=self.get_val_transforms(),
                 **extra,
             )
+
+    # ------------------------------------------------------------------
+    # Lazy 3-D patch mode (shared by SNEMI3D / MICRONS / Neurons leaves)
+    # ------------------------------------------------------------------
+
+    def _build_lazy_split(
+        self,
+        volumes: Optional[List[Dict[str, str]]],
+        patch_size: Optional[Tuple[int, ...]],
+        transform,
+        num_samples: int,
+    ):
+        """Build a single :class:`LazyVolDataset` split.
+
+        Returns ``None`` when ``volumes`` is empty or ``patch_size`` is
+        ``None`` (the caller is then responsible for deciding whether
+        that's an error or a no-op for this split).
+
+        All three lazy-mode datamodules (:class:`SNEMI3DDataModule`,
+        :class:`MICRONSDataModule`, :class:`NeuronsDataModule`) used to
+        carry an identical ~30-line block per split; this helper is the
+        single shared implementation.
+        """
+        if not volumes or patch_size is None:
+            return None
+        from brainbow.datasets.lazy import LazyVolDataset
+
+        return LazyVolDataset(
+            root_dir=self.data_root,
+            volumes=volumes,
+            patch_size=patch_size,
+            transform=transform,
+            num_samples=num_samples,
+            min_foreground=self.min_foreground,
+        )
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         return torch.utils.data.DataLoader(

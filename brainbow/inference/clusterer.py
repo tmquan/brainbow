@@ -626,7 +626,7 @@ class HoughVoting(nn.Module):
         self,
         offsets: torch.Tensor,
         foreground_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Cluster via Hough voting on predicted offsets.
 
         Args:
@@ -634,7 +634,15 @@ class HoughVoting(nn.Module):
             foreground_mask: [B, *spatial] boolean mask (optional).
 
         Returns:
-            labels: [B, *spatial] integer instance labels (0 = bg).
+            ``(labels, soft_assign, centers)`` to honour the shared
+            :class:`_BaseUnsupervisedClusterer` contract.  Hough voting
+            is hard (no soft assignment) and bin-coordinate based (no
+            embedding-space centers), so the latter two are always
+            ``None``.
+
+            * ``labels``: ``[B, *spatial]`` long tensor (``0`` = bg).
+            * ``soft_assign``: ``None``.
+            * ``centers``: ``None``.
         """
         B, S = offsets.shape[:2]
         spatial_shape = offsets.shape[2:]
@@ -701,7 +709,7 @@ class HoughVoting(nn.Module):
             label_flat[fg_indices] = nearest
             all_labels.append(_reshape_to_spatial(label_flat, spatial_shape))
 
-        return torch.stack(all_labels)
+        return torch.stack(all_labels), None, None
 
 
 # ---------------------------------------------------------------------------

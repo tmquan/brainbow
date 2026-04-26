@@ -49,9 +49,10 @@ class CosmosTransfer3DWrapper(nn.Module):
 
     - ``semantic``  [B, num_classes, D, H, W]
     - ``instance``  [B, instance_channels, D, H, W]
-    - ``geometry``  [B, G, D, H, W]  where G = 1 + S + S*(S+1)//2
-                                     = 1 (raw) + 3 (dir) + 6 (cov upper-tri) = 10
-                                     (3-D; layout matches BoundaryLoss ch 0 = raw)
+    - ``geometry``  [B, G, D, H, W]  where
+      ``G = 1 + S * (S + 1) // 2 + S = 1 (raw) + 6 (cov upper-tri) + 3 (dir) = 10``
+      in 3-D.  Layout (must match :class:`brainbow.losses.GeometryLoss`):
+      ch 0 = raw, ch 1..6 = covariance upper-triangle, ch 7..9 = direction.
     - ``boundary``  [B, boundary_channels, D, H, W]
       (1 raw + 9 min/avg/max RGB + 6 face-affinity by default = 16)
 

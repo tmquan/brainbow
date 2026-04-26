@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
-"""Download Zenodo record 582636 — 3D image of an assembly of rice grains.
+"""Download Zenodo record 582636.
 
-689 TIFF images (~3.93 GB). Uses parallel downloads with progress tracking
-and MD5 checksum verification. Resumes interrupted downloads automatically.
+Zenodo 582636 is an X-ray microtomography volume of an assembly of rice
+grains (689 TIFF slices, ~3.93 GB).  It is unrelated to neurons but is a
+useful **3D instance-segmentation benchmark**: densely-packed,
+touching, anisotropic-ish objects whose individual labels are easy to
+verify by eye.  Within brainbow it is occasionally used as a
+non-connectomics smoke test for the data-loading + clustering pipeline.
+
+This script is also a good template for any other Zenodo record:
+change ``RECORD_ID`` and re-run.
+
+Features:
+  * parallel downloads with a progress tracker,
+  * MD5 checksum verification,
+  * resumable per-file downloads (existing files are skipped if their
+    size and -- with verify -- their checksum match).
 """
 
 import argparse
