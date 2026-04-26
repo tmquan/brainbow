@@ -62,6 +62,25 @@ torch.serialization.add_safe_globals([
     DictConfig, ListConfig, ContainerMetadata, ValueNode, AnyNode,
 ])
 
+# PyTorch >= 2.6 made ``weights_only=True`` the default for ``torch.load``.
+# Lightning checkpoints pickle non-tensor objects (``collections.defaultdict``
+# in callback / metric state, ``DictConfig`` for hparams, optimizer state
+# with custom types) that the weights-only unpickler refuses on top of the
+# ``add_safe_globals`` allow-list above -- e.g. ``defaultdict`` is whitelisted
+# as a *type*, but the ``SETITEM`` opcode is hardcoded to only accept
+# ``dict / OrderedDict / Counter`` as the target, so resume still fails.
+# Our checkpoints come from our own runs, so default to ``weights_only=False``
+# at the entry point.  Callers can still pass ``weights_only=True`` explicitly.
+_orig_torch_load = torch.load
+
+
+def _torch_load_trusted(*args: Any, **kwargs: Any) -> Any:
+    kwargs.setdefault("weights_only", False)
+    return _orig_torch_load(*args, **kwargs)
+
+
+torch.load = _torch_load_trusted  # type: ignore[assignment]
+
 from pytorch_lightning.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
