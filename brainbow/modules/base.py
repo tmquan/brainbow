@@ -225,8 +225,12 @@ class BaseCircuitModule(pl.LightningModule):
     ) -> Dict[str, torch.Tensor]:
         """Build the targets dict consumed by ``self.criterion``.
 
-        Boundary/membrane voxels are applied upstream by the data pipeline
-        (``data.find_boundaries`` → ``FindBoundariesd``), not here.
+        Also pre-builds ``targets["_cached_weights"]`` (instance pixel
+        weights + geometry targets) **inside this no-grad scope** so the
+        autograd tape doesn't track those ops on the way to the model
+        forward.  Boundary/membrane voxels are applied upstream by the
+        data pipeline (``data.find_boundaries`` → ``FindBoundariesd``),
+        not here.
         """
         ndim_with_channel = self._SPATIAL_DIMS + 2
         squeeze = self._SQUEEZE_PATTERN
@@ -257,6 +261,11 @@ class BaseCircuitModule(pl.LightningModule):
         for key in ("label_direction", "label_covariance"):
             if key in batch:
                 targets[key] = batch[key]
+        # Hoisted from training_step: keep the cache build inside this
+        # @no_grad context to skip autograd-tape overhead on every op.
+        targets["_cached_weights"] = self.criterion._compute_targets(
+            targets["labels"], targets,
+        )
         return targets
 
     def _expand_image_channel(self, images: torch.Tensor) -> torch.Tensor:
@@ -275,33 +284,52 @@ class BaseCircuitModule(pl.LightningModule):
         batch = self._strip_meta_tensor(batch)
         images = self._expand_image_channel(batch["image"])
 
+        # ``_prepare_targets`` is @no_grad and now also builds
+        # ``_cached_weights`` so the geometry / instance precompute ops
+        # don't pay autograd-tape overhead on every step.
         targets = self._prepare_targets(batch)
-        targets["_cached_weights"] = self.criterion._compute_targets(
-            targets["labels"], targets,
-        )
 
         predictions = self.model(images)
         losses = self.criterion(predictions, targets)
         total_loss = losses["loss"]
 
-        if total_loss.isnan().any() or total_loss.isinf().any():
-            nan_keys = [
-                k for k, v in losses.items()
-                if isinstance(v, torch.Tensor) and (v.isnan().any() or v.isinf().any())
-            ]
-            warnings.warn(
-                f"NaN/Inf total loss at step {self.global_step} — "
-                f"skipping backward (keys={nan_keys}).",
-                stacklevel=2,
-            )
-            return None
+        # Finite-loss guard.  ``total_loss.isnan().any() or .isinf().any()``
+        # would force a device→host sync **every step** (each ``.any()``
+        # materialises a Python bool).  With ``gradient_clip_val=1.0`` and
+        # ``bf16-mixed`` already in place, the guard is belt-and-suspenders;
+        # we run it on a configurable cadence instead.  Default cadence is
+        # ``training.log_every_n_steps`` so it lines up with TB logging
+        # already paying for a sync.
+        check_every = int(self.training_config.get(
+            "check_loss_finite_every_n_steps",
+            self.training_config.get("log_every_n_steps", 100),
+        ))
+        if check_every > 0 and self.global_step % check_every == 0:
+            if not torch.isfinite(total_loss).all():
+                nan_keys = [
+                    k for k, v in losses.items()
+                    if isinstance(v, torch.Tensor) and not torch.isfinite(v).all()
+                ]
+                warnings.warn(
+                    f"NaN/Inf total loss at step {self.global_step} — "
+                    f"skipping backward (keys={nan_keys}).",
+                    stacklevel=2,
+                )
+                return None
 
         prefix = self._scalar_prefix("train")
         bs = images.shape[0]
+        disabled = self._disabled_heads
         for name, value in losses.items():
             # ``loss`` (the global total) is the only scalar we surface on
             # the progress bar / per-step; the rest are epoch-averaged.
             is_total = name == "loss"
+            # Skip logging for entries that belong to a head whose weight
+            # is zero — the criterion fills them with the shared ``zero``
+            # placeholder so they carry no information and only inflate
+            # Lightning's per-step logger overhead.
+            if not is_total and self._is_disabled_loss_key(name, disabled):
+                continue
             self.log(
                 f"{prefix}/{name}", value,
                 on_step=is_total,
@@ -311,6 +339,19 @@ class BaseCircuitModule(pl.LightningModule):
             )
 
         return total_loss
+
+    @staticmethod
+    def _is_disabled_loss_key(name: str, disabled: frozenset) -> bool:
+        """Return True if ``name`` belongs to a disabled (weight=0) head.
+
+        Loss-dict keys come in two shapes: a bare head name (``semantic``,
+        ``instance``, ``geometry``, ``boundary``) and head sub-terms which
+        are flat (``ce``, ``dice``, ``pull``, ``aff_ce`` ...).  We only
+        skip the bare head entries — sub-terms of an enabled head still
+        log normally; disabling a head means its bare key is filled with
+        the shared zero tensor, which carries no signal.
+        """
+        return name in disabled
 
     # ------------------------------------------------------------------
     # Evaluation — accumulate per-batch, all-reduce once per epoch

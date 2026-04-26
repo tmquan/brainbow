@@ -199,15 +199,23 @@ class GeometryLoss(nn.Module):
 
         Foreground presence is inferred from non-zero direction vectors
         (background voxels have a zero direction by construction).
+
+        We pay one device→host sync up-front via ``has_fg.tolist()``
+        instead of one per batch element via ``if not has_fg[b]`` — the
+        latter triggers a separate ``cudaStreamSynchronize`` on every
+        iteration of the Python loop, which is amplified under
+        ``torch.compile``-deepened launch queues.
         """
         dir_flat = rearrange(direction, "b c ... -> b c (...)")
         cov_flat = rearrange(covariance, "b c ... -> b c (...)")
-        has_fg = reduce(dir_flat.abs(), "b c n -> b", "sum") > 0
+        has_fg_list = (
+            reduce(dir_flat.abs(), "b c n -> b", "sum") > 0
+        ).tolist()
 
         dir_targets: List[Optional[torch.Tensor]] = []
         cov_targets: List[Optional[torch.Tensor]] = []
-        for b in range(dir_flat.shape[0]):
-            if not has_fg[b]:
+        for b, has_fg in enumerate(has_fg_list):
+            if not has_fg:
                 dir_targets.append(None)
                 cov_targets.append(None)
                 continue

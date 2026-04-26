@@ -193,6 +193,27 @@ class CombinedLoss(nn.Module):
             BoundaryLoss(**bnd_kwargs) if w_bnd > 0 else None
         )
 
+        # Shared zero-scalar placeholder used to fill loss-dict entries
+        # for disabled heads.  Allocated lazily on the right device on
+        # first ``forward`` and cached as a non-persistent buffer so the
+        # module's ``state_dict`` doesn't acquire it.  Avoids a fresh
+        # ``torch.tensor(0.0, device=...)`` allocation every step.
+        self.register_buffer(
+            "_zero_scalar", torch.tensor(0.0), persistent=False,
+        )
+
+    def _zero(self, device: torch.device) -> torch.Tensor:
+        """Return the cached 0-dim float scalar on ``device``.
+
+        The buffer is float32 (Lightning logs scalars as float anyway);
+        if the criterion is moved to a different device by Lightning we
+        re-materialise lazily and update the buffer in place.
+        """
+        z = self._zero_scalar
+        if z.device != device:
+            self._zero_scalar = z = torch.zeros((), device=device)
+        return z
+
     # ------------------------------------------------------------------
     # Target precomputation (called once per step by the Lightning module)
     # ------------------------------------------------------------------
@@ -234,7 +255,7 @@ class CombinedLoss(nn.Module):
         targets: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         labels = targets["labels"]
-        zero = torch.tensor(0.0, device=labels.device)
+        zero = self._zero(labels.device)
 
         cached = targets.get("_cached_weights")
         if cached is not None:
