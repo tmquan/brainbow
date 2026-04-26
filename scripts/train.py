@@ -164,6 +164,7 @@ def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
         "cache_rate": data_cfg.get("cache_rate", 0.5),
         "pin_memory": data_cfg.get("pin_memory", True),
         "persistent_workers": bool(data_cfg.get("persistent_workers", True)),
+        "prefetch_factor": int(data_cfg.get("prefetch_factor", 6)),
         "train_volumes": _to_vol_list(data_cfg.get("train_volumes")),
         "val_volumes": _to_vol_list(data_cfg.get("val_volumes")),
         "test_volumes": _to_vol_list(data_cfg.get("test_volumes")),

@@ -79,12 +79,25 @@ def _get_shape(path: Path, key: Optional[str] = None) -> Tuple[int, ...]:
         raise ValueError(f"Unsupported file format: {suffix}")
 
 
+# HDF5 chunk cache size, per open file, per worker thread.  The h5py
+# default is 1 MB which is much smaller than typical EM volume chunks
+# (gzip-compressed minnie65 chunks are ~1-16 MB each).  Bumping this
+# means random patches drawn close together inside one volume hit the
+# decompressed-chunk cache and avoid repeated zlib decompression.
+_H5_CHUNK_CACHE_BYTES = 128 * 1024 * 1024  # 128 MB
+_H5_CHUNK_CACHE_NSLOTS = 10007              # prime, h5py-recommended
+
+
 def _get_h5_handle(path: str):
     """Return a cached HDF5 file handle for the current worker thread.
 
     Handles are stored in thread-local storage so each DataLoader worker
     keeps its own set of open files.  This avoids the overhead of
     opening and parsing the HDF5 superblock on every sample.
+
+    The chunk cache is sized via ``rdcc_nbytes`` / ``rdcc_nslots`` so
+    repeated reads from neighbouring regions of the same volume do not
+    re-decompress chunks.
     """
     import h5py
     cache = getattr(_thread_local, "h5_cache", None)
@@ -93,9 +106,53 @@ def _get_h5_handle(path: str):
         _thread_local.h5_cache = cache
     handle = cache.get(path)
     if handle is None:
-        handle = h5py.File(path, "r", swmr=True, locking=False)
+        handle = h5py.File(
+            path, "r", swmr=True, locking=False,
+            rdcc_nbytes=_H5_CHUNK_CACHE_BYTES,
+            rdcc_nslots=_H5_CHUNK_CACHE_NSLOTS,
+        )
         cache[path] = handle
     return handle
+
+
+def _get_h5_dataset(path: str, key: str):
+    """Return a cached ``h5py.Dataset`` object for the current worker thread.
+
+    h5py resolves ``f[key]`` on every access; for a hot read loop that
+    cost is non-zero.  Caching the dataset object eliminates that
+    lookup so each ``__getitem__`` falls straight into the chunked-read
+    path.
+    """
+    cache = getattr(_thread_local, "h5_ds_cache", None)
+    if cache is None:
+        cache = {}
+        _thread_local.h5_ds_cache = cache
+    ck = (path, key)
+    ds = cache.get(ck)
+    if ds is None:
+        f = _get_h5_handle(path)
+        ds = f[key]
+        cache[ck] = ds
+    return ds
+
+
+def _get_tiff_memmap(path: str):
+    """Return a cached ``tifffile.memmap`` array for the current worker thread.
+
+    ``tifffile.memmap`` parses the TIFF directory and sets up an
+    ``np.memmap`` on every call; for hot patch reads we want to do that
+    exactly once per worker.
+    """
+    cache = getattr(_thread_local, "tiff_cache", None)
+    if cache is None:
+        cache = {}
+        _thread_local.tiff_cache = cache
+    arr = cache.get(path)
+    if arr is None:
+        import tifffile
+        arr = tifffile.memmap(path)
+        cache[path] = arr
+    return arr
 
 
 def _read_patch(
@@ -109,14 +166,13 @@ def _read_patch(
     if suffix in (".h5", ".hdf5"):
         if key is None:
             key = _resolve_hdf5_key(path)
-        f = _get_h5_handle(str(path))
-        data = f[key][slices]
+        ds = _get_h5_dataset(str(path), key)
+        data = ds[slices]
         if dtype is not None:
             data = data.astype(dtype)
         return data
     elif suffix in (".tif", ".tiff"):
-        import tifffile
-        arr = tifffile.memmap(str(path))
+        arr = _get_tiff_memmap(str(path))
         data = np.array(arr[slices])
         if dtype is not None:
             data = data.astype(dtype)
@@ -195,6 +251,10 @@ class LazyVolDataset(Dataset):
 
         if not self._handles:
             raise ValueError(f"No volumes found in {root_dir}")
+
+        # Cache as a numpy array for O(log N) np.searchsorted in _pick_volume.
+        # Kept alongside the original list to preserve the public attribute.
+        self._cum_voxels_arr = np.asarray(self._cum_voxels, dtype=np.int64)
 
         total = sum(np.prod(h.shape) for h in self._handles)
         logger.info(
@@ -332,14 +392,20 @@ class LazyVolDataset(Dataset):
         return self.num_samples
 
     def _pick_volume(self, index: int) -> _VolumeHandle:
-        """Select a volume, weighted by total voxel count."""
-        rng = np.random.RandomState(index)
-        total = self._cum_voxels[-1]
-        r = rng.randint(0, total)
-        for i, cum in enumerate(self._cum_voxels):
-            if r < cum:
-                return self._handles[i]
-        return self._handles[-1]
+        """Select a volume, weighted by total voxel count.
+
+        Uses ``np.searchsorted`` (O(log N)) over a cached cumulative-voxels
+        array and the modern PCG64 generator (``np.random.default_rng``),
+        which is ~3-5x faster to instantiate than the legacy
+        ``np.random.RandomState`` (MT19937).
+        """
+        rng = np.random.default_rng(index)
+        total = int(self._cum_voxels_arr[-1])
+        r = int(rng.integers(0, total))
+        i = int(np.searchsorted(self._cum_voxels_arr, r, side="right"))
+        if i >= len(self._handles):
+            i = len(self._handles) - 1
+        return self._handles[i]
 
     def _random_patch_slices(
         self, shape: Tuple[int, ...], rng: np.random.RandomState,
@@ -361,15 +427,23 @@ class LazyVolDataset(Dataset):
 
     def _check_foreground(
         self, handle: _VolumeHandle, crop_slices: Tuple[slice, ...],
-    ) -> bool:
-        """Return True if the label patch has enough foreground."""
-        if self.min_foreground <= 0 or handle.label_path is None:
-            return True
+    ) -> Tuple[bool, Optional[np.ndarray]]:
+        """Check whether the label patch has enough foreground.
+
+        Returns ``(ok, label)``.  The label is returned alongside the
+        boolean so ``__getitem__`` can reuse the I/O it just paid for —
+        previously the same chunk was read twice when ``min_foreground``
+        was active (once here, once in the read path below).
+        """
+        if handle.label_path is None:
+            return True, None
+        if self.min_foreground <= 0:
+            return True, None
         label = _read_patch(
             handle.label_path, crop_slices, handle.label_key, dtype=np.int64,
         )
         fg_frac = float(np.count_nonzero(label)) / label.size
-        return fg_frac >= self.min_foreground
+        return fg_frac >= self.min_foreground, label
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         seed = index if self.deterministic else index + int(torch.randint(0, 2**31, (1,)).item())
@@ -383,8 +457,13 @@ class LazyVolDataset(Dataset):
         else:
             full_slices = crop_slices
 
+        # Re-sample crops until the label patch passes the foreground
+        # check; carry the successful label read forward so we don't
+        # decode the same chunk again below.
+        cached_label: Optional[np.ndarray] = None
         for _ in range(self.max_foreground_retries):
-            if self._check_foreground(handle, full_slices):
+            ok, cached_label = self._check_foreground(handle, full_slices)
+            if ok:
                 break
             crop_slices = self._random_patch_slices(spatial, rng)
             full_slices = ((slice(None),) + crop_slices
@@ -406,9 +485,12 @@ class LazyVolDataset(Dataset):
         }
 
         if handle.label_path is not None:
-            label = _read_patch(
-                handle.label_path, full_slices, handle.label_key, dtype=np.int64,
-            )
+            if cached_label is not None:
+                label = cached_label
+            else:
+                label = _read_patch(
+                    handle.label_path, full_slices, handle.label_key, dtype=np.int64,
+                )
             sample["label"] = label
 
         if self.transform is not None:

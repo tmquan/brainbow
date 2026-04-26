@@ -94,6 +94,11 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         val_volumes: Volume list for validation (defaults to train_volumes).
         test_volumes: Volume list for testing (defaults to train_volumes).
         persistent_workers: Keep workers alive between epochs.
+        prefetch_factor: How many batches each DataLoader worker pre-stages
+            ahead of the trainer.  Higher values smooth out tail-latency
+            spikes from slow HDF5 chunk decodes (lazy loaders) at the cost
+            of ``num_workers * prefetch_factor * batch`` extra RAM.  Set
+            via the ``data.prefetch_factor`` Hydra knob; default ``6``.
     """
 
     dataset_class: Type[CircuitDataset] = CircuitDataset  # type: ignore[type-abstract]
@@ -111,6 +116,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         val_volumes: Optional[List[Dict[str, str]]] = None,
         test_volumes: Optional[List[Dict[str, str]]] = None,
         persistent_workers: bool = True,
+        prefetch_factor: int = 6,
         compute_geometry: bool = True,
         find_boundaries: float = 0.0,
         min_foreground: float = 0.0,
@@ -136,6 +142,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         self.val_volumes = val_volumes if val_volumes is not None else train_volumes
         self.test_volumes = test_volumes if test_volumes is not None else train_volumes
         self.persistent_workers = persistent_workers and num_workers > 0
+        self.prefetch_factor = int(prefetch_factor)
         self.compute_geometry = compute_geometry
         self.find_boundaries = float(find_boundaries)
         self.min_foreground = float(min_foreground)
@@ -513,7 +520,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
-            prefetch_factor=4 if self.num_workers > 0 else None,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             multiprocessing_context="forkserver" if self.num_workers > 0 else None,
             drop_last=True,
         )
@@ -526,7 +533,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
-            prefetch_factor=4 if self.num_workers > 0 else None,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             multiprocessing_context="forkserver" if self.num_workers > 0 else None,
         )
 
@@ -538,7 +545,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
-            prefetch_factor=4 if self.num_workers > 0 else None,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             multiprocessing_context="forkserver" if self.num_workers > 0 else None,
         )
 
