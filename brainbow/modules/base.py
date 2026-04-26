@@ -319,17 +319,14 @@ class BaseCircuitModule(pl.LightningModule):
 
         prefix = self._scalar_prefix("train")
         bs = images.shape[0]
-        disabled = self._disabled_heads
         for name, value in losses.items():
             # ``loss`` (the global total) is the only scalar we surface on
             # the progress bar / per-step; the rest are epoch-averaged.
+            # Disabled-head entries are already absent from ``losses`` —
+            # ``CombinedLoss.forward`` only adds e.g. ``semantic/...``
+            # keys when ``self.semantic_loss is not None`` — so we don't
+            # need an extra disabled-head filter here.
             is_total = name == "loss"
-            # Skip logging for entries that belong to a head whose weight
-            # is zero — the criterion fills them with the shared ``zero``
-            # placeholder so they carry no information and only inflate
-            # Lightning's per-step logger overhead.
-            if not is_total and self._is_disabled_loss_key(name, disabled):
-                continue
             self.log(
                 f"{prefix}/{name}", value,
                 on_step=is_total,
@@ -339,19 +336,6 @@ class BaseCircuitModule(pl.LightningModule):
             )
 
         return total_loss
-
-    @staticmethod
-    def _is_disabled_loss_key(name: str, disabled: frozenset) -> bool:
-        """Return True if ``name`` belongs to a disabled (weight=0) head.
-
-        Loss-dict keys come in two shapes: a bare head name (``semantic``,
-        ``instance``, ``geometry``, ``boundary``) and head sub-terms which
-        are flat (``ce``, ``dice``, ``pull``, ``aff_ce`` ...).  We only
-        skip the bare head entries — sub-terms of an enabled head still
-        log normally; disabling a head means its bare key is filled with
-        the shared zero tensor, which carries no signal.
-        """
-        return name in disabled
 
     # ------------------------------------------------------------------
     # Evaluation — accumulate per-batch, all-reduce once per epoch
