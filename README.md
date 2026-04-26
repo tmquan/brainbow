@@ -77,6 +77,39 @@ python scripts/train.py --config-name boundary
 python scripts/train.py --config-name boundary data.batch_size=4 training.devices=4
 ```
 
+### GPU memory: avoiding slow OOM drift on long runs
+
+On long DDP runs (especially with `freeze_dit_backbone: <N>` phased
+unfreeze, `compile: max-autotune`, or `max_hard_pairs: 0`) the PyTorch
+caching allocator's reserved pool tends to creep upward over hours
+even though live tensors are stable.  Two settings make the
+difference between "stable at 90 %" and "OOM at epoch 30":
+
+```bash
+# 1.  Enable expandable allocator segments BEFORE launching python.
+#     Mitigates fragmentation; near-zero runtime cost.  Read at CUDA
+#     init, so it must be exported (cannot be applied in-process).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# 2.  Empty the cache around validation (callback already on by
+#     default in snemi3d.yaml; turn on for custom configs):
+#         callbacks.cuda_empty_cache_before_val: true
+#     This now empties on BOTH sides of validation so the val-time
+#     high-water mark does not stay reserved in the training pool.
+
+python scripts/train.py --config-name snemi3d
+```
+
+Watch the trajectory in TensorBoard under the `cuda_memory/*` tags
+(emitted by `CudaMemoryLoggerCallback`, on by default):
+
+| Pattern                                                | Diagnosis                                                     |
+|--------------------------------------------------------|---------------------------------------------------------------|
+| `allocated_gb` flat, `reserved_gb` rising              | fragmentation — set `PYTORCH_CUDA_ALLOC_CONF` as above.       |
+| `allocated_gb` and `reserved_gb` both rising           | tensor leak — inspect callbacks (image_logger, custom hooks). |
+| sawtooth coupled to val epochs                         | val peak polluting train pool — enable the callback above.    |
+| sudden step at the epoch boundary set by `freeze_dit_backbone` | DiT unfreeze added grads + AdamW state; expected. Enable `model.gradient_checkpointing: true` for headroom. |
+
 ## Loss
 
 ```python

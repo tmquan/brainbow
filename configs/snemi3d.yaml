@@ -259,7 +259,13 @@ loss:
     delta_d: 1.5                   # push margin: half the minimum centroid separation
     normalize_embeddings: false    # L2-normalise embeddings before loss (cosine-like)
     anchor_to_centroid: false      # anchor pull to running centroid instead of batch centroid
-    max_hard_pairs: 0              # 0 = all pairs; >0 = hard-negative mining budget
+    max_hard_pairs: 4096           # 0 = all pairs (memory grows ~K(K-1)/2 with
+                                   #   crops that contain hundreds of instances —
+                                   #   pushes the allocator high-water mark up
+                                   #   and feeds steady-state OOM drift);
+                                   # >0 = top-k hardest pairs only (bounded
+                                   #   memory + concentrates gradient on the
+                                   #   pairs that actually need separation).
     weight_edge: 1.0               # per-voxel multiplier on boundary voxels (1.0 = off)
     weight_bone: 1.0               # per-voxel multiplier on medial-axis voxels (1.0 = off)
 

@@ -213,6 +213,16 @@ def setup_callbacks(cfg: DictConfig) -> List[pl.Callback]:
         from brainbow.callbacks.memory import CudaEmptyCacheCallback
         callbacks.append(CudaEmptyCacheCallback())
 
+    mem_cfg = callback_cfg.get("memory_logger", {})
+    if mem_cfg.get("enabled", True):
+        from brainbow.callbacks.memory import CudaMemoryLoggerCallback
+        mem_every = mem_cfg.get("log_every_n_steps")
+        if mem_every is None:
+            mem_every = cfg.get("training", {}).get("log_every_n_steps", 50)
+        callbacks.append(CudaMemoryLoggerCallback(
+            log_every_n_steps=int(mem_every),
+        ))
+
     ckpt_cfg = callback_cfg.get("checkpoint", {})
     if ckpt_cfg.get("enabled", True):
         callbacks.append(ModelCheckpoint(

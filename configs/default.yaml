@@ -182,5 +182,19 @@ callbacks:
     projection_algorithm: pca
     projection_backend: auto
 
-  # Clear GPU cache before validation (helps large 3D models at train/val boundary).
+  # Clear the CUDA allocator cache on *both* sides of validation
+  # (before + after).  Helps large 3-D models at the train/val boundary
+  # by stopping the val-time peak from staying reserved in the training
+  # pool across epochs.
   cuda_empty_cache_before_val: false
+
+  # Log CUDA memory to TensorBoard under ``cuda_memory/*``.  Use to
+  # diagnose slow drift toward OOM:
+  #   - ``allocated_gb`` flat, ``reserved_gb`` rising → fragmentation
+  #     (re-launch with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True).
+  #   - both rising → tensor leak; chase callback / image-logger refs.
+  #   - sawtooth tied to val epochs → val peak polluting train pool;
+  #     turn on ``cuda_empty_cache_before_val`` above.
+  memory_logger:
+    enabled: true
+    log_every_n_steps: null  # null → inherit ``training.log_every_n_steps``
