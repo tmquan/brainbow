@@ -497,6 +497,7 @@ class InstanceLoss(nn.Module):
         self,
         embed: torch.Tensor,
         label: torch.Tensor,
+        cached_aff_target: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Soft-Dice on the kernel-derived face affinity of the embedding.
 
@@ -517,6 +518,14 @@ class InstanceLoss(nn.Module):
         Args:
             embed: ``[B, E, D, H, W]`` per-voxel instance embedding.
             label: ``[B, D, H, W]`` integer instance ids.
+            cached_aff_target: Optional precomputed
+                ``[B, 6, D, H, W]`` aff target.  When provided
+                (typically by :meth:`CombinedLoss._build_targets` so
+                BoundaryLoss and InstanceLoss share one build), the
+                ``_affinity_target_torch`` call is skipped.  The cached
+                tensor must have been built with the same
+                ``background`` value the loss is configured with -- the
+                caller is responsible for that contract.
         """
         if self.normalize_embeddings:
             embed = F.normalize(embed, p=2, dim=1, eps=1e-6)
@@ -527,9 +536,14 @@ class InstanceLoss(nn.Module):
         # Label-derived 6-aff target (1 on same-instance fg-fg face-pairs,
         # 0 elsewhere; bg voxels masked to 0 by ``background`` arg).
         with torch.no_grad():
-            aff_target = _affinity_target_torch(
-                label.long(), background=self.background,
-            ).to(dtype=aff_pred.dtype)
+            if cached_aff_target is not None:
+                aff_target = cached_aff_target.to(
+                    dtype=aff_pred.dtype, device=aff_pred.device,
+                )
+            else:
+                aff_target = _affinity_target_torch(
+                    label.long(), background=self.background,
+                ).to(dtype=aff_pred.dtype)
 
             # Pair mask: both endpoints foreground.  Exact 0/1 floats,
             # no autograd needed -- this is the supervision footprint.
@@ -663,14 +677,40 @@ class InstanceLoss(nn.Module):
         semantic_ids: Optional[torch.Tensor] = None,
         weight_edge: Optional[torch.Tensor] = None,
         weight_bone: Optional[torch.Tensor] = None,
+        cached_aff_target: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
+        """Compute pull / push / norm + (optional) ``aff_emb`` sub-losses.
+
+        Args:
+            embed:  ``[B, E, *spatial]`` per-voxel instance embedding.
+            label:  ``[B, *spatial]`` integer instance ids.
+            semantic_ids: Optional per-voxel semantic class map; when
+                provided, the discriminative loss is averaged across
+                classes by restricting ``label`` to one class at a
+                time.  In that path the cached aff target (built from
+                the unmasked label) does **not** match the per-class
+                ``masked_label`` and is ignored -- aff_emb rebuilds
+                per class.
+            weight_edge / weight_bone: Optional per-voxel weight maps
+                returned by :meth:`compute_weights`; built lazily when
+                both are ``None``.
+            cached_aff_target: Optional ``[B, 6, D, H, W]`` aff target
+                shared across heads.  When supplied (typically by
+                :meth:`CombinedLoss._build_targets` reusing the
+                boundary head's aff slice), the ``_affinity_target_torch``
+                rebuild inside :meth:`_compute_loss_aff_emb` is
+                skipped.  Ignored in the multi-class branch (see above).
+        """
         if weight_edge is None and weight_bone is None:
             weight_edge, weight_bone = self.compute_weights(label)
 
         # Multi-class: average the discriminative loss across semantic
         # classes, restricting ``label`` to one class at a time.  The
         # aff_emb term inherits the same per-class restriction so its
-        # supervision matches whatever the discriminative loss saw.
+        # supervision matches whatever the discriminative loss saw --
+        # which means the cached aff target (built from the full
+        # unmasked label) cannot be reused here.  Pass ``None`` to
+        # force a per-class rebuild.
         if semantic_ids is not None:
             classes = torch.unique(semantic_ids)
             classes = classes[classes > 0]
@@ -685,19 +725,22 @@ class InstanceLoss(nn.Module):
                     out = self._loss_single(
                         embed, masked_label, weight_edge, weight_bone,
                     )
-                    out = self._maybe_add_aff_emb(out, embed, masked_label)
+                    out = self._maybe_add_aff_emb(
+                        out, embed, masked_label, cached_aff_target=None,
+                    )
                     for k in acc:
                         acc[k] = acc[k] + out.get(k, zero)
                 return {k: v / len(classes) for k, v in acc.items()}
 
         out = self._loss_single(embed, label, weight_edge, weight_bone)
-        return self._maybe_add_aff_emb(out, embed, label)
+        return self._maybe_add_aff_emb(out, embed, label, cached_aff_target)
 
     def _maybe_add_aff_emb(
         self,
         out: Dict[str, torch.Tensor],
         embed: torch.Tensor,
         label: torch.Tensor,
+        cached_aff_target: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Append the ``aff_emb`` sub-loss to ``out`` and roll into ``loss``.
 
@@ -706,7 +749,9 @@ class InstanceLoss(nn.Module):
         the dominant default-config path.
         """
         if self.weight_aff_emb > 0:
-            aff_emb = self._compute_loss_aff_emb(embed, label)
+            aff_emb = self._compute_loss_aff_emb(
+                embed, label, cached_aff_target=cached_aff_target,
+            )
             out["aff_emb"] = aff_emb
             out["loss"] = out["loss"] + self.weight_aff_emb * aff_emb
         else:

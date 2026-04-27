@@ -26,7 +26,12 @@ import torch.nn as nn
 from brainbow.losses.semantic import SemanticLoss
 from brainbow.losses.instance import InstanceLoss
 from brainbow.losses.geometry import GeometryLoss
-from brainbow.losses.boundary import BoundaryLoss
+from brainbow.losses.boundary import (
+    _AFF_END,
+    _AFF_START,
+    _affinity_target_torch,
+    BoundaryLoss,
+)
 
 
 HeadConfig = Union[float, int, Mapping[str, Any]]
@@ -220,12 +225,37 @@ class CombinedLoss(nn.Module):
     # Target precomputation (called once per step by the Lightning module)
     # ------------------------------------------------------------------
 
-    def _compute_targets(
+    def _build_targets(
         self,
         labels: torch.Tensor,
         targets: Optional[Dict[str, torch.Tensor]] = None,
     ):
-        """Precompute instance pixel weights and geometry targets."""
+        """Precompute per-head shared targets in a single pass.
+
+        Plural ``_build_targets`` (vs. the per-loss ``build_target``)
+        because this method orchestrates **multiple** heads' targets in
+        one pass and returns them as a tuple for the
+        ``targets["_cached_weights"]`` cache.
+
+        Returns a 4-tuple::
+
+            (
+                (w_edge, w_bone),     # InstanceLoss per-voxel weights
+                geom_targets,         # GeometryLoss per-batch targets
+                boundary_target,      # full 10-channel target or None
+                aff_target,           # 6-channel aff target or None
+            )
+
+        The shared affinity target avoids rebuilding the same 6-channel
+        ``_affinity_target_torch(labels)`` tensor twice when both
+        :class:`BoundaryLoss` and :class:`InstanceLoss` (with
+        ``weight_aff_emb > 0``) are active.  When boundary is on and
+        the two heads agree on the ``background`` value, the boundary
+        target's ch 4-9 slice is the aff target -- one
+        ``_affinity_target_torch`` call covers both heads.  Otherwise
+        each head receives a target built with its own ``background``
+        setting.
+        """
         ins_weights = (
             self.instance_loss.compute_weights(labels)
             if self.instance_loss is not None else (None, None)
@@ -243,9 +273,43 @@ class CombinedLoss(nn.Module):
                     targets["label_covariance"],
                 )
             else:
-                geom_targets = self.geometry_loss.compute_targets(labels)
+                geom_targets = self.geometry_loss.build_target(labels)
 
-        return ins_weights, geom_targets
+        boundary_target: Optional[torch.Tensor] = None
+        aff_target: Optional[torch.Tensor] = None
+
+        # Build the full 10-channel boundary target up-front when the
+        # head is active and we have ``raw_image`` -- BoundaryLoss can
+        # then skip its rebuild via ``cached_target=...``.
+        if self.boundary_loss is not None and targets is not None:
+            raw_image = targets.get("raw_image")
+            if raw_image is not None:
+                if raw_image.dim() == 5 and raw_image.shape[1] == 1:
+                    raw_image = raw_image[:, 0]
+                boundary_target = self.boundary_loss.build_target(
+                    labels, raw_image,
+                )
+
+        # Resolve the aff target for InstanceLoss (when its aff_emb path
+        # is active).  Reuse the boundary slice when the two heads' bg
+        # settings agree; otherwise each head builds with its own bg.
+        if (
+            self.instance_loss is not None
+            and getattr(self.instance_loss, "weight_aff_emb", 0.0) > 0
+        ):
+            ins_bg = self.instance_loss.background
+            if (
+                boundary_target is not None
+                and self.boundary_loss is not None
+                and self.boundary_loss.background == ins_bg
+            ):
+                aff_target = boundary_target[:, _AFF_START:_AFF_END]
+            else:
+                aff_target = _affinity_target_torch(
+                    labels.long(), background=ins_bg,
+                )
+
+        return ins_weights, geom_targets, boundary_target, aff_target
 
     # ------------------------------------------------------------------
     # Forward
@@ -261,9 +325,11 @@ class CombinedLoss(nn.Module):
 
         cached = targets.get("_cached_weights")
         if cached is not None:
-            (w_edge, w_bone), geom_targets = cached
+            (w_edge, w_bone), geom_targets, boundary_target, aff_target = cached
         else:
-            (w_edge, w_bone), geom_targets = self._compute_targets(labels, targets)
+            (w_edge, w_bone), geom_targets, boundary_target, aff_target = (
+                self._build_targets(labels, targets)
+            )
 
         # Semantic
         if self.semantic_loss is not None and "semantic" in predictions:
@@ -282,6 +348,7 @@ class CombinedLoss(nn.Module):
                 semantic_ids=sem_ids,
                 weight_edge=w_edge,
                 weight_bone=w_bone,
+                cached_aff_target=aff_target,
             )
         else:
             ins = {
@@ -310,7 +377,10 @@ class CombinedLoss(nn.Module):
                 )
             if raw_image.dim() == 5 and raw_image.shape[1] == 1:
                 raw_image = raw_image[:, 0]
-            bnd = self.boundary_loss(predictions["boundary"], labels, raw_image)
+            bnd = self.boundary_loss(
+                predictions["boundary"], labels, raw_image,
+                cached_target=boundary_target,
+            )
         else:
             bnd = {
                 "loss": zero, "avg": zero, "raw": zero, "aff": zero,
@@ -351,8 +421,12 @@ class CombinedLoss(nn.Module):
             out["instance/loss/pull"] = ins["pull"]
             out["instance/loss/push"] = ins["push"]
             out["instance/loss/norm"] = ins["norm"]
-            if self.instance_loss.weight_aff_emb > 0:
-                out["instance/loss/aff_emb"] = ins["aff_emb"]
+            # Mirror the boundary head: always emit ``aff_emb`` even when
+            # ``weight_aff_emb == 0`` (InstanceLoss._maybe_add_aff_emb
+            # fills it with a zero scalar).  Keeps the scalar tag set
+            # stable across runs and matches the ``aff_pred`` / ``aff_avg``
+            # convention below.
+            out["instance/loss/aff_emb"] = ins["aff_emb"]
 
         if self.geometry_loss is not None:
             out["geometry/loss"] = geom["loss"]
@@ -364,9 +438,9 @@ class CombinedLoss(nn.Module):
             out["boundary/loss"] = bnd["loss"]
             out["boundary/loss/raw"] = bnd["raw"]
             out["boundary/loss/avg"] = bnd["avg"]
+            out["boundary/loss/aff_avg"] = bnd["aff_avg"]
             out["boundary/loss/aff"] = bnd["aff"]
             out["boundary/loss/aff_pred"] = bnd["aff_pred"]
-            out["boundary/loss/aff_avg"] = bnd["aff_avg"]
 
         if self.learned_task_weights:
             if self.weight_semantic > 0:

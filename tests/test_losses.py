@@ -172,6 +172,67 @@ class TestCombinedLoss3D:
         loss_fn = CombinedLoss(spatial_dims=3, weight_semantic=0.0)
         assert loss_fn.semantic_loss is None
 
+    def test_shared_aff_target_matches_per_head_rebuild(self) -> None:
+        """Cached aff target shared with InstanceLoss matches the
+        standalone rebuild used when the cache isn't pre-populated.
+
+        Exercises the option-3b sharing path: when both ``BoundaryLoss``
+        and ``InstanceLoss(weight_aff_emb > 0)`` are enabled,
+        :meth:`CombinedLoss._build_targets` builds the boundary head's
+        full 10-channel target once and slices ch 4-9 as the aff target
+        for the instance head.  The total loss must equal what we get
+        when the two heads each rebuild their own aff target.
+        """
+        torch.manual_seed(13)
+        loss_fn = CombinedLoss(
+            spatial_dims=3,
+            weight_semantic=0.0,
+            weight_instance=dict(
+                weight=1.0,
+                weight_pull=0.0, weight_push=0.0, weight_norm=0.0,
+                weight_aff_emb=1.0, tau=1.0,
+            ),
+            weight_geometry=0.0,
+            weight_boundary=1.0,
+        )
+
+        B, D, H, W = 1, 4, 8, 8
+        labels = torch.zeros(B, D, H, W, dtype=torch.long)
+        labels[0, :2, :4, :4] = 1
+        labels[0, 2:, 4:, 4:] = 2
+        image = torch.rand(B, D, H, W)
+        bnd = torch.cat(
+            [torch.rand(B, 4, D, H, W), torch.rand(B, 6, D, H, W)], dim=1,
+        )
+        emb = torch.randn(B, 8, D, H, W)
+        predictions = {"instance": emb, "boundary": bnd}
+        targets = {
+            "labels": labels,
+            "semantic_labels": (labels > 0).long(),
+            "raw_image": image,
+        }
+
+        out_lazy = loss_fn(predictions, targets)
+        # Force the shared-cache path explicitly.
+        targets["_cached_weights"] = loss_fn._build_targets(
+            targets["labels"], targets,
+        )
+        out_cached = loss_fn(predictions, targets)
+
+        assert torch.isclose(
+            out_lazy["loss"], out_cached["loss"], atol=1e-5,
+        )
+        assert torch.isclose(
+            out_lazy["instance/loss/aff_emb"],
+            out_cached["instance/loss/aff_emb"],
+            atol=1e-6,
+        )
+        assert torch.isclose(
+            out_lazy["boundary/loss"],
+            out_cached["boundary/loss"],
+            atol=1e-5,
+        )
+
 
 # ---------------------------------------------------------------------------
 # SemanticLoss (direct, no CombinedLoss orchestration)
@@ -318,6 +379,33 @@ class TestInstanceLoss:
         """The 6-face primitives assume BDHW labels; 2-D mode is rejected."""
         with pytest.raises(ValueError, match="spatial_dims"):
             InstanceLoss(spatial_dims=2, weight_aff_emb=1.0)
+
+    def test_aff_emb_cached_target_matches_rebuild(
+        self, embed_and_label_3d,
+    ) -> None:
+        """``cached_aff_target=`` skips the rebuild but yields the same loss."""
+        from brainbow.losses.boundary import _affinity_target_torch
+
+        embed, label = embed_and_label_3d
+        loss_fn = InstanceLoss(
+            spatial_dims=3,
+            weight_pull=0.0, weight_push=0.0, weight_norm=0.0,
+            weight_aff_emb=1.0, tau=1.0,
+        )
+
+        # Lazy path: the loss rebuilds the aff target itself.
+        out_lazy = loss_fn(embed, label)
+
+        # Cached path: pre-build with the same args the loss would use.
+        cached = _affinity_target_torch(label.long(), background=loss_fn.background)
+        out_cached = loss_fn(embed, label, cached_aff_target=cached)
+
+        assert torch.isclose(
+            out_lazy["aff_emb"], out_cached["aff_emb"], atol=1e-6,
+        )
+        assert torch.isclose(
+            out_lazy["loss"], out_cached["loss"], atol=1e-6,
+        )
 
 
 # ---------------------------------------------------------------------------

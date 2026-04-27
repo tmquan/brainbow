@@ -229,9 +229,6 @@ class GeometryLoss(nn.Module):
     ) -> Dict[str, List[Optional[torch.Tensor]]]:
         return self._build_target_from_pipeline(direction, covariance)
 
-    def compute_targets(self, ins_label: torch.Tensor):
-        return self.build_target(ins_label)
-
     # ------------------------------------------------------------------
     # Per-voxel weights (not used by this head)
     # ------------------------------------------------------------------

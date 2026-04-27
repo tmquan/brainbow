@@ -263,7 +263,7 @@ class BaseCircuitModule(pl.LightningModule):
                 targets[key] = batch[key]
         # Hoisted from training_step: keep the cache build inside this
         # @no_grad context to skip autograd-tape overhead on every op.
-        targets["_cached_weights"] = self.criterion._compute_targets(
+        targets["_cached_weights"] = self.criterion._build_targets(
             targets["labels"], targets,
         )
         return targets
