@@ -49,10 +49,10 @@ class ImageLogger(pl.Callback):
         {stage}/automatic/geometry/pred/{dir_centroid|cov|raw}
         {stage}/automatic/boundary/pred/raw
         {stage}/automatic/boundary/true/avg
-        {stage}/automatic/boundary/true/aff/{t,b,u,d,l,r}
         {stage}/automatic/boundary/pred/avg
-        {stage}/automatic/boundary/pred/aff/{t,b,u,d,l,r}
         {stage}/automatic/boundary/pred/avg/aff/{t,b,u,d,l,r}
+        {stage}/automatic/boundary/true/aff/{t,b,u,d,l,r}
+        {stage}/automatic/boundary/pred/aff/{t,b,u,d,l,r}
 
     ``boundary/true/raw`` is intentionally **not** emitted: it would
     duplicate ``{stage}/automatic/true/image`` pixel-for-pixel (the

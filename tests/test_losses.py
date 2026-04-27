@@ -223,8 +223,8 @@ class TestCombinedLoss3D:
             out_lazy["loss"], out_cached["loss"], atol=1e-5,
         )
         assert torch.isclose(
-            out_lazy["instance/loss/aff_emb"],
-            out_cached["instance/loss/aff_emb"],
+            out_lazy["instance/loss/emb/aff"],
+            out_cached["instance/loss/emb/aff"],
             atol=1e-6,
         )
         assert torch.isclose(

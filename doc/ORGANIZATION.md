@@ -210,19 +210,33 @@ the kernel / regression-name resolution.
 
 `CombinedLoss` composes the four task losses into a single
 dict-returning module.  Every scalar it emits uses the head-oriented
-tag hierarchy that matches the TensorBoard image tags emitted by
+tag hierarchy that **mirrors the image-tag layout** emitted by
 `callbacks.tensorboard.ImageLogger`:
 
 ```
-loss                              # global total
-{head}/loss                       # per-head total
-{head}/loss/{component}           # per-head loss breakdown
-eff_w/{head}                      # effective task weights (learned mode)
+loss                                       # global total
+{head}/loss                                # per-head total
+{head}/loss/{component}                    # flat per-head breakdown
+                                           # (e.g. semantic/loss/ce)
+{head}/loss/<field>[/<component>]          # per-field breakdown
+                                           # parallels {head}/pred/<field>
+eff_w/{head}                               # effective task weights
+                                           # (learned-task-weight mode)
 ```
 
+When the same predicted *field* feeds both a visualisation and a loss,
+both live under the same `<field>` subgroup in TB.  Concrete pairs
+(see `image_logger.py` for the full image side):
+
+| image tag                                | scalar tag             |
+| ---------------------------------------- | ---------------------- |
+| `instance/pred/emb/aff/{t,b,u,d,l,r}`    | `instance/loss/emb/aff` |
+| `boundary/pred/aff/{t,b,u,d,l,r}`        | `boundary/loss/aff`    |
+| `boundary/pred/avg/aff/{t,b,u,d,l,r}`    | `boundary/loss/avg/aff` |
+
 This way, when TensorBoard alphabetically sorts tags, each head's
-scalars cluster next to its images — e.g. `instance/loss/pull` sits
-beside `train/automatic/instance/embed`.
+scalars cluster next to its images — e.g. `instance/loss/emb/aff`
+sits beside `train/automatic/instance/pred/emb/aff/{t,b,...}`.
 
 Task losses whose weight is `0.0` are **not instantiated** (not just
 zeroed) so training is faster and memory is smaller.

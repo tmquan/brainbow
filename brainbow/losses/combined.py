@@ -7,14 +7,28 @@ returning module shared by every Lightning module in the project
 (Vista3D, Cosmos-Transfer 3D).  Any task loss whose weight is
 ``0.0`` is not instantiated and contributes zero to the total.
 
-The returned dict uses a **head-oriented** key hierarchy so that
-TensorBoard clusters each head's scalars together next to the images
-emitted by :mod:`brainbow.callbacks.tensorboard`::
+The returned dict uses a **head-oriented** key hierarchy that mirrors
+the image tag layout in
+:class:`brainbow.callbacks.tensorboard.image_logger.ImageLogger`,
+so each head's scalars cluster next to its images in TensorBoard::
 
-    loss                              # global total
-    {head}/loss                       # per-head total (semantic, instance, ...)
-    {head}/loss/{component}           # per-head loss breakdown
-    eff_w/{head}                      # effective task weights (learned mode)
+    loss                                       # global total
+    {head}/loss                                # per-head total
+    {head}/loss/{component}                    # flat per-head breakdown
+                                               # (e.g. semantic/loss/ce)
+    {head}/loss/<field>[/<component>]          # per-field breakdown
+                                               # (parallels the image tag
+                                               # {head}/pred/<field>[/<panel>])
+    eff_w/{head}                               # effective task weights
+                                               # (learned-task-weight mode)
+
+Concretely (only listing non-flat groups; full image / scalar pairs
+are documented in
+:class:`brainbow.callbacks.tensorboard.image_logger.ImageLogger`)::
+
+    instance/pred/emb/aff/{t,b,u,d,l,r}   <->  instance/loss/emb/aff
+    boundary/pred/aff/{t,b,u,d,l,r}       <->  boundary/loss/aff
+    boundary/pred/avg/aff/{t,b,u,d,l,r}   <->  boundary/loss/avg/aff
 """
 
 from __future__ import annotations
@@ -416,17 +430,26 @@ class CombinedLoss(nn.Module):
             if self.semantic_loss.weight_dice > 0:
                 out["semantic/loss/dice"] = sem["dice"]
 
+        # Per-head scalar layout mirrors the per-head image-tag layout
+        # in ``brainbow.callbacks.tensorboard.image_logger.ImageLogger``
+        # so each head's scalars and images cluster together in TB::
+        #
+        #     {head}/loss[/<field>]/<component>
+        #
+        # where ``<field>`` (`avg`, `emb`, ...) groups together every
+        # scalar derived from the same predicted field, paralleling
+        # the image groups ``{head}/pred/<field>/<panel>``.
+
         if self.instance_loss is not None:
             out["instance/loss"] = ins["loss"]
             out["instance/loss/pull"] = ins["pull"]
             out["instance/loss/push"] = ins["push"]
             out["instance/loss/norm"] = ins["norm"]
-            # Mirror the boundary head: always emit ``aff_emb`` even when
-            # ``weight_aff_emb == 0`` (InstanceLoss._maybe_add_aff_emb
-            # fills it with a zero scalar).  Keeps the scalar tag set
-            # stable across runs and matches the ``aff_pred`` / ``aff_avg``
-            # convention below.
-            out["instance/loss/aff_emb"] = ins["aff_emb"]
+            # ``emb/aff`` mirrors the image tag ``instance/pred/emb/aff/{...}``:
+            # supervision loss on the kernel-derived 6-aff from the predicted
+            # embedding.  Always emitted (zero scalar when
+            # ``weight_aff_emb == 0``) so the scalar set is stable.
+            out["instance/loss/emb/aff"] = ins["aff_emb"]
 
         if self.geometry_loss is not None:
             out["geometry/loss"] = geom["loss"]
@@ -438,9 +461,16 @@ class CombinedLoss(nn.Module):
             out["boundary/loss"] = bnd["loss"]
             out["boundary/loss/raw"] = bnd["raw"]
             out["boundary/loss/avg"] = bnd["avg"]
-            out["boundary/loss/aff_avg"] = bnd["aff_avg"]
-            out["boundary/loss/aff"] = bnd["aff"]
-            out["boundary/loss/aff_pred"] = bnd["aff_pred"]
+            # Two parallel aff supervision paths.  Tag layout mirrors
+            # the image tags::
+            #     boundary/pred/aff/{...}      <-> boundary/loss/aff
+            #     boundary/pred/avg/aff/{...}  <-> boundary/loss/avg/aff
+            # The total weighted sum of both paths is omitted from
+            # scalars to keep the layout uniform with the image tags;
+            # ``boundary/loss`` already aggregates everything for the
+            # head, and TB's "add scalars" can sum the two paths.
+            out["boundary/loss/aff"] = bnd["aff_pred"]
+            out["boundary/loss/avg/aff"] = bnd["aff_avg"]
 
         if self.learned_task_weights:
             if self.weight_semantic > 0:

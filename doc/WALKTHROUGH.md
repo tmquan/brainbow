@@ -229,14 +229,24 @@ linear values) directly under that contract.
 ### 5.2 What `CombinedLoss` returns
 
 `brainbow/losses/combined.py:CombinedLoss.forward` returns a single
-flat dict where every key is one of:
+flat dict whose keys mirror the image-tag layout used by the
+`ImageLogger` (image: `{head}/pred/<field>[/<panel>]` / scalar:
+`{head}/loss/<field>[/<component>]`):
 
 ```
-loss                                # scalar total (this is what we backprop)
-{head}/loss                         # per-head total, weighted
-{head}/loss/{component}             # per-head sub-loss breakdown
-eff_w/{head}                        # effective task weight (learned mode)
+loss                                       # scalar total (we backprop this)
+{head}/loss                                # per-head total, weighted
+{head}/loss/{component}                    # flat per-head breakdown
+{head}/loss/<field>[/<component>]          # per-field breakdown,
+                                           # parallels {head}/pred/<field>
+eff_w/{head}                               # effective task weight
+                                           # (learned-task-weight mode)
 ```
+
+So e.g. `instance/loss/emb/aff` accompanies the image tag
+`instance/pred/emb/aff/{t,b,u,d,l,r}`, both produced from the
+embedding via `soft_aff_from_field`; `boundary/loss/avg/aff` pairs
+with `boundary/pred/avg/aff/{...}`, etc.
 
 `BaseCircuitModule.training_step`
 (`brainbow/modules/base.py:272-324`) prefixes every key with

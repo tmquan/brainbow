@@ -445,14 +445,17 @@ class TestBoundaryInCombinedLoss:
             "raw_image": image,
         }
         out = loss(preds, targets)
+        # Scalar tag layout mirrors the per-head image-tag layout in
+        # ``brainbow.callbacks.tensorboard.image_logger``:
+        #   boundary/pred/aff/{...}      <-> boundary/loss/aff
+        #   boundary/pred/avg/aff/{...}  <-> boundary/loss/avg/aff
         for k in (
             "loss",
             "boundary/loss",
             "boundary/loss/raw",
             "boundary/loss/avg",
             "boundary/loss/aff",
-            "boundary/loss/aff_pred",
-            "boundary/loss/aff_avg",
+            "boundary/loss/avg/aff",
         ):
             assert k in out
         out["loss"].backward()
