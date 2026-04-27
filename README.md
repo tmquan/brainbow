@@ -87,7 +87,7 @@ Skim of the top level:
 
 ```
 brainbow/
-├── configs/             Hydra configs (default → snemi3d → combine → boundary)
+├── configs/             Hydra configs (default → snemi3d → combine)
 ├── brainbow/            importable package (losses, models, modules,
 │                        datasets, datamodules, transforms, inference,
 │                        preprocessors, metrics, visualizer, callbacks)

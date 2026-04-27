@@ -317,24 +317,7 @@ clusterer is `hough_voting`; treat them as optional everywhere.
 
 ---
 
-## 16. Stale `last.ckpt` example paths in configs
-
-**Symptom.** You copy-paste a `resume_from_checkpoint:` example from
-`configs/snemi3d.yaml` (lines 28-29), only to discover the path doesn't
-exist on your machine.
-
-**Where.** `configs/snemi3d.yaml`.  Stale
-`outputs/checkpoints/last.ckpt` examples that predate the timestamped
-run-dir convention introduced in `train.py:407-411`.
-
-**Why.** The run-dir layout changed but the docs didn't.
-
-**Remediation.** Phase 4 fixes the stale comments.  Until then,
-checkpoint paths are inside `outputs/<timestamp>_<experiment>/checkpoints/`.
-
----
-
-## 17. `combine.yaml` drops AC4 from train
+## 16. `combine.yaml` drops AC4 from train
 
 **Symptom.** You expect "combine" to literally mean SNEMI3D-AC3 +
 SNEMI3D-AC4 + neurons + MICrONS, but training only sees AC3.
@@ -349,7 +332,7 @@ was designed to leave it out of training.
 
 ---
 
-## 18. Hydra default chain has a hidden hop
+## 17. Hydra default chain has a hidden hop
 
 **Symptom.** You `--config-name combine` and see settings you didn't
 write -- they came from `snemi3d.yaml`, and ultimately from `default.yaml`.
@@ -367,7 +350,7 @@ opening every parent.
 
 ---
 
-## 19. Notebook / docstring claim "all preprocessors implement `save()`"
+## 18. Notebook / docstring claim "all preprocessors implement `save()`"
 
 **Symptom.** You write a generic round-trip test using
 `BasePreprocessor.save(...)` and one of the leaves raises

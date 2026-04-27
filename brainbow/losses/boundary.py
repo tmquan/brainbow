@@ -780,7 +780,8 @@ class BoundaryLoss(nn.Module):
         return (
             f"{self.__class__.__name__}("
             f"channels={self.task_channels}, "
-            f"loss_avg='{self.loss_avg}', loss_raw='{self.loss_raw}', "
+            f"loss_avg='{self.loss_avg}', "
+            f"loss_raw='{self.loss_raw}', "
             f"weight_raw={self.weight_raw}, "
             f"weight_avg={self.weight_avg}, "
             f"weight_aff_pred={self.weight_aff_pred}, "
@@ -791,5 +792,6 @@ class BoundaryLoss(nn.Module):
             f"tau={self.tau}, "
             f"class_weights={self.class_weights}, "
             f"foreground_only_loc={self.foreground_only_loc}, "
+            f"aff_eps={self.aff_eps}, "
             f"background={self.background})"
         )

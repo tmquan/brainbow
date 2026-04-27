@@ -83,13 +83,16 @@ class SemanticLoss(nn.Module):
         self.ignore_index = ignore_index
         self.active_classes = active_classes
         self.label_smoothing = float(label_smoothing)
+        self.class_weights = (
+            list(map(float, class_weights)) if class_weights is not None else None
+        )
 
         # ``class_weights`` is plumbed into BCE as a per-class multiplicative
         # weight on the positive (target == 1) term.  Reshape to broadcast
         # over the spatial dims of the prediction tensor, registered as a
         # buffer so device moves carry it along.
-        if class_weights is not None:
-            cw = torch.tensor(class_weights, dtype=torch.float32)
+        if self.class_weights is not None:
+            cw = torch.tensor(self.class_weights, dtype=torch.float32)
             self.register_buffer("_pos_weight", cw, persistent=False)
         else:
             self._pos_weight = None
@@ -285,6 +288,10 @@ class SemanticLoss(nn.Module):
         return (
             f"{self.__class__.__name__}("
             f"active_classes={self.active_classes}, "
-            f"weight_ce={self.weight_ce}, weight_iou={self.weight_iou}, "
-            f"weight_dice={self.weight_dice})"
+            f"weight_ce={self.weight_ce}, "
+            f"weight_iou={self.weight_iou}, "
+            f"weight_dice={self.weight_dice}, "
+            f"class_weights={self.class_weights}, "
+            f"ignore_index={self.ignore_index}, "
+            f"label_smoothing={self.label_smoothing})"
         )

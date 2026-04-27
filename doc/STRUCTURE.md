@@ -57,17 +57,17 @@ applicable or directly: `python scripts/<name>.py`.
 
 | File                               | Covers                                                     |
 | ---------------------------------- | ---------------------------------------------------------- |
-| `tests/test_losses.py`             | `CombinedLoss` 2-D and 3-D end-to-end (forward, gradients). |
-| `tests/test_boundary_loss.py`      | `BoundaryLoss` + `build_boundary_target` (CPU / CUDA agree, channel layout, edge cases). |
+| `tests/test_losses.py`             | `CombinedLoss` 2-D and 3-D end-to-end + `SemanticLoss` / `InstanceLoss` / `GeometryLoss` in isolation (shape, gradients, `aff_emb`, shared-target cache). |
+| `tests/test_boundary_loss.py`      | `BoundaryLoss` + `build_boundary_target` + `soft_aff_from_avg` (CPU / CUDA agree, channel layout, dual-aff path, edge cases). |
 | `tests/test_datasets.py`           | `CircuitDataset` abstract contract (resolution, anisotropy, length virtualisation). |
 | `tests/test_datamodules.py`        | `CircuitDataModule` augmentation pipeline (via a synthetic in-memory dataset). |
 | `tests/test_preprocessors.py`      | HDF5 / NRRD / TIFF / NfTy converters.                      |
 | `tests/test_utils.py`              | label / io / parallel helpers.                             |
 
-Tests for `SemanticLoss`, `InstanceLoss`, `GeometryLoss` (each in
-isolation), the freeze schedule, `build_clusterer`, and
-`sliding_window_inference` are added in Phase 5 of the audit overhaul
-(see [`doc/CONTRIBUTING.md`](./CONTRIBUTING.md) once it lands).
+Tests for the freeze schedule, `build_clusterer`, and
+`sliding_window_inference` are not yet shipped (tracked under the
+audit overhaul backlog -- see
+[`doc/CONTRIBUTING.md`](./CONTRIBUTING.md) for where to land them).
 
 ---
 

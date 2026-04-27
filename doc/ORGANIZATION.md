@@ -173,7 +173,7 @@ class <Task>Loss(nn.Module):
 | Loss          | Components (keys in returned dict)                            | `task_channels` |
 | ------------- | ------------------------------------------------------------- | --------------- |
 | SemanticLoss  | `loss`, `ce`, `iou`, `dice`                                   | `semantic_channels` |
-| InstanceLoss  | `loss`, `pull`, `push`, `norm`                                | embedding `E`   |
+| InstanceLoss  | `loss`, `pull`, `push`, `norm`, `aff_emb`                     | embedding `E`   |
 | GeometryLoss  | `loss`, `raw`, `cov`, `dir`                                   | `1 + S*(S+1)//2 + S` |
 | BoundaryLoss  | `loss`, `raw`, `avg`, `aff`, `aff_pred`, `aff_avg`, plus per-path `aff_{pred,avg}_{ce,dice,iou}` | `10`            |
 
@@ -184,13 +184,25 @@ class <Task>Loss(nn.Module):
 - **Pluggability.**  `CombinedLoss` treats each task loss identically —
   it calls `compute_weights` once, then `forward`, then scatters the
   returned dict under `{head}/loss/{component}`.
-- **Target caching.**  `build_target(...)` lets the datamodule or the
-  image-logger precompute the supervision target and feed it back to
-  the loss via `cached_target=...`, avoiding double-construction in DDP.
+- **Target caching, shared across heads.**  `build_target(...)` is the
+  per-loss public dispatcher, and `CombinedLoss._build_targets(...)`
+  is the orchestrator that builds **all** shared targets in one pass
+  -- per-voxel instance weights, geometry direction / covariance, and
+  the boundary head's full 10-channel target -- caching them in
+  `targets["_cached_weights"]`.  When both `BoundaryLoss` and
+  `InstanceLoss(weight_aff_emb > 0)` are active, the boundary target's
+  6-channel aff slice is **reused** as the instance head's
+  `cached_aff_target=`, so `_affinity_target_torch(labels)` runs at
+  most once per step regardless of how many heads consume it.
 
 Shared regression-loss name resolution lives in `losses/_common.py`
-(``canonical_regression_name``, ``regression_loss_fn``).  Individual
-losses use it instead of each duplicating an `_LOSS_FN` dict.
+(``canonical_regression_name``, ``regression_loss_fn``); the soft
+face-affinity kernel that backs both the boundary head's `aff_avg`
+path and the instance head's `aff_emb` path is
+`brainbow.losses.boundary.soft_aff_from_field` (also re-exported as
+`soft_aff_from_avg` for the `C == 3` avg-specific call site).
+Individual losses reuse these helpers instead of each duplicating
+the kernel / regression-name resolution.
 
 ---
 

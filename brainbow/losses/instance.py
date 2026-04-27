@@ -280,8 +280,14 @@ class InstanceLoss(nn.Module):
         """Weighted mean embedding centroid per instance.
 
         Returns ``[K, E]`` -- the canonical target for **pull** (when not
-        anchored) and always the target for **push / norm** (gradients
-        need to flow through the model).
+        anchored) and always the target for **push / norm**.
+
+        Intentionally **not** decorated with ``@torch.no_grad`` (unlike
+        the other ``_build_target_*`` helpers in this package): the
+        empirical mean centroid is part of the discriminative loss's
+        autograd graph, not a frozen label-derived supervision target.
+        Push and norm rely on gradients flowing through these centroids
+        back into the model's instance head.
         """
         E, K = ctx.E, ctx.K
         if ctx.wgt_fg is not None:
@@ -535,15 +541,19 @@ class InstanceLoss(nn.Module):
 
         # Label-derived 6-aff target (1 on same-instance fg-fg face-pairs,
         # 0 elsewhere; bg voxels masked to 0 by ``background`` arg).
+        # Both branches converge on the same dtype + device as
+        # ``aff_pred`` so downstream Dice / mask ops never trigger an
+        # implicit cast (mirrors BoundaryLoss.forward).
         with torch.no_grad():
             if cached_aff_target is not None:
-                aff_target = cached_aff_target.to(
-                    dtype=aff_pred.dtype, device=aff_pred.device,
-                )
+                aff_target = cached_aff_target
             else:
                 aff_target = _affinity_target_torch(
                     label.long(), background=self.background,
-                ).to(dtype=aff_pred.dtype)
+                )
+            aff_target = aff_target.to(
+                dtype=aff_pred.dtype, device=aff_pred.device,
+            )
 
             # Pair mask: both endpoints foreground.  Exact 0/1 floats,
             # no autograd needed -- this is the supervision footprint.
@@ -762,12 +772,19 @@ class InstanceLoss(nn.Module):
         return (
             f"{self.__class__.__name__}("
             f"spatial_dims={self.spatial_dims}, "
-            f"weights=(pull={self.weight_pull}, push={self.weight_push}, "
-            f"norm={self.weight_norm}, aff_emb={self.weight_aff_emb}), "
-            f"margins=(delta_v={self.delta_v}, delta_d={self.delta_d}, "
-            f"tau={self.tau}), "
-            f"weight_edge={self.weight_edge}, weight_bone={self.weight_bone}, "
-            f"normalize={self.normalize_embeddings}, "
+            f"weight_pull={self.weight_pull}, "
+            f"weight_push={self.weight_push}, "
+            f"weight_norm={self.weight_norm}, "
+            f"weight_aff_emb={self.weight_aff_emb}, "
+            f"weight_edge={self.weight_edge}, "
+            f"weight_bone={self.weight_bone}, "
+            f"delta_v={self.delta_v}, "
+            f"delta_d={self.delta_d}, "
+            f"tau={self.tau}, "
+            f"normalize_embeddings={self.normalize_embeddings}, "
+            f"max_hard_pairs={self.max_hard_pairs}, "
             f"anchor_to_centroid={self.anchor_to_centroid}, "
+            f"centroid_scale={self.centroid_scale}, "
+            f"aff_eps={self.aff_eps}, "
             f"background={self.background})"
         )

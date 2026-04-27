@@ -210,11 +210,21 @@ sequenceDiagram
 | `semantic`  | `head_semantic(decoder_features)` -> `[B, C, ...]`    | `head_semantic(backbone_features)`  |
 | `instance`  | `head_instance(decoder_features)` -> `[B, E, ...]`    | `head_instance(...)`                |
 | `geometry`  | `head_geometry(decoder_features)` -> `[B, G, ...]`    | `head_geometry(...)`                |
-| `boundary`  | `head_boundary(decoder_features)` -> `[B, 16, ...]`   | **not present** (Vista is 3-head)   |
+| `boundary`  | `head_boundary(decoder_features)` -> `[B, 10, ...]`   | **not present** (Vista is 3-head)   |
 
-The Cosmos wrapper applies `sigmoid` to `semantic` for the
-binary-foreground case; Vista doesn't.  Logits on every other head
-stay raw -- the losses internally apply the right activation.
+Activation policy (applied **once**, in the wrapper, before any loss
+or metric or callback sees the prediction):
+
+| Head        | Cosmos                                                 | Vista                            |
+| ----------- | ------------------------------------------------------ | -------------------------------- |
+| `semantic`  | `sigmoid` on every channel                             | `sigmoid` on every channel       |
+| `instance`  | linear (unbounded embedding)                           | linear                           |
+| `geometry`  | `sigmoid` on ch 0 (raw); linear on cov + dir           | linear (loss handles activation) |
+| `boundary`  | `sigmoid` on every channel (all 10 targets ∈ `[0, 1]`) | n/a                              |
+
+See `brainbow/models/cosmos_transfer_2_5/decoder.py` for the canonical
+docstring on the policy; the loss modules consume probabilities (or
+linear values) directly under that contract.
 
 ### 5.2 What `CombinedLoss` returns
 

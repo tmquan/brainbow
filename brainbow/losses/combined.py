@@ -17,6 +17,8 @@ emitted by :mod:`brainbow.callbacks.tensorboard`::
     eff_w/{head}                      # effective task weights (learned mode)
 """
 
+from __future__ import annotations
+
 import math
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
@@ -263,17 +265,15 @@ class CombinedLoss(nn.Module):
 
         geom_targets = None
         if self.geometry_loss is not None:
-            if (
-                targets is not None
-                and "label_direction" in targets
-                and "label_covariance" in targets
-            ):
-                geom_targets = self.geometry_loss.targets_from_pipeline(
-                    targets["label_direction"],
-                    targets["label_covariance"],
-                )
-            else:
-                geom_targets = self.geometry_loss.build_target(labels)
+            # ``build_target`` accepts the (direction, covariance) fast
+            # path directly when the datamodule has precomputed them;
+            # otherwise it runs the on-the-fly transform per batch
+            # element.  One entry point either way -- no separate alias.
+            geom_targets = self.geometry_loss.build_target(
+                labels,
+                direction=targets.get("label_direction") if targets else None,
+                covariance=targets.get("label_covariance") if targets else None,
+            )
 
         boundary_target: Optional[torch.Tensor] = None
         aff_target: Optional[torch.Tensor] = None

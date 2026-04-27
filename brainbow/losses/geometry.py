@@ -190,6 +190,7 @@ class GeometryLoss(nn.Module):
             )
         return {"dir_targets": dir_targets, "cov_targets": cov_targets}
 
+    @torch.no_grad()
     def _build_target_from_pipeline(
         self,
         direction: torch.Tensor,
@@ -222,12 +223,6 @@ class GeometryLoss(nn.Module):
             dir_targets.append(dir_flat[b] if self.weight_dir > 0 else None)
             cov_targets.append(cov_flat[b] if self.weight_cov > 0 else None)
         return {"dir_targets": dir_targets, "cov_targets": cov_targets}
-
-    # Backwards-compat shims for older call sites.
-    def targets_from_pipeline(
-        self, direction: torch.Tensor, covariance: torch.Tensor,
-    ) -> Dict[str, List[Optional[torch.Tensor]]]:
-        return self._build_target_from_pipeline(direction, covariance)
 
     # ------------------------------------------------------------------
     # Per-voxel weights (not used by this head)
@@ -354,9 +349,13 @@ class GeometryLoss(nn.Module):
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}("
-            f"spatial_dims={self.spatial_dims}, channels={self.task_channels} "
-            f"(raw={self._ch_raw}+cov={self._ch_cov}+dir={self._ch_dir}), "
-            f"loss_dir='{self.loss_dir}', loss_cov='{self.loss_cov}', loss_raw='{self.loss_raw}', "
-            f"weight_dir={self.weight_dir}, weight_cov={self.weight_cov}, "
-            f"weight_raw={self.weight_raw})"
+            f"spatial_dims={self.spatial_dims}, "
+            f"channels={self.task_channels}, "
+            f"loss_dir='{self.loss_dir}', "
+            f"loss_cov='{self.loss_cov}', "
+            f"loss_raw='{self.loss_raw}', "
+            f"weight_dir={self.weight_dir}, "
+            f"weight_cov={self.weight_cov}, "
+            f"weight_raw={self.weight_raw}, "
+            f"smooth_l1_beta={self.smooth_l1_beta})"
         )
