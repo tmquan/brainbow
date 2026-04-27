@@ -58,10 +58,10 @@ read on both shapes.
 was added later.  Both are accepted for back-compat with old configs
 and old checkpoints' hparams.
 
-**Remediation.** Phase 4 migrates `default.yaml` and `boundary.yaml`
-to the nested form so all configs match.  Phase 3b extracts the
-legacy-key migration into `_migrate_legacy_keys` so the back-compat
-logic is in one place.
+**Remediation.** All shipped configs now use the nested form; the
+flat-kwarg path remains in `combined.py` only for back-compat with
+old checkpoints' hparams.  Phase 3b extracts the legacy-key migration
+into `_migrate_legacy_keys` so the back-compat logic is in one place.
 
 ---
 
@@ -320,10 +320,10 @@ clusterer is `hough_voting`; treat them as optional everywhere.
 ## 16. Stale `last.ckpt` example paths in configs
 
 **Symptom.** You copy-paste a `resume_from_checkpoint:` example from
-`configs/snemi3d.yaml` (lines 28-29) or `configs/boundary.yaml`
-(lines 22-24), only to discover the path doesn't exist on your machine.
+`configs/snemi3d.yaml` (lines 28-29), only to discover the path doesn't
+exist on your machine.
 
-**Where.** `configs/snemi3d.yaml`, `configs/boundary.yaml`.  Stale
+**Where.** `configs/snemi3d.yaml`.  Stale
 `outputs/checkpoints/last.ckpt` examples that predate the timestamped
 run-dir convention introduced in `train.py:407-411`.
 
@@ -351,21 +351,19 @@ was designed to leave it out of training.
 
 ## 18. Hydra default chain has a hidden hop
 
-**Symptom.** You `--config-name boundary` and see settings you didn't
-write -- they came from `combine.yaml`, and ultimately from
-`snemi3d.yaml` and `default.yaml`.
+**Symptom.** You `--config-name combine` and see settings you didn't
+write -- they came from `snemi3d.yaml`, and ultimately from `default.yaml`.
 
 **Where.** Hydra's `defaults:` lists in each YAML.  The chain is::
 
-    default.yaml -> snemi3d.yaml -> combine.yaml -> boundary.yaml
+    default.yaml -> snemi3d.yaml -> combine.yaml
 
 **Why.** Layered overrides keep individual files small and let
-`boundary.yaml` only declare what's *different*.
+`combine.yaml` only declare what's *different*.
 
 **Remediation.** **Intentional.**  Phase 4 adds a per-file
 inheritance-chain comment header so the chain is visible without
-opening every parent.  See also `configs/example_annotated.yaml`
-(Phase 2e) for the merged result.
+opening every parent.
 
 ---
 

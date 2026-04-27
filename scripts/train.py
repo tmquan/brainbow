@@ -6,17 +6,15 @@ Loads a Hydra config, builds the datamodule + Lightning module + trainer,
 then calls ``trainer.fit(...)``.
 
 The default Hydra config name is ``default`` (see ``configs/default.yaml``)
-which runs SNEMI3D-shaped data with all four loss heads.  Two recipes
-are recommended for everyday use:
+which runs SNEMI3D-shaped data with all four loss heads.  Recipes:
 
 * ``--config-name snemi3d``   -- SNEMI3D only, three-head recipe.
-* ``--config-name boundary``  -- multi-dataset (combine.yaml), 16-channel
-  boundary head only.
+* ``--config-name combine``   -- multi-dataset SNEMI3D + neurons + MICrONS.
 
 Examples
 --------
     python scripts/train.py --config-name snemi3d
-    python scripts/train.py --config-name boundary
+    python scripts/train.py --config-name combine
     python scripts/train.py --config-name snemi3d data.batch_size=8 training.max_epochs=200
     python scripts/train.py training.fast_dev_run=true
     python scripts/train.py --config-name snemi3d +ckpt_path=outputs/<run>/checkpoints/last.ckpt

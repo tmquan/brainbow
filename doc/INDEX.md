@@ -1,7 +1,7 @@
 # Brainbow Documentation Index
 
 Pick the doc that matches *your* current question.  All six live in
-`doc/`, plus `configs/example_annotated.yaml` for the merged-Hydra view.
+`doc/`.
 
 | When you're asking ...                                           | Read                                                          |
 | ----------------------------------------------------------------- | ------------------------------------------------------------- |
@@ -11,7 +11,6 @@ Pick the doc that matches *your* current question.  All six live in
 | "What actually happens when I run `python scripts/train.py`?  Take me through one batch." | [`WALKTHROUGH.md`](./WALKTHROUGH.md) |
 | "Why is my run silently doing the wrong thing?"                   | [`GOTCHAS.md`](./GOTCHAS.md)                                  |
 | "How do I add a new dataset / loss / backbone / transform?"       | [`CONTRIBUTING.md`](./CONTRIBUTING.md)                        |
-| "What does the merged Hydra config look like end-to-end?"         | [`../configs/example_annotated.yaml`](../configs/example_annotated.yaml) |
 
 ## Reading order for a brand-new contributor
 
@@ -26,9 +25,8 @@ Pick the doc that matches *your* current question.  All six live in
 ## Reading order for an ML researcher already familiar with PyTorch Lightning
 
 1. **[`ARCHITECT.md`](./ARCHITECT.md)** — channel layouts straight to the head math.
-2. **[`configs/example_annotated.yaml`](../configs/example_annotated.yaml)** — every knob, with provenance.
-3. **[`WALKTHROUGH.md`](./WALKTHROUGH.md)** — for the freeze schedule + clusterer dispatch.
-4. **[`GOTCHAS.md`](./GOTCHAS.md)** — read this *before* you trust any number.
+2. **[`WALKTHROUGH.md`](./WALKTHROUGH.md)** — for the freeze schedule + clusterer dispatch.
+3. **[`GOTCHAS.md`](./GOTCHAS.md)** — read this *before* you trust any number.
 
 ## Reading order for "future me, six months from now"
 

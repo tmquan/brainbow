@@ -36,7 +36,6 @@ chain is `default → <dataset> → <project>`.
 | `default.yaml`        | Every knob with a sensible default.  Base for every experiment.             |
 | `snemi3d.yaml`        | SNEMI3D dataset overrides + shared **model/loss** hyperparameters.          |
 | `combine.yaml`        | Multi-dataset training (SNEMI3D + neurons + MICrONS).                       |
-| `boundary.yaml`       | Project-level recipe: trains only the 16-channel boundary head.             |
 
 ---
 

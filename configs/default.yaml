@@ -6,7 +6,6 @@
 #   default        <-- you are here
 #     └── snemi3d  (CosmosTransfer3D + SNEMI3D / neurons / MICrONS)
 #           └── combine   (drops AC4 from train, keeps it in val)
-#                 └── boundary  (enables Boundary head, disables others)
 #
 # Every concrete recipe inherits from this file via ``defaults: [- default]``
 # (or transitively through ``snemi3d`` / ``combine``).  Keys here are the
@@ -15,9 +14,6 @@
 # To see the exact merged tree for any recipe::
 #
 #   python scripts/show_config.py --config-name <recipe>
-#
-# (or open ``configs/example_annotated.yaml`` for a pre-rendered
-# ``default + snemi3d + boundary`` example with per-line provenance.)
 # =====================================================================
 
 # Experiment metadata

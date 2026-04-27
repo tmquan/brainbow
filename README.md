@@ -16,7 +16,7 @@ Cosmos-Transfer2.5 video-diffusion backbone (DiT + VAE).
 
 ```mermaid
 flowchart LR
-    cli["python scripts/train.py<br/>--config-name boundary"] --> hydra["Hydra compose<br/>(default + snemi3d + combine + boundary)"]
+    cli["python scripts/train.py<br/>--config-name combine"] --> hydra["Hydra compose<br/>(default + snemi3d + combine)"]
     hydra --> dm["LightningDataModule<br/>(LazyVolDataset + MONAI transforms)"]
     hydra --> mod["LightningModule<br/>(CosmosTransfer3D / Vista3D)"]
     hydra --> tr["Trainer<br/>(DDP, callbacks, logger)"]
@@ -98,11 +98,15 @@ pip install -e ".[gpu-cu13]" --extra-index-url https://pypi.nvidia.com
 # Plain SNEMI3D run with the standard three-head recipe:
 python scripts/train.py --config-name snemi3d
 
-# Turn on the boundary head (16-channel: raw + instance-colour + face-affinity):
-python scripts/train.py --config-name boundary
+# Multi-dataset (SNEMI3D + neurons + MICrONS) joint training:
+python scripts/train.py --config-name combine
 
 # DDP, custom batch size:
-python scripts/train.py --config-name boundary data.batch_size=4 training.devices=4
+python scripts/train.py --config-name combine data.batch_size=4 training.devices=4
+
+# Boundary-head-only training: override loss weights inline.
+python scripts/train.py --config-name combine \
+    loss.weight_semantic=0.0 loss.weight_instance=0.0 loss.weight_geometry=0.0
 ```
 
 ### GPU memory: avoiding slow OOM drift on long runs
@@ -180,7 +184,6 @@ pytest tests/ -q
 | Skim the codebase before doing anything                        | [`doc/STRUCTURE.md`](doc/STRUCTURE.md)                        |
 | Understand what one training batch actually does               | [`doc/WALKTHROUGH.md`](doc/WALKTHROUGH.md)                    |
 | Know each head's math + channel layout                         | [`doc/ARCHITECT.md`](doc/ARCHITECT.md)                        |
-| See every config knob with provenance                          | [`configs/example_annotated.yaml`](configs/example_annotated.yaml) |
 | Add a new dataset / loss / backbone / transform                | [`doc/CONTRIBUTING.md`](doc/CONTRIBUTING.md)                  |
 | Debug a silent failure (UMAP→PCA, head dropping, freeze, ...)  | [`doc/GOTCHAS.md`](doc/GOTCHAS.md)                            |
 | Tour all docs at once                                          | [`doc/INDEX.md`](doc/INDEX.md)                                |

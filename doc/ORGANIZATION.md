@@ -271,7 +271,7 @@ Configs compose via Hydra's `defaults:` list.  Each file's `defaults:`
 pulls in one parent; the effective config is the parent's merged with
 the child's overrides.  The real chain (parent → child) is::
 
-    default.yaml  →  snemi3d.yaml  →  combine.yaml  →  boundary.yaml
+    default.yaml  →  snemi3d.yaml  →  combine.yaml
 
 - `default.yaml`: every knob with a sensible default.  Also the
   canonical home for **shared model / loss hyperparameters**
@@ -285,30 +285,22 @@ the child's overrides.  The real chain (parent → child) is::
   lists with a multi-dataset mix (SNEMI3D + neurons + MICrONS train,
   with SNEMI3D held out for val/test).  Drops AC4 from train so it can
   serve as the canonical SNEMI3D val volume.
-- `boundary.yaml`: project-level recipe.  Inherits from `combine.yaml`
-  and flips the loss weights so only the Boundary head is active.
 
 **Convention:** a parameter lives in the *most general* config where
 it's meaningful.  Things that don't depend on the dataset go in
-`default.yaml`; dataset-scoped overrides go in the dataset config;
-project-scoped knobs (which heads to enable) go in `boundary.yaml`.
+`default.yaml`; dataset-scoped overrides go in the dataset config.
+Per-experiment toggles (e.g. enabling only the boundary head) go on
+the CLI as Hydra overrides.
 
 Loss-weight blocks are densely commented (see `configs/snemi3d.yaml`
 `loss:` block) so newcomers can learn the loss by reading the config.
-Boundary-head sub-weights are prefixed (`boundary_weight_raw`,
-`boundary_weight_min|avg|max|aff`) in the *flat* form to keep them
-disambiguated from GeometryLoss's own `weight_raw` inside
-`CombinedLoss.__init__`.  The ``aff`` sub-loss (soft-Dice on sigmoid
-face-affinity logits for the 6 neighbours in Z-Y-X order T/B/U/D/L/R)
-is tuned via `boundary_weight_aff` and `boundary_aff_eps`.
-
-`snemi3d.yaml` uses the **nested** loss schema (one mapping per head,
+Every head uses the **nested** loss schema (one mapping per head,
 e.g. ``weight_semantic: { weight: 1.0, ... }``) which keeps every
-head-scoped knob next to its weight.  `default.yaml` and `boundary.yaml`
-use a **flat** schema (``weight_semantic: 0.0``,
-``boundary_weight_aff: 1.0``); both forms are accepted by
-:class:`brainbow.losses.CombinedLoss`.  When in doubt, copy the nested
-form from `snemi3d.yaml`.
+head-scoped knob next to its weight.  The legacy *flat* sub-loss
+kwargs (e.g. ``weight_ce`` at top level routed to the semantic head;
+``boundary_weight_aff`` routed to the boundary head) are still accepted
+by :class:`brainbow.losses.CombinedLoss` for back-compat with old
+checkpoints' hparams, but no shipped config uses them.
 
 ---
 
