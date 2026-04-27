@@ -65,7 +65,7 @@ model:
   in_channels: 1
   semantic_channels: 1    # Semantic head output channels (1 = binary FG / BG)
   instance_channels: 10   # Per-voxel embedding dim for the instance head
-  boundary_channels: 16   # Fixed by the loss (raw(1) + min/avg/max RGB(9) + aff(6))
+  boundary_channels: 10   # Fixed by the loss (raw(1) + avg RGB(3) + direct aff(6))
   feature_size: 64
   dropout: 0.2
   # If true, the wrapper will auto-pull pretrained weights from HuggingFace
@@ -129,9 +129,9 @@ loss:
     loss_cov: mse                 # mse / l1 / smooth_l1
     loss_raw: l1                  # l1 / mse / smooth_l1
 
-  # Boundary head (16-channel; raw + min/avg/max + 6 affinities).  Off
-  # by default; the ``boundary`` recipe enables it and disables the
-  # other three.
+  # Boundary head (10-channel head; raw + avg + direct aff, plus a
+  # derived soft-aff from the predicted avgloc for dual supervision).
+  # Off by default; recipes (e.g. ``snemi3d``) enable it.
   weight_boundary:
     weight: 0.0
 

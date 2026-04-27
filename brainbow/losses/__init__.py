@@ -17,8 +17,10 @@ Standalone task losses
       on a per-voxel embedding.
     * :class:`GeometryLoss`  -- raw / cov-upper-tri / dir regression
       (10 channels in 3-D, 5 in 2-D).
-    * :class:`BoundaryLoss`  -- 16-channel head: raw(1) + min/avg/max
-      RGB(9) + 6-channel face-affinity.  (Formerly ``BrainbowLoss``.)
+    * :class:`BoundaryLoss`  -- 10-channel head: raw(1) + avg RGB(3) +
+      6-channel face-affinity, plus a derived soft 6-aff computed from
+      the predicted avgloc for dual supervision.  (Formerly
+      ``BrainbowLoss``.)
     * :func:`build_boundary_target` -- standalone target builder for
       :class:`BoundaryLoss`, used by :class:`ImageLogger` for previews.
 

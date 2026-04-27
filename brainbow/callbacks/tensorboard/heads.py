@@ -22,10 +22,14 @@ from brainbow.callbacks.tensorboard.tags import TagContext
 # change to the boundary channel layout (e.g. extra affinity
 # directions) propagates into the visualiser automatically.
 from brainbow.losses.boundary import (
+    _AFF_END,
     _AFF_NAMES as _BND_AFF_NAMES,
+    _AFF_START,
+    _AVG_END,
+    _AVG_START,
     _BOUNDARY_CHANNELS,
     _N_AFF,
-    _N_LOC,
+    soft_aff_from_avg,
 )
 from brainbow.losses.geometry import upper_tri_channels_to_matrix
 from brainbow.callbacks.tensorboard.viz import (
@@ -222,32 +226,60 @@ def _log_boundary(
     epoch: int,
     *,
     boundary_target: Optional[torch.Tensor] = None,
+    tau: float = 1.0,
 ) -> None:
     """Log the boundary panels under ``{stage}/{mode}/boundary/``.
 
-    Layout of the 16-channel boundary prediction / target:
-      - ch 0     : ``raw`` (dense, fg + bg; logged as grayscale)
-      - ch 1-3   : ``min`` RGB (foreground-only; zero on background)
-      - ch 4-6   : ``avg`` RGB
-      - ch 7-9   : ``max`` RGB
-      - ch 10-15 : ``aff`` (T / B / U / D / L / R face affinities, Z-Y-X
-                   order; grayscale)
+    Layout of the 10-channel boundary prediction / target:
+      - ch 0    : ``raw`` (dense, fg + bg; logged as grayscale)
+      - ch 1-3  : ``avg`` RGB (foreground-only; zero on background)
+      - ch 4-9  : ``aff`` (T / B / U / D / L / R face affinities, Z-Y-X
+                  order; grayscale)
 
     Predictions arriving here are post-activation: the model wrapper
-    applies a single sigmoid to all 16 channels of the boundary head
+    applies a single sigmoid to all 10 channels of the boundary head
     (every target lives in ``[0, 1]``) so this callback does **not**
     re-apply any activation; the ``clamp`` below is purely a guard for
     float-rounding drift.
+
+    A second 6-face affinity is derived from the predicted avg (ch 1-3)
+    via :func:`soft_aff_from_avg(avg, tau)` and logged under
+    ``boundary/pred/avg/aff/{t,b,u,d,l,r}`` so the dual-aff supervision
+    is visible in TensorBoard alongside the direct prediction.
+
     Panels are written under ``boundary/pred/*`` and, when
     ``boundary_target`` is supplied, also under ``boundary/true/*`` so
     the model output and its supervision signal can be compared
     side-by-side in TensorBoard.
+
+    Args:
+        tau: Bandwidth used for the derived ``aff_avg`` panels; should
+            match :class:`brainbow.losses.BoundaryLoss.tau` for the
+            visualisation to mirror the supervision signal.
     """
     if "boundary" not in preds:
         return
     head = ctx.for_head("boundary")
-    bnd_pred = _to_2d(preds["boundary"][:n])
+    bnd_pred_3d = preds["boundary"][:n]
+    bnd_pred = _to_2d(bnd_pred_3d)
     _add_boundary_panels(tb, head, "pred", bnd_pred, epoch, is_pred=True)
+
+    # Derived aff_avg = soft_aff_from_avg(predicted avg, tau).  Compute
+    # on the 3-D prediction so the Z-direction shifts are meaningful,
+    # then _to_2d the 6-channel result.
+    if bnd_pred_3d.dim() == 5:
+        avg_3d = bnd_pred_3d[:, _AVG_START:_AVG_END]
+        derived_aff = soft_aff_from_avg(avg_3d, tau=tau)
+        derived_aff_2d = _to_2d(derived_aff)
+        for k, name in enumerate(_AFF_TAG_NAMES):
+            panel = repeat(
+                derived_aff_2d[:, k:k + 1].clamp(0.0, 1.0),
+                "b 1 h w -> b 3 h w",
+            )
+            tb.add_images(
+                head.tag(f"pred/avg/aff/{name}"), panel, global_step=epoch,
+            )
+
     if boundary_target is not None:
         bnd_true = _to_2d(boundary_target[:n])
         _add_boundary_panels(tb, head, "true", bnd_true, epoch, is_pred=False)
@@ -262,17 +294,25 @@ def _add_boundary_panels(
     *,
     is_pred: bool,
 ) -> None:
-    """Split a ``[n, 16, H, W]`` boundary tensor into its sub-panels.
+    """Split a ``[n, 10, H, W]`` boundary tensor into its sub-panels.
 
     Channel layout (imported from
     :mod:`brainbow.losses.boundary` -- single source of truth)::
 
-        ch 0                 : raw   (dense intensity; grayscale)
-        ch 1 .. 4            : min   (bbox-min xyz colour)
-        ch 4 .. 7            : avg   (centroid xyz colour)
-        ch 7 .. ``_N_LOC``   : max   (bbox-max xyz colour)
-        ch ``_N_LOC`` ..     : aff   (``_N_AFF`` face affinities,
-         ``_BOUNDARY_CHANNELS``         Z-Y-X order: T B U D L R)
+        ch 0                       : raw   (dense intensity; grayscale)
+        ch ``_AVG_START``..         : avg   (centroid xyz colour)
+              ``_AVG_END``
+        ch ``_AFF_START``..         : aff   (``_N_AFF`` face affinities,
+              ``_AFF_END``               Z-Y-X order: T B U D L R)
+
+    Emits, under ``{variant}`` ∈ {``pred``, ``true``}:
+
+    * ``pred/raw``  (only on the prediction side -- ``true/raw``
+      duplicates ``{ctx.prefix}/true/image`` pixel-for-pixel by
+      construction, so we skip it.)
+    * ``{variant}/avg``
+    * ``{variant}/aff/{t,b,u,d,l,r}``  (direction subtags nested under
+      ``aff/``)
 
     Args:
         tb: TensorBoard SummaryWriter.
@@ -289,49 +329,37 @@ def _add_boundary_panels(
         epoch: global step for TensorBoard.
         is_pred: ``True`` when ``bnd`` comes from the model (post-sigmoid
             on every channel), ``False`` when it is the ground-truth
-            target tensor.  Also gates the ``raw`` panel: on the ground-
-            truth branch we skip it because ``bnd[:, 0]`` is literally
-            the input image and would duplicate
-            ``{ctx.prefix}/true/image``.
+            target tensor.  Gates the ``raw`` panel (true/raw is
+            skipped because it duplicates ``{ctx.prefix}/true/image``).
     """
-    # Sanity-check: the panel indices below assume the canonical 16-
-    # channel boundary layout from ``brainbow.losses.boundary``.  If that
-    # ever changes the slicing has to be updated too; flag loudly rather
-    # than silently show wrong content.
     if bnd.shape[1] != _BOUNDARY_CHANNELS:
         raise ValueError(
             f"_add_boundary_panels expects {_BOUNDARY_CHANNELS} channels, "
             f"got {bnd.shape[1]} (variant={variant!r})."
         )
 
-    # Localisation (colour) panels: [min | avg | max] of the xyz bbox /
-    # centroid, normalised by the crop (D, H, W).  Zero on background.
-    mn = bnd[:, 1:4].clamp(0.0, 1.0)
-    av = bnd[:, 4:7].clamp(0.0, 1.0)
-    mx = bnd[:, 7:_N_LOC].clamp(0.0, 1.0)
-    # ``boundary[:, 0]`` is supervised to equal the normalised input
-    # image, so the ground-truth ``raw`` panel would duplicate
-    # ``{ctx.prefix}/true/image`` pixel-for-pixel.  Emit ``raw`` only on
-    # the prediction side where it actually carries information (the
-    # model's autoencoder reconstruction).
+    av = bnd[:, _AVG_START:_AVG_END].clamp(0.0, 1.0)
     if is_pred:
         raw = repeat(bnd[:, 0:1].clamp(0.0, 1.0), "b 1 h w -> b 3 h w")
         tb.add_images(head.tag(f"{variant}/raw"), raw, global_step=epoch)
-    tb.add_images(head.tag(f"{variant}/min"), mn, global_step=epoch)
     tb.add_images(head.tag(f"{variant}/avg"), av, global_step=epoch)
-    tb.add_images(head.tag(f"{variant}/max"), mx, global_step=epoch)
 
     # Affinity channels: the wrapper has already applied sigmoid on the
     # prediction side (the same sigmoid that covers ch 0-9), so for both
-    # pred and true we just clamp into the valid display range.
-    aff = bnd[:, _N_LOC:_BOUNDARY_CHANNELS].clamp(0.0, 1.0)
+    # pred and true we just clamp into the valid display range.  The
+    # 6 directions live under ``aff/{t,b,u,d,l,r}`` so TensorBoard
+    # collapses them into a single sub-group next to ``avg`` and
+    # ``raw``.
+    aff = bnd[:, _AFF_START:_AFF_END].clamp(0.0, 1.0)
     assert aff.shape[1] == _N_AFF == len(_AFF_TAG_NAMES), (
         f"affinity channel / tag count mismatch: tensor has {aff.shape[1]} "
         f"channels, expected {_N_AFF} (tags={_AFF_TAG_NAMES})."
     )
     for k, name in enumerate(_AFF_TAG_NAMES):
         panel = repeat(aff[:, k:k + 1], "b 1 h w -> b 3 h w")
-        tb.add_images(head.tag(f"{variant}/{name}"), panel, global_step=epoch)
+        tb.add_images(
+            head.tag(f"{variant}/aff/{name}"), panel, global_step=epoch,
+        )
 
 
 def _log_predictions(
@@ -349,6 +377,7 @@ def _log_predictions(
     projection_algorithm: str = "pca",
     projection_backend: str = "auto",
     boundary_target: Optional[torch.Tensor] = None,
+    boundary_tau: float = 1.0,
 ) -> None:
     """Log a standard set of prediction visualisations to TensorBoard.
 
@@ -368,12 +397,16 @@ def _log_predictions(
         {ctx.prefix}/geometry/pred/dir_{centroid|skeleton}
         {ctx.prefix}/geometry/pred/cov
         {ctx.prefix}/geometry/pred/raw
-        {ctx.prefix}/boundary/pred/{raw,min,avg,max}
-        {ctx.prefix}/boundary/pred/{t,b,u,d,l,r}         (Z-Y-X order)
-        {ctx.prefix}/boundary/true/{min,avg,max}         (if target;
+        {ctx.prefix}/boundary/pred/raw
+        {ctx.prefix}/boundary/pred/avg
+        {ctx.prefix}/boundary/pred/aff/{t,b,u,d,l,r}     (direct aff;
+            Z-Y-X order)
+        {ctx.prefix}/boundary/pred/avg/aff/{t,b,u,d,l,r} (derived from
+            predicted avgloc via soft_aff_from_avg)
+        {ctx.prefix}/boundary/true/avg                   (if target;
             ``true/raw`` is omitted because it duplicates
             ``{ctx.prefix}/true/image``)
-        {ctx.prefix}/boundary/true/{t,b,u,d,l,r}         (if target)
+        {ctx.prefix}/boundary/true/aff/{t,b,u,d,l,r}     (if target)
 
     Args:
         tb: TensorBoard SummaryWriter.
@@ -393,8 +426,10 @@ def _log_predictions(
             panel.  One of ``"pca"`` (default), ``"svd"``, ``"umap"``.
         projection_backend: Backend for the projection.  ``"auto"`` picks
             cuML on CUDA, else a CPU fallback.  ``"cuml"`` forces GPU.
-        boundary_target: optional ``[n, 16, D, H, W]`` ground-truth map
+        boundary_target: optional ``[n, 10, D, H, W]`` ground-truth map
             to log alongside the boundary prediction.
+        boundary_tau: bandwidth for the derived ``aff_avg`` panels;
+            should match :class:`brainbow.losses.BoundaryLoss.tau`.
     """
     if ctx.head is not None:
         raise ValueError(
@@ -421,7 +456,8 @@ def _log_predictions(
         spatial_dims=spatial_dims, sem_ids=sem_ids, dir_target=dir_target,
     )
     _log_boundary(
-        tb, ctx, preds, n, epoch, boundary_target=boundary_target,
+        tb, ctx, preds, n, epoch,
+        boundary_target=boundary_target, tau=boundary_tau,
     )
 
 

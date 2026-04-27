@@ -9,10 +9,11 @@ extractor for the four-head volumetric segmentation task:
 - **Geometry**: per-voxel raw intensity, covariance, and direction.
   Channel layout mirrors BoundaryLoss: ``ch 0`` = raw, then cov
   upper-triangle (S*(S+1)/2 channels), then dir (S channels).
-- **Boundary**: per-voxel raw-intensity + per-instance colouring +
-  face-affinity (``boundary_channels`` = 16: 1 raw, 9 min/avg/max RGB,
-  6 face-affinity neighbours in Z-Y-X order (T/B/U/D/L/R); see
-  :class:`brainbow.losses.BoundaryLoss`).
+- **Boundary**: per-voxel raw-intensity + per-instance centroid colour +
+  direct face-affinity (``boundary_channels`` = 10: 1 raw, 3 avg RGB,
+  6 face-affinity neighbours in Z-Y-X order T/B/U/D/L/R).  The loss
+  also derives a soft 6-aff from the predicted avgloc for dual
+  supervision; see :class:`brainbow.losses.BoundaryLoss`.
 
 Cosmos-Transfer2.5 is natively a video model with temporal + spatial
 dimensions.  For volumetric EM data the depth axis maps directly to the

@@ -62,7 +62,8 @@ _INSTANCE_FLAT_KEYS: Tuple[str, ...] = (
 )
 # Flat-kwarg prefix for the boundary head, used to disambiguate from
 # ``GeometryLoss``'s ``weight_raw`` etc.  Inside the nested mapping the
-# prefix is dropped (``weight_raw``, ``weight_min``, ...).
+# prefix is dropped (``weight_raw``, ``weight_avg``, ``weight_aff_pred``,
+# ``weight_aff_avg``, ...).
 _BOUNDARY_FLAT_PREFIX: str = "boundary_"
 
 
@@ -95,7 +96,7 @@ class CombinedLoss(nn.Module):
       Boundary-head flat kwargs are prefixed with ``boundary_`` to
       avoid colliding with ``GeometryLoss``'s ``weight_raw``; inside
       the nested mapping the prefix is dropped (``weight_raw``,
-      ``weight_min``, ...).
+      ``weight_avg``, ``weight_aff_pred``, ``weight_aff_avg``, ...).
 
     Args:
         spatial_dims: 2 or 3 (controls InstanceLoss / GeometryLoss).
@@ -308,8 +309,8 @@ class CombinedLoss(nn.Module):
             bnd = self.boundary_loss(predictions["boundary"], labels, raw_image)
         else:
             bnd = {
-                "loss": zero, "min": zero, "avg": zero,
-                "max": zero, "raw": zero, "aff": zero,
+                "loss": zero, "avg": zero, "raw": zero, "aff": zero,
+                "aff_pred": zero, "aff_avg": zero,
             }
 
         # Total
@@ -355,11 +356,11 @@ class CombinedLoss(nn.Module):
 
         if self.boundary_loss is not None:
             out["boundary/loss"] = bnd["loss"]
-            out["boundary/loss/min"] = bnd["min"]
-            out["boundary/loss/avg"] = bnd["avg"]
-            out["boundary/loss/max"] = bnd["max"]
             out["boundary/loss/raw"] = bnd["raw"]
+            out["boundary/loss/avg"] = bnd["avg"]
             out["boundary/loss/aff"] = bnd["aff"]
+            out["boundary/loss/aff_pred"] = bnd["aff_pred"]
+            out["boundary/loss/aff_avg"] = bnd["aff_avg"]
 
         if self.learned_task_weights:
             if self.weight_semantic > 0:

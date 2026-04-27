@@ -7,16 +7,19 @@ Provides:
 - Preprocessors for common data formats (TIFF, HDF5, NRRD, NIfTI)
 - Cosmos-Transfer3D model wrapper (DiT + VAE backbone) for volumetric
   segmentation, together with a Vista3D reference implementation
-- A ``BoundaryLoss`` that turns each connected-component instance into
-  a 16-channel per-voxel target:
+- A ``BoundaryLoss`` whose head emits 10 per-voxel channels:
     * 1 channel   -- *raw*, the raw image intensity at that voxel
-    * 3 channels  -- RGB of the instance's bounding-box *min* location
     * 3 channels  -- RGB of the instance's centroid (*avg* location)
-    * 3 channels  -- RGB of the instance's bounding-box *max* location
-    * 6 channels  -- *aff*, binary face-affinity to the 6 neighbours
-                    in Z-Y-X order (T, B, U, D, L, R) with SAME /
-                    replicate padding; supervised via soft-Dice on the
-                    sigmoid of the logits.
+    * 6 channels  -- *aff_pred*, the model's direct face-affinity
+                    prediction in Z-Y-X order (T, B, U, D, L, R) with
+                    SAME / replicate padding; supervised via BCE +
+                    soft-Dice + soft-Jaccard.
+  In addition, the loss derives a soft 6-face affinity from the
+  predicted avgloc via
+  ``aff_avg[c] = exp(-tau * sum_i |avg[i] - shift(avg[i], dir_c)|)``
+  and supervises that derived signal against the same binary aff
+  target (``weight_aff_pred`` / ``weight_aff_avg`` scale the two
+  paths separately).
 """
 
 import warnings

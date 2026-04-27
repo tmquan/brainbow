@@ -46,9 +46,10 @@ class ImageLogger(pl.Callback):
         {stage}/automatic/instance/pred/{pca|svd|umap}
         {stage}/automatic/instance/pred/label
         {stage}/automatic/geometry/pred/{dir_centroid|cov|raw}
-        {stage}/automatic/boundary/pred/{raw,min,avg,max}
-        {stage}/automatic/boundary/true/{min,avg,max}
-        {stage}/automatic/boundary/{pred,true}/{t,b,u,d,l,r}
+        {stage}/automatic/boundary/pred/raw
+        {stage}/automatic/boundary/{pred,true}/avg
+        {stage}/automatic/boundary/{pred,true}/aff/{t,b,u,d,l,r}
+        {stage}/automatic/boundary/pred/avg/aff/{t,b,u,d,l,r}
 
     ``boundary/true/raw`` is intentionally **not** emitted: it would
     duplicate ``{stage}/automatic/true/image`` pixel-for-pixel (the
@@ -212,7 +213,7 @@ class ImageLogger(pl.Callback):
         labels: torch.Tensor,
         n: int,
     ) -> Optional[torch.Tensor]:
-        """Return the 16-channel boundary GT target if it should be logged.
+        """Return the 10-channel boundary GT target if it should be logged.
 
         Gated by:
           * ``weight_boundary > 0`` on the criterion, AND
@@ -285,6 +286,8 @@ class ImageLogger(pl.Callback):
         dir_target = getattr(geom_loss, "dir_target", "centroid") if geom_loss else "centroid"
         sem_loss = getattr(criterion, "semantic_loss", None) if criterion else None
         active_classes = getattr(sem_loss, "active_classes", None) if sem_loss else None
+        bnd_loss = getattr(criterion, "boundary_loss", None) if criterion else None
+        boundary_tau = float(getattr(bnd_loss, "tau", 1.0)) if bnd_loss else 1.0
 
         boundary_target = self._maybe_build_boundary_target(
             preds_auto, criterion, images, labels, n,
@@ -305,6 +308,7 @@ class ImageLogger(pl.Callback):
             projection_algorithm=self.projection_algorithm,
             projection_backend=self.projection_backend,
             boundary_target=boundary_target,
+            boundary_tau=boundary_tau,
         )
         del preds_auto, boundary_target
 

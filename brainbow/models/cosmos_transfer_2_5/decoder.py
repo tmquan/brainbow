@@ -19,10 +19,10 @@ visualisation consume the outputs)::
                 :class:`brainbow.losses.geometry.GeometryLoss`::
                     [raw(1) | cov(S*(S+1)/2) | dir(S)]
     boundary :  sigmoid on every channel (every target lives in
-                [0, 1]: raw intensity, normalised xyz colours, binary
-                face affinities).  Channel layout is owned by
+                [0, 1]: raw intensity, normalised centroid xyz colour,
+                binary face affinities).  Channel layout is owned by
                 :mod:`brainbow.losses.boundary`::
-                    [raw(1) | min/avg/max (9) | aff (6)]
+                    [raw(1) | avg(3) | aff_pred(6)]  -> 10 channels
 
 Keeping the activation policy in a single place (this file) means the
 loss modules consume probabilities directly and the TensorBoard
@@ -289,12 +289,16 @@ class _DecoderAdapter3D(nn.Module):
             )
         if "boundary" not in self._disabled_heads:
             # Boundary head: every target lives in [0, 1] --
-            # ch 0 is the normalised raw image, ch 1-9 are per-instance
-            # bbox / centroid coordinates divided by (D, H, W), and
-            # ch 10-15 are binary face affinities.  A single sigmoid on
-            # all 16 channels is therefore the correct activation; the
-            # BCE / Dice / IoU sub-losses on the affinity block expect
-            # pre-sigmoided probabilities.
+            # ch 0 is the normalised raw image, ch 1-3 is the
+            # per-instance centroid xyz / (D, H, W), and ch 4-9 are
+            # binary face affinities.  A single sigmoid on all 10
+            # channels is therefore the correct activation; the BCE /
+            # Dice / IoU sub-losses on the affinity block expect
+            # pre-sigmoided probabilities.  The loss also derives a
+            # second 6-face affinity from the predicted ch 1-3 (see
+            # :func:`brainbow.losses.boundary.soft_aff_from_avg`); that
+            # derived signal lives entirely on the loss side -- the
+            # decoder still emits exactly 10 channels.
             out["boundary"] = self.head_boundary(decoded).sigmoid()
         return out
 

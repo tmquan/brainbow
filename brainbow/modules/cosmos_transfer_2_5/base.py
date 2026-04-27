@@ -95,7 +95,7 @@ class BaseCosmosModule(BaseCircuitModule):
                 model_config.get("num_classes", 1),
             ),
             instance_channels=model_config.get("instance_channels", 10),
-            boundary_channels=model_config.get("boundary_channels", 16),
+            boundary_channels=model_config.get("boundary_channels", 10),
             feature_size=model_config.get("feature_size", 64),
             variant=model_config.get("variant", "2B"),
             dtype=model_config.get("dtype", "bf16"),

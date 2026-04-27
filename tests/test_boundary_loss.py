@@ -1,14 +1,17 @@
 """
-Tests for BoundaryLoss and its 16-channel target construction.
+Tests for BoundaryLoss and its 10-channel target construction.
 
 The target map encodes, per voxel:
-  - channel  0     : raw image intensity at that voxel (dense, everywhere)
-  - channels 1-3   : normalised min (bbox-min (z, y, x)) of the instance
-  - channels 4-6   : normalised avg (centroid) of the instance
-  - channels 7-9   : normalised max (bbox-max (z, y, x)) of the instance
-  - channels 10-15 : binary face-affinity to 6 neighbours in Z-Y-X order
+  - channel 0     : raw image intensity at that voxel (dense, everywhere)
+  - channels 1-3  : normalised avg (centroid) of the instance
+  - channels 4-9  : binary face-affinity to 6 neighbours in Z-Y-X order
                     (T, B, U, D, L, R) with SAME / replicate padding at
                     the volume boundary.
+
+The BoundaryLoss additionally derives a soft 6-face affinity from the
+predicted avgloc (ch 1-3) via ``soft_aff_from_avg`` and supervises that
+derived signal against the same binary aff target -- the dual-aff
+configuration is exercised in :class:`TestBoundaryLoss`.
 """
 
 import pytest
@@ -17,6 +20,7 @@ import torch
 from brainbow.losses.boundary import (
     BoundaryLoss,
     build_boundary_target,
+    soft_aff_from_avg,
 )
 
 
@@ -39,7 +43,7 @@ class TestBuildBoundaryTarget:
     def test_target_shape(self) -> None:
         labels, image = self._simple_labels()
         target = build_boundary_target(labels, image)
-        assert target.shape == (1, 16, 8, 16, 16)
+        assert target.shape == (1, 10, 8, 16, 16)
         assert target.dtype == torch.float32
 
     def test_raw_equals_image(self) -> None:
@@ -47,33 +51,19 @@ class TestBuildBoundaryTarget:
         target = build_boundary_target(labels, image)
         assert torch.allclose(target[:, 0], image.float())
 
-    def test_localisation_channels_in_unit_interval(self) -> None:
+    def test_avg_channels_in_unit_interval(self) -> None:
         labels, image = self._simple_labels()
         target = build_boundary_target(labels, image)
-        loc = target[:, 1:10]
-        assert loc.min() >= 0.0
-        assert loc.max() <= 1.0
+        avg = target[:, 1:4]
+        assert avg.min() >= 0.0
+        assert avg.max() <= 1.0
 
-    def test_background_localisation_is_zero(self) -> None:
+    def test_background_avg_is_zero(self) -> None:
         labels, image = self._simple_labels()
         target = build_boundary_target(labels, image)
         bg_mask = labels == 0
-        loc_bg = target[:, 1:10][bg_mask.unsqueeze(1).expand(-1, 9, -1, -1, -1)]
-        assert torch.all(loc_bg == 0.0)
-
-    def test_known_instance_extrema(self) -> None:
-        """Instance 1 occupies [0:4, 0:8, 0:8]; min=(0,0,0), max=(3,7,7)."""
-        labels, image = self._simple_labels()
-        D, H, W = 8, 16, 16
-        target = build_boundary_target(labels, image)
-
-        fg1 = labels[0] == 1
-        min_rgb = target[0, 1:4][:, fg1][:, 0]
-        max_rgb = target[0, 7:10][:, fg1][:, 0]
-        assert torch.allclose(min_rgb, torch.tensor([0.0, 0.0, 0.0]))
-        assert torch.allclose(
-            max_rgb, torch.tensor([3.0 / D, 7.0 / H, 7.0 / W]), atol=1e-6
-        )
+        avg_bg = target[:, 1:4][bg_mask.unsqueeze(1).expand(-1, 3, -1, -1, -1)]
+        assert torch.all(avg_bg == 0.0)
 
     def test_centroid_is_instance_mean(self) -> None:
         labels, image = self._simple_labels()
@@ -84,25 +74,22 @@ class TestBuildBoundaryTarget:
             idx = torch.nonzero(labels[0] == inst_id, as_tuple=False).float()
             expected = idx.mean(0) / torch.tensor([D, H, W])
             fg = labels[0] == inst_id
-            got = target[0, 4:7][:, fg][:, 0]
+            got = target[0, 1:4][:, fg][:, 0]
             assert torch.allclose(got, expected, atol=1e-6)
 
     def test_empty_labels_aff_is_zero_with_default_background(self) -> None:
         """Default ``background=0`` masks out spurious bg-bg ``1``s.
 
-        Under the new default, an all-background volume produces ``aff = 0``
-        on every direction (no foreground voxel anywhere), instead of the
-        legacy ``aff = 1`` everywhere from ``0 == 0``.  See
-        :meth:`test_empty_labels_aff_is_one_with_background_none` for
-        the opt-out (legacy) behavior.
+        With no foreground voxels anywhere, ``aff = 0`` on every
+        direction (instead of the legacy ``aff = 1`` from ``0 == 0``).
         """
         B, D, H, W = 1, 4, 4, 4
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
         image = torch.rand(B, D, H, W)
         target = build_boundary_target(labels, image)
-        assert torch.all(target[:, 1:10] == 0)
+        assert torch.all(target[:, 1:4] == 0)
         assert torch.allclose(target[:, 0], image.float())
-        assert torch.all(target[:, 10:16] == 0.0)
+        assert torch.all(target[:, 4:10] == 0.0)
 
     def test_empty_labels_aff_is_one_with_background_none(self) -> None:
         """Opt-out via ``background=None`` reproduces the pre-fix targets."""
@@ -110,63 +97,54 @@ class TestBuildBoundaryTarget:
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
         image = torch.rand(B, D, H, W)
         target = build_boundary_target(labels, image, background=None)
-        # Every voxel sees the same background label as every neighbour.
-        assert torch.all(target[:, 10:16] == 1.0)
+        assert torch.all(target[:, 4:10] == 1.0)
 
     def test_affinity_shape_and_range(self) -> None:
         labels, image = self._simple_labels()
         target = build_boundary_target(labels, image)
-        aff = target[:, 10:16]
+        aff = target[:, 4:10]
         assert aff.shape == (1, 6, 8, 16, 16)
         assert torch.all((aff == 0.0) | (aff == 1.0))
 
     def test_affinity_boundary_is_one_for_foreground(self) -> None:
-        """SAME / replicate padding -> foreground boundary voxels self-connect.
-
-        With default ``background=0``, background voxels at the volume
-        boundary are masked to ``0``; only foreground voxels still
-        self-connect at ``aff == 1``.
-        """
+        """SAME / replicate padding -> foreground boundary voxels self-connect."""
         labels, image = self._simple_labels()
         target = build_boundary_target(labels, image)
-        aff = target[0, 10:16]          # [6, D, H, W]
-        fg = labels[0] > 0              # [D, H, W]
+        aff = target[0, 4:10]            # [6, D, H, W]
+        fg = labels[0] > 0               # [D, H, W]
 
         # Channel layout is Z-Y-X:
         #   ch 0 T (z-1)  ch 1 B (z+1)
         #   ch 2 U (y-1)  ch 3 D (y+1)
         #   ch 4 L (x-1)  ch 5 R (x+1)
-        assert torch.all(aff[0, 0, :, :][fg[0]] == 1.0)    # T: first slice of D
+        assert torch.all(aff[0, 0, :, :][fg[0]] == 1.0)
         assert torch.all(aff[0, 0, :, :][~fg[0]] == 0.0)
-        assert torch.all(aff[1, -1, :, :][fg[-1]] == 1.0)  # B: last slice of D
+        assert torch.all(aff[1, -1, :, :][fg[-1]] == 1.0)
         assert torch.all(aff[1, -1, :, :][~fg[-1]] == 0.0)
-        assert torch.all(aff[2, :, 0, :][fg[:, 0]] == 1.0)    # U: top row of H
+        assert torch.all(aff[2, :, 0, :][fg[:, 0]] == 1.0)
         assert torch.all(aff[2, :, 0, :][~fg[:, 0]] == 0.0)
-        assert torch.all(aff[3, :, -1, :][fg[:, -1]] == 1.0)  # D: bottom row of H
+        assert torch.all(aff[3, :, -1, :][fg[:, -1]] == 1.0)
         assert torch.all(aff[3, :, -1, :][~fg[:, -1]] == 0.0)
-        assert torch.all(aff[4, :, :, 0][fg[:, :, 0]] == 1.0)    # L: left col of W
+        assert torch.all(aff[4, :, :, 0][fg[:, :, 0]] == 1.0)
         assert torch.all(aff[4, :, :, 0][~fg[:, :, 0]] == 0.0)
-        assert torch.all(aff[5, :, :, -1][fg[:, :, -1]] == 1.0)  # R: right col of W
+        assert torch.all(aff[5, :, :, -1][fg[:, :, -1]] == 1.0)
         assert torch.all(aff[5, :, :, -1][~fg[:, :, -1]] == 0.0)
 
     def test_affinity_interior_matches_masked_label_eq(self) -> None:
         """Interior aff[dir] == ((labels == shift(labels, dir)) & (labels != 0))."""
         labels, image = self._simple_labels()
         target = build_boundary_target(labels, image)
-        aff = target[0, 10:16]
+        aff = target[0, 4:10]
         lbl = labels[0]
 
-        # T / B on the D axis (Z) -- center is the un-shifted slice.
         c, s = lbl[1:, :, :], lbl[:-1, :, :]
         assert torch.all(aff[0, 1:, :, :] == ((c == s) & (c != 0)).float())
         c, s = lbl[:-1, :, :], lbl[1:, :, :]
         assert torch.all(aff[1, :-1, :, :] == ((c == s) & (c != 0)).float())
-        # U / D on the H axis (Y).
         c, s = lbl[:, 1:, :], lbl[:, :-1, :]
         assert torch.all(aff[2, :, 1:, :] == ((c == s) & (c != 0)).float())
         c, s = lbl[:, :-1, :], lbl[:, 1:, :]
         assert torch.all(aff[3, :, :-1, :] == ((c == s) & (c != 0)).float())
-        # L / R on the W axis (X).
         c, s = lbl[:, :, 1:], lbl[:, :, :-1]
         assert torch.all(aff[4, :, :, 1:] == ((c == s) & (c != 0)).float())
         c, s = lbl[:, :, :-1], lbl[:, :, 1:]
@@ -176,7 +154,7 @@ class TestBuildBoundaryTarget:
         """``background=None`` reproduces the pre-fix unmasked target."""
         labels, image = self._simple_labels()
         target = build_boundary_target(labels, image, background=None)
-        aff = target[0, 10:16]
+        aff = target[0, 4:10]
         lbl = labels[0]
 
         assert torch.all(
@@ -188,8 +166,6 @@ class TestBuildBoundaryTarget:
         assert torch.all(
             aff[4, :, :, 1:] == (lbl[:, :, 1:] == lbl[:, :, :-1]).float()
         )
-        # Volume-boundary voxels are unmasked too: every voxel self-connects
-        # under SAME-pad, so the slice along the padded axis is all ones.
         assert torch.all(aff[0, 0, :, :] == 1.0)
 
     def test_affinity_background_custom_value(self) -> None:
@@ -197,28 +173,20 @@ class TestBuildBoundaryTarget:
         B, D, H, W = 1, 4, 8, 8
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
         labels[0, :2, :4, :4] = 1
-        labels[0, 2:, 4:, 4:] = 42      # treat 42 as background here
+        labels[0, 2:, 4:, 4:] = 42
         image = torch.rand(B, D, H, W)
 
         target = build_boundary_target(labels, image, background=42)
-        aff = target[0, 10:16]
+        aff = target[0, 4:10]
 
-        # Voxels with label == 42 are masked to 0 across all 6 channels.
         bg = labels[0] == 42
         for c in range(6):
             assert torch.all(aff[c][bg] == 0.0)
 
-        # Voxels with label == 0 (the actual zeros) are *not* masked --
-        # bg-bg pairs supervise as "1" because 0 != 42.
         zeros = labels[0] == 0
-        # Pick an interior zero voxel that has a zero neighbour in every
-        # direction; SAME-pad already makes the volume-boundary slabs 1.
-        # The (z=0..1, y=0..3, x=4..7) corner is all zeros and far from
-        # the label==42 quadrant.
         assert torch.any(zeros)
-        # Spot-check the centre of that all-zero corner along R (x+1):
-        # ``aff[5, 0, 0, 4]`` corresponds to (z=0, y=0, x=4) vs (z=0, y=0, x=5)
-        # -- both are 0, so ``aff = 1`` since 0 != 42.
+        # ``aff[5, 0, 0, 4]`` corresponds to (z=0, y=0, x=4) vs (z=0, y=0, x=5):
+        # both are 0 and neither equals the masked-out ``42``, so aff = 1.
         assert aff[5, 0, 0, 4] == 1.0
 
     def test_shape_mismatch_raises(self) -> None:
@@ -243,6 +211,51 @@ class TestBuildBoundaryTarget:
 
 
 # ---------------------------------------------------------------------------
+# Soft affinity from avgloc
+# ---------------------------------------------------------------------------
+
+
+class TestSoftAffFromAvg:
+    """Unit tests for :func:`soft_aff_from_avg`."""
+
+    def test_shape_and_range(self) -> None:
+        avg = torch.rand(2, 3, 4, 8, 8)
+        aff = soft_aff_from_avg(avg, tau=1.0)
+        assert aff.shape == (2, 6, 4, 8, 8)
+        # exp(-tau * L1) is in (0, 1]; under SAME-pad the boundary
+        # voxel compares to itself so the boundary slab is exactly 1.
+        assert aff.min() > 0.0
+        assert aff.max() <= 1.0 + 1e-6
+
+    def test_constant_avg_is_one_everywhere(self) -> None:
+        """If predicted avg is constant, every face-affinity is 1."""
+        avg = torch.full((1, 3, 3, 5, 5), 0.7)
+        aff = soft_aff_from_avg(avg, tau=2.0)
+        assert torch.allclose(aff, torch.ones_like(aff))
+
+    def test_known_step_l1_distance(self) -> None:
+        """Two slabs with constant but different avg -> exp(-tau * L1) at boundary."""
+        avg = torch.zeros(1, 3, 4, 1, 1)
+        avg[0, :, 2:] = 1.0  # step at z=2 across all 3 channels: L1 = 3
+        tau = 0.5
+        aff = soft_aff_from_avg(avg, tau=tau)
+        expected = torch.tensor([[[2.71828 ** (-tau * 3.0)]]])
+        # T (z-1): boundary appears at z=2 (compares to z=1 where avg=0).
+        assert torch.allclose(aff[0, 0, 2, 0, 0:1], expected, atol=1e-4)
+        # B (z+1): boundary appears at z=1 (compares to z=2 where avg=1).
+        assert torch.allclose(aff[0, 1, 1, 0, 0:1], expected, atol=1e-4)
+        # Interior of each slab is 1.
+        assert torch.allclose(aff[0, 0, 0, 0, 0], torch.tensor(1.0))
+        assert torch.allclose(aff[0, 0, 3, 0, 0], torch.tensor(1.0))
+
+    def test_wrong_shape_raises(self) -> None:
+        with pytest.raises(ValueError):
+            soft_aff_from_avg(torch.rand(2, 4, 4, 8, 8))   # 4 channels != 3
+        with pytest.raises(ValueError):
+            soft_aff_from_avg(torch.rand(2, 3, 4, 8))      # 4-D not 5-D
+
+
+# ---------------------------------------------------------------------------
 # Loss module
 # ---------------------------------------------------------------------------
 
@@ -258,22 +271,27 @@ class TestBoundaryLoss:
         labels[0, 4:, 8:, 8:] = 2
         labels[1, 2:6, 4:12, 4:12] = 3
         image = torch.rand(B, D, H, W)
-        # ``BoundaryLoss`` now expects post-sigmoid probabilities on the
-        # 6 affinity channels (the model wrapper applies sigmoid before
-        # the loss sees the prediction).  The 10 regression channels can
-        # take any real value -- we use ``randn`` to keep them general.
-        loc = torch.randn(B, 10, D, H, W)
+        # ``BoundaryLoss`` consumes post-sigmoid probabilities on every
+        # boundary channel (raw + avg + direct aff); the model wrapper
+        # applies sigmoid before the loss sees the prediction.
+        raw = torch.rand(B, 1, D, H, W)
+        avg = torch.rand(B, 3, D, H, W)
         aff = torch.rand(B, 6, D, H, W)
-        pred = torch.cat([loc, aff], dim=1).detach().requires_grad_(True)
+        pred = torch.cat([raw, avg, aff], dim=1).detach().requires_grad_(True)
         return pred, labels, image
 
     def test_num_channels_constant(self) -> None:
-        assert BoundaryLoss.num_channels == 16
+        assert BoundaryLoss.num_channels == 10
 
     def test_forward_returns_required_keys(self, batch) -> None:
         pred, labels, image = batch
         out = BoundaryLoss()(pred, labels, image)
-        for k in ("loss", "min", "avg", "max", "raw", "aff"):
+        for k in (
+            "loss", "raw", "avg", "aff",
+            "aff_pred", "aff_avg",
+            "aff_pred_ce", "aff_pred_dice", "aff_pred_iou",
+            "aff_avg_ce", "aff_avg_dice", "aff_avg_iou",
+        ):
             assert k in out
 
     def test_loss_is_finite_and_non_negative(self, batch) -> None:
@@ -291,57 +309,75 @@ class TestBoundaryLoss:
         assert pred.grad.abs().sum() > 0
 
     def test_zero_instances_only_raw_and_aff(self, batch) -> None:
-        """No instances -> loc sub-losses are zero; raw + aff stay finite."""
+        """No instances -> avg sub-loss is zero; raw + aff stay finite."""
         pred, _, image = batch
         B, D, H, W = image.shape
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
         out = BoundaryLoss()(pred, labels, image)
-        assert out["min"].item() == 0.0
         assert out["avg"].item() == 0.0
-        assert out["max"].item() == 0.0
         assert out["raw"].item() > 0.0
-        # Default ``background=0`` -> aff target is uniformly 0 (no
-        # foreground anywhere); soft-Dice loss must remain finite.
         assert torch.isfinite(out["aff"])
 
     def test_weights_applied_to_total(self, batch) -> None:
         pred, labels, image = batch
-        uniform = BoundaryLoss(
-            weight_min=1.0, weight_avg=1.0, weight_max=1.0,
-            weight_raw=1.0, weight_dice=1.0,
-        )(pred, labels, image)
         only_raw = BoundaryLoss(
-            weight_min=0.0, weight_avg=0.0, weight_max=0.0,
-            weight_raw=1.0,
-            weight_ce=0.0, weight_dice=0.0, weight_iou=0.0,
+            weight_avg=0.0, weight_raw=1.0,
+            weight_aff_pred=0.0, weight_aff_avg=0.0,
         )(pred, labels, image)
-        # "only_raw" has exactly loss == raw; uniform has the extra
-        # localisation + affinity terms, so it must be at least as large.
         assert only_raw["loss"].item() == pytest.approx(
             only_raw["raw"].item(), rel=1e-6
         )
+
+        uniform = BoundaryLoss(
+            weight_avg=1.0, weight_raw=1.0,
+            weight_aff_pred=1.0, weight_aff_avg=1.0,
+            weight_dice=1.0,
+        )(pred, labels, image)
         assert uniform["loss"].item() >= only_raw["loss"].item() - 1e-6
 
-    def test_aff_loss_is_soft_dice_on_probs(self, batch) -> None:
-        """Perfect affinity probs give Dice ~ 1 -> loss ~ 0.
-
-        ``BoundaryLoss`` consumes the 6 affinity channels as
-        already-sigmoided probabilities (the model wrapper applies the
-        activation upstream), so a ``perfect'' prediction is one whose
-        channels equal the binary target tensor itself.
-        """
+    def test_disabling_aff_avg_path_removes_its_term(self, batch) -> None:
+        """``weight_aff_avg=0`` must zero out the derived path."""
         pred, labels, image = batch
-        loss_fn = BoundaryLoss(weight_dice=1.0)
+        out = BoundaryLoss(weight_aff_avg=0.0)(pred, labels, image)
+        assert out["aff_avg"].item() == 0.0
+        assert out["aff_avg_ce"].item() == 0.0
+        assert out["aff_avg_dice"].item() == 0.0
+
+    def test_aff_loss_is_soft_dice_on_probs(self, batch) -> None:
+        """Perfect direct-aff probs give Dice ~ 1 -> aff_pred ~ 0."""
+        pred, labels, image = batch
+        loss_fn = BoundaryLoss(
+            weight_dice=1.0, weight_aff_avg=0.0,
+        )
         target = loss_fn.build_target(labels, image)
 
         ideal = pred.detach().clone()
-        ideal[:, 10:16] = target[:, 10:16]
+        ideal[:, 4:10] = target[:, 4:10]
         out = loss_fn(ideal, labels, image)
-        assert out["aff"].item() < 0.05
+        assert out["aff_pred"].item() < 0.05
+
+    def test_aff_avg_path_consistency_with_avg(self, batch) -> None:
+        """Setting predicted avg = avg target makes the derived-aff loss small."""
+        pred, labels, image = batch
+        loss_fn = BoundaryLoss(
+            weight_dice=1.0, weight_aff_pred=0.0, weight_aff_avg=1.0,
+            tau=4.0,
+        )
+        target = loss_fn.build_target(labels, image)
+        ideal = pred.detach().clone()
+        ideal[:, 1:4] = target[:, 1:4]
+        out = loss_fn(ideal, labels, image)
+        # With the predicted avg matching the per-instance centroid
+        # field, ``soft_aff_from_avg`` returns ~1 within each instance
+        # and ~0 across boundaries, matching the binary aff target up
+        # to the soft kernel.  Dice is therefore much smaller than the
+        # random baseline.
+        rand_out = loss_fn(pred, labels, image)
+        assert out["aff_avg"].item() < rand_out["aff_avg"].item()
 
     def test_wrong_prediction_channels_raises(self, batch) -> None:
         _, labels, image = batch
-        bad = torch.randn(*labels.shape[:1], 10, *labels.shape[1:])
+        bad = torch.randn(*labels.shape[:1], 16, *labels.shape[1:])
         with pytest.raises(ValueError):
             BoundaryLoss()(bad, labels, image)
 
@@ -378,10 +414,10 @@ class TestBoundaryInCombinedLoss:
         labels[0, :2, :4, :4] = 1
         labels[0, 2:, 4:, 4:] = 2
         image = torch.rand(B, D, H, W)
-        # Match the wrapper's output contract: regression channels are
-        # arbitrary reals, affinity channels (10-15) are already in [0, 1].
+        # Match the wrapper's output contract: every boundary channel
+        # arrives in [0, 1] (sigmoid is applied by the model wrapper).
         bnd = torch.cat(
-            [torch.randn(B, 10, D, H, W), torch.rand(B, 6, D, H, W)], dim=1,
+            [torch.rand(B, 4, D, H, W), torch.rand(B, 6, D, H, W)], dim=1,
         ).detach().requires_grad_(True)
         preds = {"boundary": bnd}
         targets = {
@@ -393,9 +429,11 @@ class TestBoundaryInCombinedLoss:
         for k in (
             "loss",
             "boundary/loss",
-            "boundary/loss/min",
             "boundary/loss/raw",
+            "boundary/loss/avg",
             "boundary/loss/aff",
+            "boundary/loss/aff_pred",
+            "boundary/loss/aff_avg",
         ):
             assert k in out
         out["loss"].backward()
@@ -422,10 +460,11 @@ class TestBoundaryInCombinedLoss:
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
         labels[0, :2, :4, :4] = 1
         preds = {"boundary": torch.cat(
-            [torch.randn(B, 10, D, H, W), torch.rand(B, 6, D, H, W)], dim=1,
+            [torch.rand(B, 4, D, H, W), torch.rand(B, 6, D, H, W)], dim=1,
         )}
         with pytest.raises(KeyError):
             loss(preds, {"labels": labels, "semantic_labels": (labels > 0).long()})
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

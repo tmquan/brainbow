@@ -167,7 +167,7 @@ model:
   in_channels: 1                  #   raw EM   -> 1 channel
   semantic_channels: 1            #   FG / BG  -> 1 channel
   instance_channels: 10           #   embedding dimensionality
-  boundary_channels: 16           #   raw(1) + min/avg/max RGB(9) + aff(6)
+  boundary_channels: 10           #   raw(1) + avg RGB(3) + direct aff(6)
   feature_size: 64
 
   # What to freeze.  Backbone is pretrained, so we adapt only the heads
@@ -203,7 +203,7 @@ training:
   limit_val_batches: 100
   num_sanity_val_steps: 2
   log_every_n_steps: 100
-  check_val_every_n_epoch: 10     # validate every 10 epochs (default 1)
+  check_val_every_n_epoch: 20     # validate every 10 epochs (default 1)
   benchmark: true
 
   # torch.compile on the DiT backbone:
@@ -354,36 +354,54 @@ loss:
     loss_raw: l1                  # raw-intensity regression: mse | l1 | smooth_l1
 
   # -------------------------------------------------------------------
-  # Boundary head (formerly "brainbow")  --  16 channels total
+  # Boundary head (formerly "brainbow")  --  10 channel head, dual-aff
   # -------------------------------------------------------------------
-  # Per-instance bbox/centroid colouring + raw reconstruction + 6 face
+  # Per-instance centroid colouring + raw reconstruction + 6 face
   # affinities.  See brainbow/losses/boundary.py for details.
   #
-  # Channel layout:
-  #   ch  0     := raw   (raw image intensity, per voxel)
-  #   ch  1- 3  := min   (normalised (z, y, x) of each instance's bbox min)
-  #   ch  4- 6  := avg   (normalised (z, y, x) centroid)
-  #   ch  7- 9  := max   (normalised (z, y, x) of each instance's bbox max)
-  #   ch 10-15  := aff   (binary face-affinity to 6 neighbours, T/B/U/D/L/R
-  #                       in Z-Y-X order, SAME-pad; supervised via
-  #                       CE + soft-Dice + soft-Jaccard on sigmoid)
+  # Model output (10 channels):
+  #   ch 0     := raw       (raw image intensity, per voxel)
+  #   ch 1- 3  := avg       (normalised (z, y, x) instance centroid)
+  #   ch 4- 9  := aff_pred  (direct face-affinity prediction; T/B/U/D/L/R
+  #                          in Z-Y-X order; SAME-pad; supervised via
+  #                          CE + soft-Dice + soft-Jaccard on sigmoid)
   #
-  # NOTE: The model wrapper applies sigmoid to channels 10-15 of the
-  #       boundary head before the loss / TB callbacks see them, so the
-  #       affinity sub-losses operate on per-channel binary probabilities.
+  # Conceptual supervision (16 slots): the loss additionally derives a
+  # soft 6-face affinity from the predicted avgloc::
+  #
+  #   aff_avg[c] = exp(-tau * sum_i |avg[i] - shift_replicate(avg[i], dir_c)|)
+  #
+  # and supervises that derived signal against the same binary aff
+  # target.  Voxels in the same instance share their predicted centroid
+  # so the kernel evaluates to ~1; voxels across an instance boundary
+  # disagree on it and the kernel decays.  This explicitly ties the
+  # avgloc field to the boundary structure on top of the regression
+  # loss on ch 1-3.  Supervision summary::
+  #
+  #   raw (1) + avg (3) + aff_pred (6) + aff_avg (6 derived) = 16 slots
+  #
+  # NOTE: The model wrapper applies sigmoid to all 10 boundary channels
+  #       before the loss / TB callbacks see them.  ``soft_aff_from_avg``
+  #       returns probabilities in (0, 1] by construction.
   # -------------------------------------------------------------------
   weight_boundary:
     weight: 1.0
-    # Location channels (1-9) and raw channel (0): regression sub-losses.
-    loss_loc: l1                  # regression loss for the 9 location channels
-    loss_raw: l1                  # regression loss for the raw channel
-    weight_min: 1.0               # sub-weight for min channels (ch 1-3)
-    weight_avg: 1.0               # sub-weight for avg channels (ch 4-6)
-    weight_max: 1.0               # sub-weight for max channels (ch 7-9)
+    # Regression sub-losses (raw + avgloc).
+    loss_avg: l1                  # avgloc regression: l1 / mse / smooth_l1
+    loss_raw: l1                  # raw  regression:  l1 / mse / smooth_l1
+    weight_avg: 1.0               # sub-weight for avg channels (ch 1-3)
     weight_raw: 1.0               # sub-weight for raw channel  (ch 0)
-    foreground_only_loc: true     # location loss on FG voxels only (BG has no instance)
+    foreground_only_loc: true     # avg loss on FG voxels only (BG has no instance)
 
-    # Affinity channels (10-15): CE + Dice + IoU on binary probabilities.
+    # Affinity supervision: two parallel paths share the binary aff
+    # target (ch 4-9 of the 10-channel target tensor):
+    #   * direct  : the model's predicted ch 4-9 (already sigmoid).
+    #   * derived : exp(-tau * sum_i |avg - shift(avg)|) on the model's
+    #               predicted avgloc (ch 1-3).
+    weight_aff_pred: 1.0          # path weight on direct-prediction aff
+    weight_aff_avg: 1.0           # path weight on derived-from-avgloc aff
+    tau: 1.0                      # bandwidth of the soft similarity kernel
+
     # `background: 0` masks out the spurious `0 == 0 -> 1` signal at
     # background voxels (and at the boundary voxels zeroed by
     # `FindBoundariesd`) -- voxels with `label == background` get
@@ -392,7 +410,7 @@ loss:
     background: 0
     class_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]  # BCE pos_weight per aff channel
     label_smoothing: 0.0          # kept for parity with SemanticLoss (no-op for sigmoid/BCE)
-    weight_ce: 1.0                # BCE sub-loss on the 6 affinity channels
-    weight_iou: 0.0               # soft-Jaccard sub-loss (MONAI DiceLoss jaccard=True)
-    weight_dice: 1.0              # soft-Dice sub-loss (preserves previous affinity behaviour)
+    weight_ce: 1.0                # BCE sub-loss; applied to both aff paths
+    weight_iou: 0.0               # soft-Jaccard sub-loss; applied to both aff paths
+    weight_dice: 1.0              # soft-Dice sub-loss; applied to both aff paths
     aff_eps: 1.0e-5               # MONAI DiceLoss smoothing (smooth_nr = smooth_dr); default 1e-5

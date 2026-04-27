@@ -54,7 +54,10 @@ class CosmosTransfer3DWrapper(nn.Module):
       in 3-D.  Layout (must match :class:`brainbow.losses.GeometryLoss`):
       ch 0 = raw, ch 1..6 = covariance upper-triangle, ch 7..9 = direction.
     - ``boundary``  [B, boundary_channels, D, H, W]
-      (1 raw + 9 min/avg/max RGB + 6 face-affinity by default = 16)
+      (1 raw + 3 avg RGB + 6 direct face-affinity = 10 by default).
+      The boundary loss additionally derives a soft 6-face affinity
+      from the predicted avgloc for dual supervision; see
+      :class:`brainbow.losses.BoundaryLoss`.
 
     Because Cosmos-Transfer2.5 is natively a video model, the depth axis
     of the EM volume is mapped to the temporal axis of the backbone,
@@ -84,7 +87,7 @@ class CosmosTransfer3DWrapper(nn.Module):
         >>> out["semantic"].shape   # [1, 1, 32, 64, 64]
         >>> out["instance"].shape   # [1, 10, 32, 64, 64]
         >>> out["geometry"].shape   # [1, 10, 32, 64, 64]  (raw=1 + cov_tri=6 + dir=3)
-        >>> out["boundary"].shape   # [1, 16, 32, 64, 64]  (raw=1 + RGB=9 + aff=6)
+        >>> out["boundary"].shape   # [1, 10, 32, 64, 64]  (raw=1 + avg=3 + aff=6)
     """
 
     def __init__(
@@ -92,7 +95,7 @@ class CosmosTransfer3DWrapper(nn.Module):
         in_channels: int = 1,
         num_classes: int = 1,
         instance_channels: int = 10,
-        boundary_channels: int = 16,
+        boundary_channels: int = 10,
         feature_size: int = 64,
         variant: str = "2B",
         checkpoint_variant: str = "post-trained",
