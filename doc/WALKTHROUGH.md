@@ -300,8 +300,10 @@ Once per `every_n_epochs` (default 1), on rank 0 only:
    ground-truth target for the `true/...` panels.
 4. `_log_predictions(...)` dispatches per head to:
    * `_log_semantic` (CE-style overlay panel)
-   * `_log_instance` (PCA-projected embedding panel + clusterer-output
-     overlay)
+   * `_log_instance` (PCA-projected embedding under `pred/emb/{pca|svd|umap}`,
+     kernel-derived 6-aff under `pred/emb/aff/{t,b,u,d,l,r}` from
+     `soft_aff_from_field`, plus the clusterer-output overlay under
+     `pred/label`)
    * `_log_geometry` (matplotlib quiver / covariance ellipse glyphs)
    * `_log_boundary` (raw / avg RGB panel + per-axis direct affinity
      under `aff/{t,b,u,d,l,r}`, plus a derived `pred/avg/aff/{...}`

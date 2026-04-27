@@ -43,12 +43,15 @@ class ImageLogger(pl.Callback):
         {stage}/automatic/true/image
         {stage}/automatic/true/label
         {stage}/automatic/semantic/pred
-        {stage}/automatic/instance/pred/{pca|svd|umap}
+        {stage}/automatic/instance/pred/emb/{pca|svd|umap}
+        {stage}/automatic/instance/pred/emb/aff/{t,b,u,d,l,r}
         {stage}/automatic/instance/pred/label
         {stage}/automatic/geometry/pred/{dir_centroid|cov|raw}
         {stage}/automatic/boundary/pred/raw
-        {stage}/automatic/boundary/{pred,true}/avg
-        {stage}/automatic/boundary/{pred,true}/aff/{t,b,u,d,l,r}
+        {stage}/automatic/boundary/true/avg
+        {stage}/automatic/boundary/true/aff/{t,b,u,d,l,r}
+        {stage}/automatic/boundary/pred/avg
+        {stage}/automatic/boundary/pred/aff/{t,b,u,d,l,r}
         {stage}/automatic/boundary/pred/avg/aff/{t,b,u,d,l,r}
 
     ``boundary/true/raw`` is intentionally **not** emitted: it would
@@ -288,6 +291,11 @@ class ImageLogger(pl.Callback):
         active_classes = getattr(sem_loss, "active_classes", None) if sem_loss else None
         bnd_loss = getattr(criterion, "boundary_loss", None) if criterion else None
         boundary_tau = float(getattr(bnd_loss, "tau", 1.0)) if bnd_loss else 1.0
+        ins_loss = getattr(criterion, "instance_loss", None) if criterion else None
+        instance_tau = float(getattr(ins_loss, "tau", 1.0)) if ins_loss else 1.0
+        instance_normalize_embeddings = bool(
+            getattr(ins_loss, "normalize_embeddings", False)
+        ) if ins_loss else False
 
         boundary_target = self._maybe_build_boundary_target(
             preds_auto, criterion, images, labels, n,
@@ -309,6 +317,8 @@ class ImageLogger(pl.Callback):
             projection_backend=self.projection_backend,
             boundary_target=boundary_target,
             boundary_tau=boundary_tau,
+            instance_tau=instance_tau,
+            instance_normalize_embeddings=instance_normalize_embeddings,
         )
         del preds_auto, boundary_target
 

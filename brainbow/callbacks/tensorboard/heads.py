@@ -30,6 +30,7 @@ from brainbow.losses.boundary import (
     _BOUNDARY_CHANNELS,
     _N_AFF,
     soft_aff_from_avg,
+    soft_aff_from_field,
 )
 from brainbow.losses.geometry import upper_tri_channels_to_matrix
 from brainbow.callbacks.tensorboard.viz import (
@@ -103,21 +104,66 @@ def _log_instance(
     clusterer: Any = None,
     projection_algorithm: str = "pca",
     projection_backend: str = "auto",
+    tau: float = 1.0,
+    normalize_embeddings: bool = False,
 ) -> None:
-    """Log the manifold-projected embedding
-    (``instance/pred/{pca|svd|umap}``) and, when a clusterer is
-    provided, the clustered label map under ``instance/pred/label``."""
+    """Log the instance-head panels under ``{stage}/{mode}/instance/``.
+
+    Tag layout (mirrors the boundary head's ``pred/avg/...`` group: a
+    per-head **field** subgroup -- ``emb`` for instance, ``avg`` for
+    boundary -- holding both the field's visualisation and its
+    kernel-derived affinity)::
+
+        pred/emb/{pca|svd|umap}        # 3-channel manifold projection
+        pred/emb/aff/{t,b,u,d,l,r}     # kernel-derived 6-aff via
+                                       # soft_aff_from_field(emb, tau)
+        pred/label                     # clusterer output (separate;
+                                       # not a function of ``emb`` alone)
+
+    The ``pred/emb/aff/...`` panel is only emitted on a 3-D model
+    (5-D prediction); it lets you eyeball whether the embedding is
+    forming the expected flat-within-instance / sharp-at-boundary
+    structure that ``InstanceLoss.aff_emb`` supervises.
+
+    Args:
+        tau: Bandwidth of the soft similarity kernel; should match
+            :attr:`brainbow.losses.InstanceLoss.tau` so the panel
+            mirrors the supervision signal.
+        normalize_embeddings: If True, L2-normalise the embedding
+            before applying the kernel (matches the corresponding
+            :class:`InstanceLoss` flag).
+    """
     if "instance" not in preds:
         return
     head = ctx.for_head("instance")
-    inst = _to_2d(preds["instance"][:n])
+    inst_3d = preds["instance"][:n]
+    inst = _to_2d(inst_3d)
     inst_rgb = _project_embedding(
         inst, n_components=3,
         algorithm=projection_algorithm, backend=projection_backend,
     )
     tb.add_images(
-        head.tag(f"pred/{projection_algorithm}"), inst_rgb, global_step=epoch,
+        head.tag(f"pred/emb/{projection_algorithm}"),
+        inst_rgb, global_step=epoch,
     )
+
+    # Derived face-affinity from the embedding (3-D only).  Mirrors
+    # boundary/pred/avg/aff/{...}: compute on the 3-D prediction so
+    # Z-direction shifts are meaningful, then take the central slice.
+    if inst_3d.dim() == 5:
+        emb = inst_3d
+        if normalize_embeddings:
+            emb = torch.nn.functional.normalize(emb, p=2, dim=1, eps=1e-6)
+        derived_aff = soft_aff_from_field(emb, tau=tau)
+        derived_aff_2d = _to_2d(derived_aff)
+        for k, name in enumerate(_AFF_TAG_NAMES):
+            panel = repeat(
+                derived_aff_2d[:, k:k + 1].clamp(0.0, 1.0),
+                "b 1 h w -> b 3 h w",
+            )
+            tb.add_images(
+                head.tag(f"pred/emb/aff/{name}"), panel, global_step=epoch,
+            )
 
     if clusterer is None:
         return
@@ -378,6 +424,8 @@ def _log_predictions(
     projection_backend: str = "auto",
     boundary_target: Optional[torch.Tensor] = None,
     boundary_tau: float = 1.0,
+    instance_tau: float = 1.0,
+    instance_normalize_embeddings: bool = False,
 ) -> None:
     """Log a standard set of prediction visualisations to TensorBoard.
 
@@ -392,7 +440,9 @@ def _log_predictions(
       ``preds``) ::
 
         {ctx.prefix}/semantic/pred
-        {ctx.prefix}/instance/pred/{pca|svd|umap}
+        {ctx.prefix}/instance/pred/emb/{pca|svd|umap}
+        {ctx.prefix}/instance/pred/emb/aff/{t,b,u,d,l,r} (kernel-derived
+            from the predicted embedding via soft_aff_from_field)
         {ctx.prefix}/instance/pred/label                 (if clusterer)
         {ctx.prefix}/geometry/pred/dir_{centroid|skeleton}
         {ctx.prefix}/geometry/pred/cov
@@ -428,8 +478,15 @@ def _log_predictions(
             cuML on CUDA, else a CPU fallback.  ``"cuml"`` forces GPU.
         boundary_target: optional ``[n, 10, D, H, W]`` ground-truth map
             to log alongside the boundary prediction.
-        boundary_tau: bandwidth for the derived ``aff_avg`` panels;
-            should match :class:`brainbow.losses.BoundaryLoss.tau`.
+        boundary_tau: bandwidth for the boundary head's
+            ``pred/avg/aff/...`` panels; should match
+            :attr:`brainbow.losses.BoundaryLoss.tau`.
+        instance_tau: bandwidth for the instance head's
+            ``pred/aff/...`` panels; should match
+            :attr:`brainbow.losses.InstanceLoss.tau`.
+        instance_normalize_embeddings: whether to L2-normalise the
+            embedding before applying the soft-aff kernel; should
+            match :attr:`brainbow.losses.InstanceLoss.normalize_embeddings`.
     """
     if ctx.head is not None:
         raise ValueError(
@@ -450,6 +507,8 @@ def _log_predictions(
         sem_fg=sem_fg, sem_ids=sem_ids, clusterer=clusterer,
         projection_algorithm=projection_algorithm,
         projection_backend=projection_backend,
+        tau=instance_tau,
+        normalize_embeddings=instance_normalize_embeddings,
     )
     _log_geometry(
         tb, ctx, preds, labels, img_gray, n, epoch,
