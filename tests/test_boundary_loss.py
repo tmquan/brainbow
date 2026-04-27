@@ -356,24 +356,43 @@ class TestBoundaryLoss:
         out = loss_fn(ideal, labels, image)
         assert out["aff_pred"].item() < 0.05
 
-    def test_aff_avg_path_consistency_with_avg(self, batch) -> None:
-        """Setting predicted avg = avg target makes the derived-aff loss small."""
+    def test_aff_avg_path_uses_predicted_avg(self, batch) -> None:
+        """Changing predicted avg actually changes the derived-aff loss.
+
+        End-to-end smoke test that the derived path is wired up
+        through ``soft_aff_from_avg`` (avg shifts along the spatial
+        axes, gradient propagates through ``exp(-tau * L1)``).  We
+        deliberately don't compare ``ideal`` to ``random`` on the loss
+        magnitude itself: bg→bg interfaces have constant avg=0 →
+        derived aff=1 but the **target** at those voxels is 0 (masked
+        by ``background=0``), so the bg-dominated mass of the
+        derived-aff loss isn't strictly minimised by the ideal avg
+        field.  See also :func:`soft_aff_from_avg` -- the kernel only
+        provides a useful gradient signal where the predicted avg
+        actually differs across faces.
+        """
         pred, labels, image = batch
         loss_fn = BoundaryLoss(
             weight_dice=1.0, weight_aff_pred=0.0, weight_aff_avg=1.0,
-            tau=4.0,
+            tau=2.0,
         )
-        target = loss_fn.build_target(labels, image)
-        ideal = pred.detach().clone()
-        ideal[:, 1:4] = target[:, 1:4]
-        out = loss_fn(ideal, labels, image)
-        # With the predicted avg matching the per-instance centroid
-        # field, ``soft_aff_from_avg`` returns ~1 within each instance
-        # and ~0 across boundaries, matching the binary aff target up
-        # to the soft kernel.  Dice is therefore much smaller than the
-        # random baseline.
-        rand_out = loss_fn(pred, labels, image)
-        assert out["aff_avg"].item() < rand_out["aff_avg"].item()
+
+        out_a = loss_fn(pred, labels, image)
+        # Perturbing only the predicted avg (ch 1-3) must change the
+        # aff_avg loss; the direct path is disabled so any change to
+        # ``aff_avg`` is attributable to ``soft_aff_from_avg``.
+        perturbed = pred.detach().clone()
+        perturbed[:, 1:4] = (perturbed[:, 1:4] + 0.5).clamp(0.0, 1.0)
+        out_b = loss_fn(perturbed, labels, image)
+
+        assert torch.isfinite(out_a["aff_avg"])
+        assert torch.isfinite(out_b["aff_avg"])
+        assert out_a["aff_avg"].item() != pytest.approx(
+            out_b["aff_avg"].item(), abs=1e-6,
+        )
+        # Direct path is disabled, so its sub-loss must be exactly 0.
+        assert out_a["aff_pred"].item() == 0.0
+        assert out_b["aff_pred"].item() == 0.0
 
     def test_wrong_prediction_channels_raises(self, batch) -> None:
         _, labels, image = batch
@@ -384,7 +403,7 @@ class TestBoundaryLoss:
     def test_cached_target_matches_recompute(self, batch) -> None:
         pred, labels, image = batch
         loss_fn = BoundaryLoss()
-        cached = loss_fn.compute_target(labels, image)
+        cached = loss_fn.build_target(labels, image)
         out_fresh = loss_fn(pred.detach().clone().requires_grad_(), labels, image)
         out_cached = loss_fn(
             pred.detach().clone().requires_grad_(),

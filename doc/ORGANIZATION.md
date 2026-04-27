@@ -170,12 +170,12 @@ class <Task>Loss(nn.Module):
     def __repr__()
 ```
 
-| Loss          | Components (keys in returned dict)               | `task_channels` |
-| ------------- | ------------------------------------------------ | --------------- |
-| SemanticLoss  | `loss`, `ce`, `iou`, `dice`                      | `semantic_channels` |
-| InstanceLoss  | `loss`, `pull`, `push`, `norm`                   | embedding `E`   |
-| GeometryLoss  | `loss`, `raw`, `cov`, `dir`                      | `1 + S*(S+1)//2 + S` |
-| BoundaryLoss  | `loss`, `raw`, `min`, `avg`, `max`, `aff`        | `16`            |
+| Loss          | Components (keys in returned dict)                            | `task_channels` |
+| ------------- | ------------------------------------------------------------- | --------------- |
+| SemanticLoss  | `loss`, `ce`, `iou`, `dice`                                   | `semantic_channels` |
+| InstanceLoss  | `loss`, `pull`, `push`, `norm`                                | embedding `E`   |
+| GeometryLoss  | `loss`, `raw`, `cov`, `dir`                                   | `1 + S*(S+1)//2 + S` |
+| BoundaryLoss  | `loss`, `raw`, `avg`, `aff`, `aff_pred`, `aff_avg`, plus per-path `aff_{pred,avg}_{ce,dice,iou}` | `10`            |
 
 **Why this matters:**
 

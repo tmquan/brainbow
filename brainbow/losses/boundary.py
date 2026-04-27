@@ -216,10 +216,12 @@ def soft_aff_from_avg(
             f"soft_aff_from_avg expects [B, {_N_AVG}, D, H, W]; "
             f"got shape {tuple(avg.shape)}"
         )
+    # ``_DIRECTIONS`` uses the BDHW (4-D) convention where Z/Y/X live at
+    # tensor axes 1/2/3.  Here ``avg`` is BCDHW (5-D) so the matching
+    # spatial axes are 2/3/4 -- shift on ``axis + 1``.
     per_dir = []
     for _, axis, shift in _DIRECTIONS:
-        # Shift along axis-1 of the BCDHW layout -> spatial axis ``axis``.
-        diff = (avg - _shift_replicate_torch(avg, axis, shift)).abs()
+        diff = (avg - _shift_replicate_torch(avg, axis + 1, shift)).abs()
         # L1 distance summed over the 3 avg channels -> [B, D, H, W].
         l1 = reduce(diff, "b c d h w -> b d h w", "sum")
         per_dir.append(torch.exp(-tau * l1))
@@ -227,7 +229,7 @@ def soft_aff_from_avg(
 
 
 # ---------------------------------------------------------------------------
-# Low-level builders (used by BoundaryLoss._build_target_*)
+# 10-channel target builders (CUDA / CPU paths)
 # ---------------------------------------------------------------------------
 
 
@@ -440,9 +442,6 @@ class BoundaryLoss(nn.Module):
             6, one entry per direction T/B/U/D/L/R).  Plumbed into the
             BCE sub-loss as ``pos_weight``.  No effect on the Dice / IoU
             sub-losses.
-        label_smoothing: Stored for parity with the previous signature;
-            sigmoid BCE has no native label-smoothing, so this value is
-            unused.
         foreground_only_loc:  If True, the avgloc loss is averaged
             over foreground voxels only (strongly recommended -- the
             target is zero on background, so averaging everywhere would
@@ -471,7 +470,6 @@ class BoundaryLoss(nn.Module):
         weight_iou: float = 0.0,
         tau: float = 1.0,
         class_weights: Optional[List[float]] = None,
-        label_smoothing: float = 0.0,
         foreground_only_loc: bool = True,
         aff_eps: float = 1e-5,
         background: Optional[int] = 0,
@@ -492,7 +490,6 @@ class BoundaryLoss(nn.Module):
         self.class_weights = (
             list(map(float, class_weights)) if class_weights is not None else None
         )
-        self.label_smoothing = float(label_smoothing)
         self.foreground_only_loc = bool(foreground_only_loc)
         self.aff_eps = float(aff_eps)
         self.background = (
@@ -540,44 +537,20 @@ class BoundaryLoss(nn.Module):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def _build_target_raw(self, image: torch.Tensor) -> torch.Tensor:
-        """Raw-intensity target (ch 0) -- identity on the input image."""
-        return rearrange(image.to(torch.float32), "b ... -> b 1 ...")
-
-    @torch.no_grad()
-    def _build_target_avg(
-        self,
-        labels: torch.Tensor,
-        image: torch.Tensor,
-    ) -> torch.Tensor:
-        """Per-instance centroid target (ch 1-3)."""
-        full = build_boundary_target(labels, image, background=self.background)
-        return full[:, _AVG_START:_AVG_END]
-
-    @torch.no_grad()
-    def _build_target_aff(self, labels: torch.Tensor) -> torch.Tensor:
-        """6-channel SAME-pad affinity target (ch 4-9)."""
-        if labels.is_cuda:
-            return _affinity_target_torch(labels.long(), background=self.background)
-        lbl_np = labels.detach().cpu().long().numpy()
-        return torch.from_numpy(
-            _affinity_target_np(lbl_np, background=self.background)
-        ).to(labels.device)
-
-    @torch.no_grad()
     def build_target(
         self,
         labels: torch.Tensor,
         image: torch.Tensor,
     ) -> torch.Tensor:
-        """Full 10-channel boundary target for ``(labels, image)``."""
-        return build_boundary_target(labels, image, background=self.background)
+        """Full 10-channel boundary target for ``(labels, image)``.
 
-    # Backwards-compat alias.
-    def compute_target(
-        self, labels: torch.Tensor, image: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.build_target(labels, image)
+        Thin wrapper around :func:`build_boundary_target` that passes
+        through this loss's :attr:`background` setting.  Exposed so
+        callers (image-logger, custom precompute paths) can hand the
+        target back via ``cached_target=`` to skip the second build in
+        :meth:`forward`.
+        """
+        return build_boundary_target(labels, image, background=self.background)
 
     # ------------------------------------------------------------------
     # Per-voxel weights (not used by this head)
@@ -791,7 +764,6 @@ class BoundaryLoss(nn.Module):
             f"weight_iou={self.weight_iou}, "
             f"tau={self.tau}, "
             f"class_weights={self.class_weights}, "
-            f"label_smoothing={self.label_smoothing}, "
             f"foreground_only_loc={self.foreground_only_loc}, "
             f"background={self.background})"
         )

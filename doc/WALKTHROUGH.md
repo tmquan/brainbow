@@ -286,14 +286,16 @@ Once per `every_n_epochs` (default 1), on rank 0 only:
 2. At epoch end, `_run_visualization` moves the cached batch back to
    the device, runs a single eval-mode forward under autocast, casts
    predictions back to fp32.
-3. (Optional) `build_boundary_target(...)` rebuilds the 16-channel
+3. (Optional) `build_boundary_target(...)` rebuilds the 10-channel
    ground-truth target for the `true/...` panels.
 4. `_log_predictions(...)` dispatches per head to:
    * `_log_semantic` (CE-style overlay panel)
    * `_log_instance` (PCA-projected embedding panel + clusterer-output
      overlay)
    * `_log_geometry` (matplotlib quiver / covariance ellipse glyphs)
-   * `_log_boundary` (raw / min-avg-max RGB panel + per-axis affinity)
+   * `_log_boundary` (raw / avg RGB panel + per-axis direct affinity
+     under `aff/{t,b,u,d,l,r}`, plus a derived `pred/avg/aff/{...}`
+     panel computed from the predicted avgloc via `soft_aff_from_avg`)
 5. Every tag is built through `TagContext.tag(panel)` so the resulting
    path is exactly `{stage}/{mode}/[{head}/]{panel}`.
 

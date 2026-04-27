@@ -354,63 +354,46 @@ loss:
     loss_raw: l1                  # raw-intensity regression: mse | l1 | smooth_l1
 
   # -------------------------------------------------------------------
-  # Boundary head (formerly "brainbow")  --  10 channel head, dual-aff
+  # Boundary head -- 10-channel head with dual-aff supervision.
   # -------------------------------------------------------------------
-  # Per-instance centroid colouring + raw reconstruction + 6 face
-  # affinities.  See brainbow/losses/boundary.py for details.
-  #
-  # Model output (10 channels):
-  #   ch 0     := raw       (raw image intensity, per voxel)
+  # Model output (10 channels, all in [0, 1] via sigmoid):
+  #   ch 0     := raw       (raw image intensity reconstruction)
   #   ch 1- 3  := avg       (normalised (z, y, x) instance centroid)
-  #   ch 4- 9  := aff_pred  (direct face-affinity prediction; T/B/U/D/L/R
-  #                          in Z-Y-X order; SAME-pad; supervised via
-  #                          CE + soft-Dice + soft-Jaccard on sigmoid)
+  #   ch 4- 9  := aff_pred  (direct face-affinity; T/B/U/D/L/R in
+  #                          Z-Y-X order, SAME-pad)
   #
-  # Conceptual supervision (16 slots): the loss additionally derives a
-  # soft 6-face affinity from the predicted avgloc::
+  # The loss also derives a soft 6-face affinity from the predicted
+  # avgloc and supervises it against the same binary aff target::
   #
   #   aff_avg[c] = exp(-tau * sum_i |avg[i] - shift_replicate(avg[i], dir_c)|)
   #
-  # and supervises that derived signal against the same binary aff
-  # target.  Voxels in the same instance share their predicted centroid
-  # so the kernel evaluates to ~1; voxels across an instance boundary
-  # disagree on it and the kernel decays.  This explicitly ties the
-  # avgloc field to the boundary structure on top of the regression
-  # loss on ch 1-3.  Supervision summary::
-  #
-  #   raw (1) + avg (3) + aff_pred (6) + aff_avg (6 derived) = 16 slots
-  #
-  # NOTE: The model wrapper applies sigmoid to all 10 boundary channels
-  #       before the loss / TB callbacks see them.  ``soft_aff_from_avg``
-  #       returns probabilities in (0, 1] by construction.
+  # Voxels inside an instance share their predicted centroid (kernel
+  # ≈ 1, target = 1); voxels across a boundary disagree (kernel
+  # decays, target = 0).  The two paths share the CE / Dice / IoU
+  # sub-loss weights below; ``weight_aff_pred`` and ``weight_aff_avg``
+  # scale them per-path.  See brainbow/losses/boundary.py for details.
   # -------------------------------------------------------------------
   weight_boundary:
     weight: 1.0
     # Regression sub-losses (raw + avgloc).
     loss_avg: l1                  # avgloc regression: l1 / mse / smooth_l1
-    loss_raw: l1                  # raw  regression:  l1 / mse / smooth_l1
+    loss_raw: l1                  # raw   regression: l1 / mse / smooth_l1
     weight_avg: 1.0               # sub-weight for avg channels (ch 1-3)
     weight_raw: 1.0               # sub-weight for raw channel  (ch 0)
     foreground_only_loc: true     # avg loss on FG voxels only (BG has no instance)
 
-    # Affinity supervision: two parallel paths share the binary aff
-    # target (ch 4-9 of the 10-channel target tensor):
-    #   * direct  : the model's predicted ch 4-9 (already sigmoid).
-    #   * derived : exp(-tau * sum_i |avg - shift(avg)|) on the model's
-    #               predicted avgloc (ch 1-3).
-    weight_aff_pred: 1.0          # path weight on direct-prediction aff
-    weight_aff_avg: 1.0           # path weight on derived-from-avgloc aff
+    # Two parallel aff supervision paths share the binary aff target
+    # (ch 4-9 of the 10-channel target).
+    weight_aff_pred: 1.0          # path weight on direct-prediction aff (model ch 4-9)
+    weight_aff_avg: 1.0           # path weight on aff derived from predicted avgloc
     tau: 1.0                      # bandwidth of the soft similarity kernel
 
     # `background: 0` masks out the spurious `0 == 0 -> 1` signal at
-    # background voxels (and at the boundary voxels zeroed by
-    # `FindBoundariesd`) -- voxels with `label == background` get
-    # affinity 0 across all 6 directions.  Set `background: null` to
-    # opt out and reproduce the pre-fix unmasked targets.
+    # background voxels and at the boundary voxels zeroed by
+    # `FindBoundariesd`.  Pass `null` to opt out.
     background: 0
-    class_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]  # BCE pos_weight per aff channel
-    label_smoothing: 0.0          # kept for parity with SemanticLoss (no-op for sigmoid/BCE)
+    class_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]  # BCE pos_weight per direction
     weight_ce: 1.0                # BCE sub-loss; applied to both aff paths
     weight_iou: 0.0               # soft-Jaccard sub-loss; applied to both aff paths
-    weight_dice: 1.0              # soft-Dice sub-loss; applied to both aff paths
-    aff_eps: 1.0e-5               # MONAI DiceLoss smoothing (smooth_nr = smooth_dr); default 1e-5
+    weight_dice: 1.0              # soft-Dice sub-loss;    applied to both aff paths
+    aff_eps: 1.0e-5               # MONAI DiceLoss smoothing (smooth_nr = smooth_dr)

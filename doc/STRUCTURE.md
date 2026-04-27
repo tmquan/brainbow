@@ -125,7 +125,7 @@ All task losses follow a uniform skeleton (see `ORGANIZATION.md` §5).
 | `semantic.py`   | `SemanticLoss` — CE + IoU + Dice (sigmoid or softmax mode).                    |
 | `instance.py`   | `InstanceLoss` — pull / push / norm discriminative embedding loss.             |
 | `geometry.py`   | `GeometryLoss` — raw(1) + cov upper-tri(S·(S+1)/2) + dir(S) regression.        |
-| `boundary.py`   | `BoundaryLoss` — 16-ch target: raw(1) + min/avg/max RGB(9) + face-affinity(6, soft-Dice on sigmoid). |
+| `boundary.py`   | `BoundaryLoss` — 10-ch head: raw(1) + avg RGB(3) + direct face-affinity(6); loss also derives a soft 6-aff from predicted avgloc for dual supervision (BCE / soft-Dice / soft-IoU on both paths). |
 | `combined.py`   | `CombinedLoss` — weighted sum with head-oriented output key hierarchy.         |
 
 ### `brainbow/metrics/` — per-head eval metrics

@@ -58,7 +58,7 @@ End-to-end flow (rank-0 only, once per ``every_n_epochs``)::
         │ ._run_visualization    │   autocast, cast preds back to fp32
         └──────────┬─────────────┘
                    ▼
-        ┌────────────────────────┐   (optional) rebuild the 16-channel
+        ┌────────────────────────┐   (optional) rebuild the 10-channel
         │ build_boundary_target  │   boundary target for the ``true/*``
         │ (losses.boundary)      │   panels
         └──────────┬─────────────┘

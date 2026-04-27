@@ -40,30 +40,45 @@ For the per-head channel layouts and the math behind each loss, see
 ## What it does
 
 For every connected-component label `> 0` in a volumetric segmentation,
-`brainbow` builds a **16-channel per-voxel target** directly from the
+`brainbow` builds a **10-channel per-voxel target** directly from the
 label volume + raw EM image -- no learnable target parameters:
 
 |   channels  | meaning                                                                   |
 |-------------|---------------------------------------------------------------------------|
-|    0        | **raw** := raw image intensity at the voxel                               |
-|    1 - 3    | RGB := normalised (z, y, x) of the instance's **min** (bounding-box min)  |
-|    4 - 6    | RGB := normalised (z, y, x) of the instance's **avg** (centroid)          |
-|    7 - 9    | RGB := normalised (z, y, x) of the instance's **max** (bounding-box max)  |
-|   10 - 15   | **aff** := binary face-affinity to 6 neighbours in Z-Y-X order (T, B, U, D, L, R) |
+|    0        | **raw**      := raw image intensity at the voxel                          |
+|    1 - 3    | **avg**      := normalised (z, y, x) of the instance centroid             |
+|    4 - 9    | **aff_pred** := binary face-affinity to 6 neighbours, Z-Y-X order (T, B, U, D, L, R) |
 
-Each coordinate is divided by the patch dimensions `(D, H, W)` so the
-nine localisation channels live in `[0, 1]` regardless of anisotropy
-or patch size.  The six affinity channels use **SAME / replicate
-padding** at the crop boundary (boundary voxels are self-connected,
-`aff = 1`) so every voxel has a well-defined target without masking.
-The target map is computed in a single vectorised pass (no Python
-loops over voxels): SciPy's `find_objects` + `np.bincount` on CPU,
-`torch.scatter_reduce_` on CUDA.
+The 3 `avg` channels are divided by the patch dimensions `(D, H, W)`
+so they live in `[0, 1]` regardless of anisotropy or patch size; they
+are zero on background voxels.  The 6 affinity channels use **SAME /
+replicate padding** at the crop boundary (foreground voxels at the
+edge are self-connected, `aff = 1`) and are masked to `0` on
+background voxels so every voxel has a well-defined target without
+explicit masking elsewhere.  The target map is computed in a single
+vectorised pass (no Python loops over voxels): `numpy.bincount` on
+CPU, `torch.scatter_add_` on CUDA.
 
-The model is a `CosmosTransfer3DWrapper` with a dedicated 16-channel
-`"brainbow"` head attached after the shared VAE-decoder refinement
-stack (the existing `semantic`, `instance`, and `geometry` heads remain
-available and can be combined via weighted sums in `CombinedLoss`).
+On top of the model's *direct* affinity prediction (ch 4-9), the loss
+also derives a **soft 6-face affinity from the predicted avgloc**
+(ch 1-3) and supervises that derived signal against the same binary
+aff target:
+
+```
+aff_avg[c] = exp(-tau * sum_i |avg[i] - shift_replicate(avg[i], dir_c)|)
+```
+
+Voxels in the same instance share their predicted centroid so the
+kernel evaluates to ≈ 1; voxels across an instance boundary disagree
+on it and the kernel decays.  `weight_aff_pred` and `weight_aff_avg`
+scale the two paths separately; both go through the same CE / Dice /
+IoU sub-losses.  Conceptually the supervision is `1 + 3 + 6 + 6 = 16`
+slots even though the model head still emits only 10 channels.
+
+The model is a `CosmosTransfer3DWrapper` with a dedicated 10-channel
+boundary head attached after the shared VAE-decoder refinement stack;
+the `semantic`, `instance`, and `geometry` heads can be combined with
+it via weighted sums in `CombinedLoss`.
 
 ## Layout
 
@@ -148,28 +163,35 @@ Watch the trajectory in TensorBoard under the `cuda_memory/*` tags
 from brainbow.losses import BoundaryLoss, build_boundary_target
 
 loss_fn = BoundaryLoss(
-    loss_loc="smooth_l1",    # regression loss for the 9 localisation channels
-    loss_raw="l1",            # regression loss for channel 0 (raw intensity)
-    weight_min=1.0,           # bounding-box min RGB (channels 1-3)
-    weight_avg=1.0,           # centroid RGB           (channels 4-6)
-    weight_max=1.0,           # bounding-box max RGB   (channels 7-9)
-    weight_raw=1.0,           # raw-intensity regression
-    weight_dice=1.0,          # soft-Dice on sigmoid(face-affinity logits)
-    weight_ce=0.0,            # optional binary CE on the 6 affinity channels
-    weight_iou=0.0,           # optional soft-IoU     on the 6 affinity channels
-    aff_eps=1.0e-5,           # smoothing in the soft-Dice denominator
-    foreground_only_loc=True, # mask the 9 localisation channels by labels > 0
+    loss_avg="smooth_l1",     # regression loss for the 3 avg channels (1-3)
+    loss_raw="l1",             # regression loss for the raw channel (0)
+    weight_avg=1.0,            # avg centroid regression (channels 1-3)
+    weight_raw=1.0,            # raw-intensity regression (channel 0)
+    weight_aff_pred=1.0,       # path weight on direct aff prediction (channels 4-9)
+    weight_aff_avg=1.0,        # path weight on aff derived from predicted avgloc
+    tau=1.0,                   # bandwidth of soft_aff_from_avg's kernel
+    weight_dice=1.0,           # soft-Dice on sigmoid(aff); applied to BOTH paths
+    weight_ce=0.0,             # optional binary CE; applied to BOTH paths
+    weight_iou=0.0,            # optional soft-IoU; applied to BOTH paths
+    aff_eps=1.0e-5,            # smoothing in the soft-Dice denominator
+    foreground_only_loc=True,  # mask the 3 avg channels by labels > 0
+    background=0,              # mask aff target to 0 where labels == background
 )
 
-# prediction: [B, 16, D, H, W]  |  labels: [B, D, H, W]  |  image: [B, D, H, W]
+# prediction: [B, 10, D, H, W]  (post-sigmoid)
+# labels:     [B, D, H, W]      (instance ids; 0 = background)
+# image:      [B, D, H, W]      (normalised raw EM)
 out = loss_fn(prediction, labels, image)
-# out -> {"loss", "raw", "min", "avg", "max", "aff",
-#         "aff_ce", "aff_dice", "aff_iou"}
+# out -> {"loss", "raw", "avg", "aff",
+#         "aff_pred", "aff_avg",
+#         "aff_pred_{ce,dice,iou}", "aff_avg_{ce,dice,iou}"}
 ```
 
-The ``aff`` term aggregates ``weight_dice * aff_dice + weight_ce * aff_ce
-+ weight_iou * aff_iou`` so you can mix Dice / CE / IoU on the six face-
-affinity channels without breaking the rest of the loss dict.
+The ``aff`` term aggregates ``weight_aff_pred * aff_pred +
+weight_aff_avg * aff_avg``, where each per-path total is
+``weight_dice * dice + weight_ce * ce + weight_iou * iou`` on the six
+face-affinity channels.  Disabling either path (``weight_aff_pred=0``
+or ``weight_aff_avg=0``) zeros out its sub-terms entirely.
 
 ## Tests
 

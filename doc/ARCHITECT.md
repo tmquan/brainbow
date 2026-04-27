@@ -49,10 +49,10 @@ instance for exact numbers.
    ▼
 [B, 64, D, H, W]   decoded feature map
    │
-   ├─ head_semantic  (VistaTaskHead3D, 64 → 16)                ≈ 0.7 M params
+   ├─ head_semantic  (VistaTaskHead3D, 64 → 1)                 ≈ 0.7 M params
    ├─ head_instance  (VistaTaskHead3D, 64 → 10)                ≈ 0.7 M params
    ├─ head_geometry  (VistaTaskHead3D, 64 → 10)                ≈ 0.7 M params
-   └─ head_boundary  (VistaTaskHead3D, 64 → 16)                ≈ 0.7 M params
+   └─ head_boundary  (VistaTaskHead3D, 64 → 10)                ≈ 0.7 M params
 ```
 
 ### 1.2 Channel map
@@ -70,7 +70,7 @@ instance for exact numbers.
 | `head_semantic`              | `semantic_channels = 1`   |
 | `head_instance`              | `instance_channels = 10`  |
 | `head_geometry`              | `geometry_channels = 1 + 6 + 3 = 10`  (raw / cov-upper-triangle / dir) |
-| `head_boundary`              | `boundary_channels = 16`  (raw/1 + min/avg/max RGB/9 + aff/6) |
+| `head_boundary`              | `boundary_channels = 1 + 3 + 6 = 10`  (raw / avg RGB / direct aff). The loss adds a 6-channel aff derived from the predicted avgloc on top of these 10 outputs — it doesn't change the head width. |
 
 ### 1.3 The DiT variant (2B)
 
@@ -260,7 +260,7 @@ local iteration and debugging when you don't need a boundary head.
 
 | Use case                                               | Recommended wrapper |
 |--------------------------------------------------------|---------------------|
-| Full brainbow supervision (raw + min/avg/max + aff)    | Cosmos              |
+| Full brainbow supervision (raw + avg + dual aff)       | Cosmos              |
 | Fast local dev / debugging on a single GPU             | Vista               |
 | Sufficient compute + data for 2.3 B parameter fine-tune | Cosmos (with warm-up schedule) |
 | Transfer from MONAI VISTA3D pretrain (`feature_size=48`)| Vista               |
