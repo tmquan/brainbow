@@ -29,6 +29,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, reduce, repeat
 
+from brainbow.losses.boundary import (
+    _DIRECTIONS,
+    _affinity_target_torch,
+    _shift_replicate_torch,
+    soft_aff_from_field,
+)
 from brainbow.utils.parallel import pmap
 
 
@@ -80,12 +86,27 @@ class InstanceLoss(nn.Module):
         weight_norm: Weight for the centroid norm regularisation term.
         weight_edge: Boundary pixel weight multiplier (1.0 = disabled).
         weight_bone: Medial-axis pixel weight multiplier (1.0 = disabled).
+        weight_aff_emb: Weight for the dense face-affinity term derived
+            from the embedding via :func:`soft_aff_from_field`.  At every
+            foreground-foreground face-pair, supervises the kernel
+            ``exp(-tau * ||emb[v] - emb[v + dir]||_1)`` against the
+            label-derived binary aff target with a (masked) soft-Dice
+            loss.  Adds a per-voxel-face complement to the centroid-
+            level pull / push.  ``0`` (default) disables the path so it
+            costs nothing; ``> 0`` requires ``spatial_dims == 3``.
         delta_v: Pull margin (hinge threshold per embedding).
         delta_d: Push margin (half of the minimum centroid separation).
+        tau: Bandwidth of the soft similarity kernel used by the
+            ``aff_emb`` term (see :func:`soft_aff_from_field`).  Larger
+            ``tau`` sharpens the decay, smaller softens it.  When the
+            embedding is L2-normalised the L1 distance is bounded by
+            ``2 * sqrt(E)`` so ``tau ≈ 1`` is a sensible default;
+            otherwise pick ``tau`` so that embeddings at the typical
+            push distance ``2 * delta_d`` give kernel ≈ 0.
         normalize_embeddings: L2-normalize embeddings to the unit
-            hypersphere before computing pull/push.  Eliminates the
-            need for norm regularisation and bounds all distances to
-            [0, 2].
+            hypersphere before computing pull/push (and ``aff_emb``).
+            Eliminates the need for norm regularisation and bounds all
+            distances to ``[0, 2]``.
         max_hard_pairs: When > 0, only the top-k hardest centroid pairs
             (smallest distance) contribute to the push loss.  Focuses
             gradient on pairs that actually need separation.
@@ -97,6 +118,15 @@ class InstanceLoss(nn.Module):
         centroid_scale: Multiplier on the sinusoidal encoding so that
             the typical anchor separation matches the push margin
             ``2 * delta_d``.
+        aff_eps: Numerical stabiliser in the soft-Dice numerator and
+            denominator of the ``aff_emb`` sub-loss.
+        background: Label value treated as background when building the
+            label-derived aff target (forwarded to
+            :func:`_affinity_target_torch`).  Voxels with
+            ``label == background`` get aff target ``0`` across all 6
+            directions and are masked out of the loss together with
+            their face neighbours -- the bg embedding receives no
+            ``aff_emb`` gradient.
     """
 
     def __init__(
@@ -107,12 +137,16 @@ class InstanceLoss(nn.Module):
         weight_norm: float = 0.001,
         weight_edge: float = 10.0,
         weight_bone: float = 10.0,
+        weight_aff_emb: float = 0.0,
         delta_v: float = 0.5,
         delta_d: float = 1.5,
+        tau: float = 1.0,
         normalize_embeddings: bool = False,
         max_hard_pairs: int = 0,
         anchor_to_centroid: bool = False,
         centroid_scale: float = 5.0,
+        aff_eps: float = 1e-5,
+        background: int = 0,
     ) -> None:
         super().__init__()
         if anchor_to_centroid and normalize_embeddings:
@@ -126,13 +160,25 @@ class InstanceLoss(nn.Module):
         self.weight_norm = weight_norm
         self.weight_edge = weight_edge
         self.weight_bone = weight_bone
+        self.weight_aff_emb = float(weight_aff_emb)
         self.delta_v = delta_v
         self.delta_d = delta_d
+        self.tau = float(tau)
         self.normalize_embeddings = normalize_embeddings
         self.max_hard_pairs = max_hard_pairs
         self.anchor_to_centroid = anchor_to_centroid
         self.centroid_scale = centroid_scale
+        self.aff_eps = float(aff_eps)
+        self.background = int(background)
         self._pool = _pool_fn(spatial_dims)
+
+        if self.weight_aff_emb > 0 and self.spatial_dims != 3:
+            raise ValueError(
+                "weight_aff_emb > 0 currently requires spatial_dims == 3 "
+                "(the 6-face affinity primitives in brainbow.losses."
+                "boundary assume a [B, D, H, W] label tensor).  Set "
+                "weight_aff_emb=0 for 2-D mode."
+            )
 
     # ------------------------------------------------------------------
     # Target construction
@@ -444,6 +490,68 @@ class InstanceLoss(nn.Module):
         return reduce(centers ** 2, "k e -> k", "sum").clamp(min=1e-12).sqrt().mean()
 
     # ------------------------------------------------------------------
+    # Dense face-affinity sub-loss on the embedding
+    # ------------------------------------------------------------------
+
+    def _compute_loss_aff_emb(
+        self,
+        embed: torch.Tensor,
+        label: torch.Tensor,
+    ) -> torch.Tensor:
+        """Soft-Dice on the kernel-derived face affinity of the embedding.
+
+        Predicted aff:  ``aff_pred[c, v] = exp(-tau * ||emb[v] - shift(emb)[v, dir_c]||_1)``
+        Target aff:     ``aff_target = label_aff(label, background=self.background)``
+        Pair mask:      both endpoints foreground (drop bg-bg / bg-fg pairs;
+                        the bg embedding is free).
+        Loss:           masked soft-Dice averaged over the 6 direction
+                        channels::
+
+            dice_c = 1 - (2 * (p * t * m).sum + eps) /
+                            ((p * m).sum + (t * m).sum + eps)
+
+        Reuses :func:`brainbow.losses.boundary.soft_aff_from_field` and
+        :func:`brainbow.losses.boundary._affinity_target_torch` so the
+        affinity geometry is defined in exactly one place.
+
+        Args:
+            embed: ``[B, E, D, H, W]`` per-voxel instance embedding.
+            label: ``[B, D, H, W]`` integer instance ids.
+        """
+        if self.normalize_embeddings:
+            embed = F.normalize(embed, p=2, dim=1, eps=1e-6)
+
+        # Predicted soft 6-aff -- generic over the embedding's channel count.
+        aff_pred = soft_aff_from_field(embed, tau=self.tau)        # [B, 6, D, H, W]
+
+        # Label-derived 6-aff target (1 on same-instance fg-fg face-pairs,
+        # 0 elsewhere; bg voxels masked to 0 by ``background`` arg).
+        with torch.no_grad():
+            aff_target = _affinity_target_torch(
+                label.long(), background=self.background,
+            ).to(dtype=aff_pred.dtype)
+
+            # Pair mask: both endpoints foreground.  Exact 0/1 floats,
+            # no autograd needed -- this is the supervision footprint.
+            fg = (label != self.background).to(dtype=aff_pred.dtype)
+            pair_mask = torch.stack([
+                fg * _shift_replicate_torch(fg, axis, shift)
+                for _, axis, shift in _DIRECTIONS
+            ], dim=1)                                              # [B, 6, D, H, W]
+
+        # Soft-Dice with batch+spatial reduction per channel, masked to
+        # fg-fg pairs.  Average across the 6 directions.
+        p = aff_pred * pair_mask
+        t = aff_target * pair_mask
+        intersect = reduce(p * t, "b c d h w -> c", "sum")
+        pred_sum = reduce(p, "b c d h w -> c", "sum")
+        target_sum = reduce(t, "b c d h w -> c", "sum")
+        dice_c = 1.0 - (2.0 * intersect + self.aff_eps) / (
+            pred_sum + target_sum + self.aff_eps
+        )
+        return dice_c.mean()
+
+    # ------------------------------------------------------------------
     # Per-batch-element orchestration
     # ------------------------------------------------------------------
 
@@ -560,32 +668,61 @@ class InstanceLoss(nn.Module):
             weight_edge, weight_bone = self.compute_weights(label)
 
         # Multi-class: average the discriminative loss across semantic
-        # classes, restricting ``label`` to one class at a time.
+        # classes, restricting ``label`` to one class at a time.  The
+        # aff_emb term inherits the same per-class restriction so its
+        # supervision matches whatever the discriminative loss saw.
         if semantic_ids is not None:
             classes = torch.unique(semantic_ids)
             classes = classes[classes > 0]
             if len(classes) > 0:
                 zero = torch.zeros((), device=embed.device)
-                acc = {k: zero.clone() for k in ("loss", "pull", "push", "norm")}
+                acc = {
+                    k: zero.clone()
+                    for k in ("loss", "pull", "push", "norm", "aff_emb")
+                }
                 for cid in classes:
+                    masked_label = label * (semantic_ids == cid).long()
                     out = self._loss_single(
-                        embed, label * (semantic_ids == cid).long(),
-                        weight_edge, weight_bone,
+                        embed, masked_label, weight_edge, weight_bone,
                     )
+                    out = self._maybe_add_aff_emb(out, embed, masked_label)
                     for k in acc:
-                        acc[k] = acc[k] + out[k]
+                        acc[k] = acc[k] + out.get(k, zero)
                 return {k: v / len(classes) for k, v in acc.items()}
 
-        return self._loss_single(embed, label, weight_edge, weight_bone)
+        out = self._loss_single(embed, label, weight_edge, weight_bone)
+        return self._maybe_add_aff_emb(out, embed, label)
+
+    def _maybe_add_aff_emb(
+        self,
+        out: Dict[str, torch.Tensor],
+        embed: torch.Tensor,
+        label: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """Append the ``aff_emb`` sub-loss to ``out`` and roll into ``loss``.
+
+        No-op (key filled with a zero scalar) when ``weight_aff_emb`` is
+        non-positive so the kernel computation is skipped entirely on
+        the dominant default-config path.
+        """
+        if self.weight_aff_emb > 0:
+            aff_emb = self._compute_loss_aff_emb(embed, label)
+            out["aff_emb"] = aff_emb
+            out["loss"] = out["loss"] + self.weight_aff_emb * aff_emb
+        else:
+            out["aff_emb"] = embed.new_zeros(())
+        return out
 
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}("
             f"spatial_dims={self.spatial_dims}, "
             f"weights=(pull={self.weight_pull}, push={self.weight_push}, "
-            f"norm={self.weight_norm}), "
-            f"margins=(delta_v={self.delta_v}, delta_d={self.delta_d}), "
+            f"norm={self.weight_norm}, aff_emb={self.weight_aff_emb}), "
+            f"margins=(delta_v={self.delta_v}, delta_d={self.delta_d}, "
+            f"tau={self.tau}), "
             f"weight_edge={self.weight_edge}, weight_bone={self.weight_bone}, "
             f"normalize={self.normalize_embeddings}, "
-            f"anchor_to_centroid={self.anchor_to_centroid})"
+            f"anchor_to_centroid={self.anchor_to_centroid}, "
+            f"background={self.background})"
         )

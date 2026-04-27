@@ -107,12 +107,17 @@ loss:
     weight_iou: 1.0               # soft-Jaccard
     weight_dice: 1.0              # soft-Dice
 
-  # Instance head (discriminative embedding; pull / push / norm).
+  # Instance head (discriminative embedding; pull / push / norm + an
+  # optional dense face-affinity term `aff_emb` derived from the
+  # embedding via `exp(-tau * ||emb[v] - emb[v+dir]||_1)`, supervised
+  # against the label-derived binary aff target with masked soft-Dice).
   weight_instance:
     weight: 1.0
     weight_pull: 1.0              # intra-cluster pull, hinge at delta_v
     weight_push: 1.0              # inter-cluster push, hinge at delta_d
     weight_norm: 0.001            # mild centroid-norm regulariser
+    weight_aff_emb: 0.0           # 0 disables the dense face-aff path; recipes opt in
+    tau: 1.0                      # bandwidth of the soft similarity kernel
     delta_v: 0.5
     delta_d: 1.5
     weight_edge: 10.0             # per-voxel multiplier on boundary voxels

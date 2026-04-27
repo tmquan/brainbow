@@ -180,52 +180,78 @@ def _affinity_target_np(
 # ---------------------------------------------------------------------------
 
 
-def soft_aff_from_avg(
-    avg: torch.Tensor,
+def soft_aff_from_field(
+    field: torch.Tensor,
     tau: float = 1.0,
 ) -> torch.Tensor:
-    """Derive a soft 6-face affinity from a continuous ``[B, 3, D, H, W]`` field.
+    """Derive a soft 6-face affinity from a continuous ``[B, C, D, H, W]`` field.
 
     Mirrors :func:`_affinity_target_torch` but operates on a continuous
-    avg field instead of integer labels.  Similarity uses an
-    L1-distance kernel with bandwidth ``tau``::
+    field of arbitrary channel count instead of integer labels.
+    Similarity uses an L1-distance kernel with bandwidth ``tau``::
 
-        aff[c] = exp(-tau * sum_i |avg[i] - shift_replicate(avg[i], dir_c)|)
+        aff[c, v] = exp(-tau * sum_i |field[i, v] - shift_replicate(field[i, v], dir_c)|)
 
-    Voxels that share an instance share their predicted centroid, so
-    the L1 distance vanishes and the kernel evaluates to ``1``; voxels
-    across an instance boundary disagree on the centroid and the
-    similarity decays smoothly.  At the volume edge SAME / replicate
-    padding compares the voxel to itself, giving ``aff = 1`` (consistent
-    with the binary target on foreground voxels).
+    Voxels that the model has placed close together in field-space
+    (small L1 distance) get aff ≈ 1; voxels placed far apart get aff
+    decaying smoothly toward 0.  At the volume edge SAME / replicate
+    padding compares the voxel to itself, so the kernel evaluates to
+    ``1`` (consistent with the binary aff target on foreground voxels).
+
+    Used in two places:
+
+    1. :class:`BoundaryLoss` derives a soft 6-aff from the predicted
+       3-channel ``avg`` field (centroid colour) for dual supervision
+       of the boundary head -- see :func:`soft_aff_from_avg` for the
+       avg-specific wrapper that pins ``C == 3``.
+    2. :class:`brainbow.losses.InstanceLoss` derives the same soft 6-aff
+       from the per-voxel instance embedding (``C == E``) and supervises
+       it against the label-derived aff target -- a dense per-voxel-face
+       complement to the centroid-based pull / push terms.
 
     Args:
-        avg: Predicted avgloc of shape ``[B, 3, D, H, W]``.  Channels
-            are interpreted as the 3 anisotropic-normalised centroid
-            components (Z, Y, X order) but the function only relies on
-            the L1 distance, so any ordering works.
-        tau: Bandwidth of the soft kernel (positive).  Larger ``tau``
+        field: ``[B, C, D, H, W]`` continuous field; ``C ≥ 1`` arbitrary.
+        tau:   Bandwidth of the soft kernel (positive).  Larger ``tau``
             sharpens the decay (more like a hard binary signal); smaller
             ``tau`` softens it.
 
     Returns:
         ``[B, 6, D, H, W]`` similarity tensor in ``(0, 1]``.
     """
-    if avg.dim() != 5 or avg.shape[1] != _N_AVG:
+    if field.dim() != 5:
+        raise ValueError(
+            f"soft_aff_from_field expects [B, C, D, H, W]; "
+            f"got shape {tuple(field.shape)}"
+        )
+    # ``_DIRECTIONS`` uses the BDHW (4-D) convention where Z/Y/X live at
+    # tensor axes 1/2/3.  Here the input is BCDHW (5-D) so the matching
+    # spatial axes are 2/3/4 -- shift on ``axis + 1``.
+    per_dir = []
+    for _, axis, shift in _DIRECTIONS:
+        diff = (field - _shift_replicate_torch(field, axis + 1, shift)).abs()
+        # L1 distance summed over the C channels -> [B, D, H, W].
+        l1 = reduce(diff, "b c d h w -> b d h w", "sum")
+        per_dir.append(torch.exp(-tau * l1))
+    return rearrange(torch.stack(per_dir, dim=0), "c b d h w -> b c d h w")
+
+
+def soft_aff_from_avg(
+    avg: torch.Tensor,
+    tau: float = 1.0,
+) -> torch.Tensor:
+    """Avg-specific wrapper around :func:`soft_aff_from_field`.
+
+    Pins ``C == 3`` (the avgloc field) and forwards to the generic
+    kernel.  Kept as a named entry point for the boundary head's
+    dual-aff supervision so call sites read at the right level of
+    abstraction.
+    """
+    if avg.shape[1] != _N_AVG:
         raise ValueError(
             f"soft_aff_from_avg expects [B, {_N_AVG}, D, H, W]; "
             f"got shape {tuple(avg.shape)}"
         )
-    # ``_DIRECTIONS`` uses the BDHW (4-D) convention where Z/Y/X live at
-    # tensor axes 1/2/3.  Here ``avg`` is BCDHW (5-D) so the matching
-    # spatial axes are 2/3/4 -- shift on ``axis + 1``.
-    per_dir = []
-    for _, axis, shift in _DIRECTIONS:
-        diff = (avg - _shift_replicate_torch(avg, axis + 1, shift)).abs()
-        # L1 distance summed over the 3 avg channels -> [B, D, H, W].
-        l1 = reduce(diff, "b c d h w -> b d h w", "sum")
-        per_dir.append(torch.exp(-tau * l1))
-    return rearrange(torch.stack(per_dir, dim=0), "c b d h w -> b c d h w")
+    return soft_aff_from_field(avg, tau=tau)
 
 
 # ---------------------------------------------------------------------------

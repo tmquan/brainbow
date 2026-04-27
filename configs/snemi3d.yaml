@@ -340,6 +340,15 @@ loss:
     weight_edge: 1.0              # per-voxel multiplier on boundary voxels (1.0 = off)
     weight_bone: 1.0              # per-voxel multiplier on medial-axis voxels (1.0 = off)
 
+    # Dense face-affinity supervision on the embedding (mirrors the
+    # boundary head's `aff_avg` path).  At every fg-fg face-pair, a
+    # soft kernel `exp(-tau * ||emb[v] - emb[v + dir]||_1)` is supervised
+    # against the label-derived binary aff target via masked soft-Dice.
+    # Adds a per-voxel-face complement to centroid-based pull / push.
+    # Set to 0 to disable; the kernel is skipped entirely in that case.
+    weight_aff_emb: 1.0           # path weight on the dense face-aff loss
+    tau: 1.0                      # bandwidth of the soft similarity kernel
+
   # -------------------------------------------------------------------
   # Geometry head -- direction field + covariance + raw reconstruction
   # -------------------------------------------------------------------

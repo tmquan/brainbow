@@ -38,7 +38,12 @@ The loss skeleton + naming convention is documented in
 from brainbow.losses.semantic import SemanticLoss
 from brainbow.losses.instance import InstanceLoss
 from brainbow.losses.geometry import GeometryLoss
-from brainbow.losses.boundary import BoundaryLoss, build_boundary_target
+from brainbow.losses.boundary import (
+    BoundaryLoss,
+    build_boundary_target,
+    soft_aff_from_avg,
+    soft_aff_from_field,
+)
 from brainbow.losses.combined import CombinedLoss
 
 __all__ = [
@@ -47,5 +52,7 @@ __all__ = [
     "GeometryLoss",
     "BoundaryLoss",
     "build_boundary_target",
+    "soft_aff_from_avg",
+    "soft_aff_from_field",
     "CombinedLoss",
 ]

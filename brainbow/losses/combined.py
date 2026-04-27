@@ -57,8 +57,9 @@ _SEMANTIC_FLAT_KEYS: Tuple[str, ...] = (
 )
 _INSTANCE_FLAT_KEYS: Tuple[str, ...] = (
     "weight_pull", "weight_push", "weight_norm", "weight_edge", "weight_bone",
+    "weight_aff_emb", "tau",
     "delta_v", "delta_d", "normalize_embeddings", "max_hard_pairs",
-    "anchor_to_centroid", "centroid_scale",
+    "anchor_to_centroid", "centroid_scale", "aff_eps", "background",
 )
 # Flat-kwarg prefix for the boundary head, used to disambiguate from
 # ``GeometryLoss``'s ``weight_raw`` etc.  Inside the nested mapping the
@@ -283,7 +284,10 @@ class CombinedLoss(nn.Module):
                 weight_bone=w_bone,
             )
         else:
-            ins = {"loss": zero, "pull": zero, "push": zero, "norm": zero}
+            ins = {
+                "loss": zero, "pull": zero, "push": zero, "norm": zero,
+                "aff_emb": zero,
+            }
 
         # Geometry
         if self.geometry_loss is not None and "geometry" in predictions:
@@ -347,6 +351,8 @@ class CombinedLoss(nn.Module):
             out["instance/loss/pull"] = ins["pull"]
             out["instance/loss/push"] = ins["push"]
             out["instance/loss/norm"] = ins["norm"]
+            if self.instance_loss.weight_aff_emb > 0:
+                out["instance/loss/aff_emb"] = ins["aff_emb"]
 
         if self.geometry_loss is not None:
             out["geometry/loss"] = geom["loss"]

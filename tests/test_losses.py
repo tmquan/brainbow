@@ -261,6 +261,64 @@ class TestInstanceLoss:
         assert embed.grad is not None
         assert torch.isfinite(embed.grad).all()
 
+    @pytest.fixture()
+    def embed_and_label_3d(self):
+        torch.manual_seed(7)
+        B, E, D, H, W = 2, 8, 4, 16, 16
+        embed = torch.randn(B, E, D, H, W, requires_grad=True)
+        label = torch.zeros(B, D, H, W, dtype=torch.long)
+        label[:, :2, :8, :8] = 1
+        label[:, :2, :8, 8:] = 2
+        label[:, 2:, :, :] = 3
+        return embed, label
+
+    def test_aff_emb_zero_weight_is_no_op(self, embed_and_label_3d) -> None:
+        """Default ``weight_aff_emb=0`` zeroes the term + skips the kernel."""
+        embed, label = embed_and_label_3d
+        loss_fn = InstanceLoss(spatial_dims=3, weight_aff_emb=0.0)
+        out = loss_fn(embed, label)
+        assert "aff_emb" in out
+        assert out["aff_emb"].item() == 0.0
+        # Sanity: total loss equals weighted pull/push/norm only.
+        expected = (
+            loss_fn.weight_pull * out["pull"]
+            + loss_fn.weight_push * out["push"]
+            + loss_fn.weight_norm * out["norm"]
+        )
+        assert torch.isclose(out["loss"], expected, atol=1e-6)
+
+    def test_aff_emb_active_changes_loss(self, embed_and_label_3d) -> None:
+        """Enabling the aff_emb path adds a finite, positive term."""
+        embed, label = embed_and_label_3d
+        loss_fn = InstanceLoss(
+            spatial_dims=3,
+            weight_pull=0.0, weight_push=0.0, weight_norm=0.0,
+            weight_aff_emb=1.0, tau=1.0,
+        )
+        out = loss_fn(embed, label)
+        assert torch.isfinite(out["aff_emb"])
+        assert out["aff_emb"].item() > 0.0
+        # With pull/push/norm zeroed, total = aff_emb term.
+        assert torch.isclose(out["loss"], out["aff_emb"], atol=1e-6)
+
+    def test_aff_emb_backward_flows(self, embed_and_label_3d) -> None:
+        embed, label = embed_and_label_3d
+        loss_fn = InstanceLoss(
+            spatial_dims=3,
+            weight_pull=0.0, weight_push=0.0, weight_norm=0.0,
+            weight_aff_emb=1.0, tau=1.0,
+        )
+        out = loss_fn(embed, label)
+        out["loss"].backward()
+        assert embed.grad is not None
+        assert torch.isfinite(embed.grad).all()
+        assert embed.grad.abs().sum() > 0
+
+    def test_aff_emb_2d_raises(self) -> None:
+        """The 6-face primitives assume BDHW labels; 2-D mode is rejected."""
+        with pytest.raises(ValueError, match="spatial_dims"):
+            InstanceLoss(spatial_dims=2, weight_aff_emb=1.0)
+
 
 # ---------------------------------------------------------------------------
 # GeometryLoss (direct)
