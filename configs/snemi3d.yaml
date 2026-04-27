@@ -193,7 +193,7 @@ callbacks:
 # Training
 # ---------------------------------------------------------------------
 training:
-  max_epochs: 61
+  max_epochs: 101
   accelerator: auto
   devices: auto
   strategy: ddp
@@ -203,6 +203,7 @@ training:
   limit_val_batches: 100
   num_sanity_val_steps: 2
   log_every_n_steps: 100
+  check_val_every_n_epoch: 10     # validate every 10 epochs (default 1)
   benchmark: true
 
   # torch.compile on the DiT backbone:
