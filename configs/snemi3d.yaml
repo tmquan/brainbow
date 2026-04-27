@@ -383,6 +383,12 @@ loss:
     foreground_only_loc: true     # location loss on FG voxels only (BG has no instance)
 
     # Affinity channels (10-15): CE + Dice + IoU on binary probabilities.
+    # `background: 0` masks out the spurious `0 == 0 -> 1` signal at
+    # background voxels (and at the boundary voxels zeroed by
+    # `FindBoundariesd`) -- voxels with `label == background` get
+    # affinity 0 across all 6 directions.  Set `background: null` to
+    # opt out and reproduce the pre-fix unmasked targets.
+    background: 0
     class_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]  # BCE pos_weight per aff channel
     label_smoothing: 0.0          # kept for parity with SemanticLoss (no-op for sigmoid/BCE)
     weight_ce: 1.0                # BCE sub-loss on the 6 affinity channels

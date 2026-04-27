@@ -87,14 +87,29 @@ class TestBuildBoundaryTarget:
             got = target[0, 4:7][:, fg][:, 0]
             assert torch.allclose(got, expected, atol=1e-6)
 
-    def test_empty_labels_only_raw_and_aff_one(self) -> None:
-        """No instances -> loc channels all zero, aff channels all one (bg==bg)."""
+    def test_empty_labels_aff_is_zero_with_default_background(self) -> None:
+        """Default ``background=0`` masks out spurious bg-bg ``1``s.
+
+        Under the new default, an all-background volume produces ``aff = 0``
+        on every direction (no foreground voxel anywhere), instead of the
+        legacy ``aff = 1`` everywhere from ``0 == 0``.  See
+        :meth:`test_empty_labels_aff_is_one_with_background_none` for
+        the opt-out (legacy) behavior.
+        """
         B, D, H, W = 1, 4, 4, 4
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
         image = torch.rand(B, D, H, W)
         target = build_boundary_target(labels, image)
         assert torch.all(target[:, 1:10] == 0)
         assert torch.allclose(target[:, 0], image.float())
+        assert torch.all(target[:, 10:16] == 0.0)
+
+    def test_empty_labels_aff_is_one_with_background_none(self) -> None:
+        """Opt-out via ``background=None`` reproduces the pre-fix targets."""
+        B, D, H, W = 1, 4, 4, 4
+        labels = torch.zeros(B, D, H, W, dtype=torch.long)
+        image = torch.rand(B, D, H, W)
+        target = build_boundary_target(labels, image, background=None)
         # Every voxel sees the same background label as every neighbour.
         assert torch.all(target[:, 10:16] == 1.0)
 
@@ -105,51 +120,106 @@ class TestBuildBoundaryTarget:
         assert aff.shape == (1, 6, 8, 16, 16)
         assert torch.all((aff == 0.0) | (aff == 1.0))
 
-    def test_affinity_boundary_is_one(self) -> None:
-        """SAME / replicate padding -> boundary voxels are self-connected."""
+    def test_affinity_boundary_is_one_for_foreground(self) -> None:
+        """SAME / replicate padding -> foreground boundary voxels self-connect.
+
+        With default ``background=0``, background voxels at the volume
+        boundary are masked to ``0``; only foreground voxels still
+        self-connect at ``aff == 1``.
+        """
         labels, image = self._simple_labels()
         target = build_boundary_target(labels, image)
         aff = target[0, 10:16]          # [6, D, H, W]
+        fg = labels[0] > 0              # [D, H, W]
 
         # Channel layout is Z-Y-X:
         #   ch 0 T (z-1)  ch 1 B (z+1)
         #   ch 2 U (y-1)  ch 3 D (y+1)
         #   ch 4 L (x-1)  ch 5 R (x+1)
-        assert torch.all(aff[0, 0, :, :] == 1.0)          # T: first slice of D
-        assert torch.all(aff[1, -1, :, :] == 1.0)         # B: last slice of D
-        assert torch.all(aff[2, :, 0, :] == 1.0)          # U: top row of H
-        assert torch.all(aff[3, :, -1, :] == 1.0)         # D: bottom row of H
-        assert torch.all(aff[4, :, :, 0] == 1.0)          # L: left col of W
-        assert torch.all(aff[5, :, :, -1] == 1.0)         # R: right col of W
+        assert torch.all(aff[0, 0, :, :][fg[0]] == 1.0)    # T: first slice of D
+        assert torch.all(aff[0, 0, :, :][~fg[0]] == 0.0)
+        assert torch.all(aff[1, -1, :, :][fg[-1]] == 1.0)  # B: last slice of D
+        assert torch.all(aff[1, -1, :, :][~fg[-1]] == 0.0)
+        assert torch.all(aff[2, :, 0, :][fg[:, 0]] == 1.0)    # U: top row of H
+        assert torch.all(aff[2, :, 0, :][~fg[:, 0]] == 0.0)
+        assert torch.all(aff[3, :, -1, :][fg[:, -1]] == 1.0)  # D: bottom row of H
+        assert torch.all(aff[3, :, -1, :][~fg[:, -1]] == 0.0)
+        assert torch.all(aff[4, :, :, 0][fg[:, :, 0]] == 1.0)    # L: left col of W
+        assert torch.all(aff[4, :, :, 0][~fg[:, :, 0]] == 0.0)
+        assert torch.all(aff[5, :, :, -1][fg[:, :, -1]] == 1.0)  # R: right col of W
+        assert torch.all(aff[5, :, :, -1][~fg[:, :, -1]] == 0.0)
 
-    def test_affinity_interior_matches_label_eq(self) -> None:
-        """Interior aff[dir] == (labels == shift(labels, dir))."""
+    def test_affinity_interior_matches_masked_label_eq(self) -> None:
+        """Interior aff[dir] == ((labels == shift(labels, dir)) & (labels != 0))."""
         labels, image = self._simple_labels()
         target = build_boundary_target(labels, image)
         aff = target[0, 10:16]
         lbl = labels[0]
 
-        # T / B on the D axis (Z).
+        # T / B on the D axis (Z) -- center is the un-shifted slice.
+        c, s = lbl[1:, :, :], lbl[:-1, :, :]
+        assert torch.all(aff[0, 1:, :, :] == ((c == s) & (c != 0)).float())
+        c, s = lbl[:-1, :, :], lbl[1:, :, :]
+        assert torch.all(aff[1, :-1, :, :] == ((c == s) & (c != 0)).float())
+        # U / D on the H axis (Y).
+        c, s = lbl[:, 1:, :], lbl[:, :-1, :]
+        assert torch.all(aff[2, :, 1:, :] == ((c == s) & (c != 0)).float())
+        c, s = lbl[:, :-1, :], lbl[:, 1:, :]
+        assert torch.all(aff[3, :, :-1, :] == ((c == s) & (c != 0)).float())
+        # L / R on the W axis (X).
+        c, s = lbl[:, :, 1:], lbl[:, :, :-1]
+        assert torch.all(aff[4, :, :, 1:] == ((c == s) & (c != 0)).float())
+        c, s = lbl[:, :, :-1], lbl[:, :, 1:]
+        assert torch.all(aff[5, :, :, :-1] == ((c == s) & (c != 0)).float())
+
+    def test_affinity_background_none_legacy(self) -> None:
+        """``background=None`` reproduces the pre-fix unmasked target."""
+        labels, image = self._simple_labels()
+        target = build_boundary_target(labels, image, background=None)
+        aff = target[0, 10:16]
+        lbl = labels[0]
+
         assert torch.all(
             aff[0, 1:, :, :] == (lbl[1:, :, :] == lbl[:-1, :, :]).float()
         )
         assert torch.all(
-            aff[1, :-1, :, :] == (lbl[:-1, :, :] == lbl[1:, :, :]).float()
-        )
-        # U / D on the H axis (Y).
-        assert torch.all(
             aff[2, :, 1:, :] == (lbl[:, 1:, :] == lbl[:, :-1, :]).float()
         )
         assert torch.all(
-            aff[3, :, :-1, :] == (lbl[:, :-1, :] == lbl[:, 1:, :]).float()
-        )
-        # L / R on the W axis (X).
-        assert torch.all(
             aff[4, :, :, 1:] == (lbl[:, :, 1:] == lbl[:, :, :-1]).float()
         )
-        assert torch.all(
-            aff[5, :, :, :-1] == (lbl[:, :, :-1] == lbl[:, :, 1:]).float()
-        )
+        # Volume-boundary voxels are unmasked too: every voxel self-connects
+        # under SAME-pad, so the slice along the padded axis is all ones.
+        assert torch.all(aff[0, 0, :, :] == 1.0)
+
+    def test_affinity_background_custom_value(self) -> None:
+        """``background=N`` masks where ``labels == N``, not where ``labels == 0``."""
+        B, D, H, W = 1, 4, 8, 8
+        labels = torch.zeros(B, D, H, W, dtype=torch.long)
+        labels[0, :2, :4, :4] = 1
+        labels[0, 2:, 4:, 4:] = 42      # treat 42 as background here
+        image = torch.rand(B, D, H, W)
+
+        target = build_boundary_target(labels, image, background=42)
+        aff = target[0, 10:16]
+
+        # Voxels with label == 42 are masked to 0 across all 6 channels.
+        bg = labels[0] == 42
+        for c in range(6):
+            assert torch.all(aff[c][bg] == 0.0)
+
+        # Voxels with label == 0 (the actual zeros) are *not* masked --
+        # bg-bg pairs supervise as "1" because 0 != 42.
+        zeros = labels[0] == 0
+        # Pick an interior zero voxel that has a zero neighbour in every
+        # direction; SAME-pad already makes the volume-boundary slabs 1.
+        # The (z=0..1, y=0..3, x=4..7) corner is all zeros and far from
+        # the label==42 quadrant.
+        assert torch.any(zeros)
+        # Spot-check the centre of that all-zero corner along R (x+1):
+        # ``aff[5, 0, 0, 4]`` corresponds to (z=0, y=0, x=4) vs (z=0, y=0, x=5)
+        # -- both are 0, so ``aff = 1`` since 0 != 42.
+        assert aff[5, 0, 0, 4] == 1.0
 
     def test_shape_mismatch_raises(self) -> None:
         labels = torch.zeros(1, 4, 8, 8, dtype=torch.long)
@@ -221,7 +291,7 @@ class TestBoundaryLoss:
         assert pred.grad.abs().sum() > 0
 
     def test_zero_instances_only_raw_and_aff(self, batch) -> None:
-        """No instances -> aff target is all ones; loc sub-losses are zero."""
+        """No instances -> loc sub-losses are zero; raw + aff stay finite."""
         pred, _, image = batch
         B, D, H, W = image.shape
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
@@ -230,7 +300,8 @@ class TestBoundaryLoss:
         assert out["avg"].item() == 0.0
         assert out["max"].item() == 0.0
         assert out["raw"].item() > 0.0
-        # aff target is uniformly 1 -> soft-Dice loss should be finite.
+        # Default ``background=0`` -> aff target is uniformly 0 (no
+        # foreground anywhere); soft-Dice loss must remain finite.
         assert torch.isfinite(out["aff"])
 
     def test_weights_applied_to_total(self, batch) -> None:

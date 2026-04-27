@@ -171,6 +171,9 @@ loss:
     weight_max: 1.0                 # B
     weight_raw: 1.0                 # B
     foreground_only_loc: true       # B  loc loss on FG voxels only
+    background: 0                   # B  mask aff at label == bg (suppresses
+                                    #    spurious 0==0 -> 1 from FindBoundariesd
+                                    #    zeroed-boundary voxels). null = legacy.
     class_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]  # S  BCE pos_weight per aff ch
     label_smoothing: 0.0            # S
     weight_ce: 1.0                  # S  BCE on 6 affinity channels

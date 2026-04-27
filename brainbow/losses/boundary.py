@@ -124,23 +124,49 @@ def _shift_replicate_np(x: np.ndarray, axis: int, shift: int) -> np.ndarray:
 
 
 @torch.no_grad()
-def _affinity_target_torch(labels: torch.Tensor) -> torch.Tensor:
-    """Build the 6-channel affinity target from ``[B, D, H, W]`` labels."""
+def _affinity_target_torch(
+    labels: torch.Tensor,
+    background: Optional[int] = None,
+) -> torch.Tensor:
+    """Build the 6-channel affinity target from ``[B, D, H, W]`` labels.
+
+    Args:
+        labels: Integer instance ids of shape ``[B, D, H, W]``.
+        background: When set, voxels whose label equals this value are
+            masked to ``0`` across all 6 face-affinity channels. This
+            suppresses the spurious ``0 == 0 -> 1`` signal at background
+            voxels (and at the boundary voxels zeroed by
+            :class:`FindBoundariesd`). ``None`` -> legacy behavior
+            (``aff = labels == shifted_labels`` everywhere).
+    """
     per_dir = [
         (labels == _shift_replicate_torch(labels, axis, shift)).to(torch.float32)
         for _, axis, shift in _DIRECTIONS
     ]
     # stack along channel axis -> [B, 6, D, H, W]
-    return rearrange(torch.stack(per_dir, dim=0), "c b d h w -> b c d h w")
+    out = rearrange(torch.stack(per_dir, dim=0), "c b d h w -> b c d h w")
+    if background is not None:
+        mask = rearrange(
+            (labels != background).to(torch.float32), "b ... -> b 1 ...",
+        )
+        out = out * mask
+    return out
 
 
-def _affinity_target_np(labels: np.ndarray) -> np.ndarray:
+def _affinity_target_np(
+    labels: np.ndarray,
+    background: Optional[int] = None,
+) -> np.ndarray:
     """NumPy counterpart of :func:`_affinity_target_torch`."""
     per_dir = [
         (labels == _shift_replicate_np(labels, axis, shift)).astype(np.float32)
         for _, axis, shift in _DIRECTIONS
     ]
-    return np.stack(per_dir, axis=1)          # [B, 6, D, H, W]
+    out = np.stack(per_dir, axis=1)          # [B, 6, D, H, W]
+    if background is not None:
+        mask = (labels != background).astype(np.float32)[:, None]
+        out = out * mask
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -152,12 +178,16 @@ def _affinity_target_np(labels: np.ndarray) -> np.ndarray:
 def _boundary_target_torch(
     labels: torch.Tensor,
     image: torch.Tensor,
+    background: Optional[int] = None,
 ) -> torch.Tensor:
     """Vectorised 16-channel boundary target on the same device as ``labels``.
 
     Args:
         labels: ``[B, D, H, W]`` integer instance ids (``0`` = background).
         image:  ``[B, D, H, W]`` raw (normalised) image intensities.
+        background: Forwarded to :func:`_affinity_target_torch` to mask
+            spurious bg-bg ``1`` values on the 6 affinity channels.
+            ``None`` preserves the legacy unmasked behavior.
 
     Returns:
         ``[B, 16, D, H, W]`` float target tensor.
@@ -203,7 +233,9 @@ def _boundary_target_torch(
         target[b, 1:_N_LOC][:, fg] = rearrange(voxel_rgb, "m c -> c m")
 
     # Affinity ch 10-15 -- SAME-pad face equality over the whole batch.
-    target[:, _N_LOC:_BOUNDARY_CHANNELS] = _affinity_target_torch(labels)
+    target[:, _N_LOC:_BOUNDARY_CHANNELS] = _affinity_target_torch(
+        labels, background=background,
+    )
     return target
 
 
@@ -211,6 +243,7 @@ def _boundary_target_torch(
 def _boundary_target_scipy(
     labels_np: np.ndarray,
     image_np: np.ndarray,
+    background: Optional[int] = None,
 ) -> np.ndarray:
     """Reference 16-channel boundary-target builder via ``scipy.ndimage``.
 
@@ -260,7 +293,9 @@ def _boundary_target_scipy(
         target[b, 1:_N_LOC][:, fg] = voxel_rgb.T
 
     # Affinity ch 10-15 -- SAME-pad face equality over the whole batch.
-    target[:, _N_LOC:_BOUNDARY_CHANNELS] = _affinity_target_np(labels_np)
+    target[:, _N_LOC:_BOUNDARY_CHANNELS] = _affinity_target_np(
+        labels_np, background=background,
+    )
     return target
 
 
@@ -268,6 +303,7 @@ def _boundary_target_scipy(
 def build_boundary_target(
     labels: torch.Tensor,
     image: torch.Tensor,
+    background: Optional[int] = 0,
 ) -> torch.Tensor:
     """Build a ``[B, 16, D, H, W]`` boundary target from labels + image.
 
@@ -275,6 +311,17 @@ def build_boundary_target(
     scipy path for CPU tensors.  Exposed as a module-level function so
     callers outside :class:`BoundaryLoss` can pre-build the target (e.g.
     the image-logger callback).
+
+    Args:
+        labels: ``[B, D, H, W]`` integer instance ids.
+        image:  ``[B, D, H, W]`` raw (normalised) image intensities.
+        background: Label value treated as background when building the
+            6-channel affinity target (ch 10-15).  When set, voxels with
+            ``labels == background`` get affinity ``0`` (suppresses the
+            spurious ``0 == 0 -> 1`` signal at background voxels and at
+            the boundary voxels zeroed by :class:`FindBoundariesd`).
+            Default ``0``.  Pass ``None`` to opt out and reproduce the
+            pre-fix unmasked targets.
     """
     if labels.dim() != 4:
         raise ValueError(
@@ -287,11 +334,14 @@ def build_boundary_target(
         )
 
     if labels.is_cuda:
-        return _boundary_target_torch(labels.long(), image.float())
+        return _boundary_target_torch(
+            labels.long(), image.float(), background=background,
+        )
 
     target_np = _boundary_target_scipy(
         labels.detach().cpu().long().numpy(),
         image.detach().cpu().float().numpy(),
+        background=background,
     )
     return torch.from_numpy(target_np).to(labels.device)
 
@@ -358,6 +408,14 @@ class BoundaryLoss(nn.Module):
             ``p`` is the **already-sigmoided** affinity probability
             arriving from the wrapper, summed over batch + spatial per
             channel and averaged across the 6 direction channels.
+        background: Label value treated as background when building the
+            6 affinity targets.  When set (default ``0``), voxels whose
+            label equals this value contribute ``0`` to all 6
+            face-affinity channels, suppressing the spurious
+            ``0 == 0 -> 1`` signal that would otherwise appear at real
+            background and at the boundary voxels zeroed by
+            :class:`FindBoundariesd`.  Pass ``None`` to opt out and
+            reproduce the pre-fix unmasked targets.
     """
 
     num_channels: int = _BOUNDARY_CHANNELS
@@ -377,6 +435,7 @@ class BoundaryLoss(nn.Module):
         label_smoothing: float = 0.0,
         foreground_only_loc: bool = True,
         aff_eps: float = 1e-5,
+        background: Optional[int] = 0,
     ) -> None:
         super().__init__()
         self.loss_loc = canonical_regression_name(loss_loc)
@@ -396,6 +455,9 @@ class BoundaryLoss(nn.Module):
         self.label_smoothing = float(label_smoothing)
         self.foreground_only_loc = bool(foreground_only_loc)
         self.aff_eps = float(aff_eps)
+        self.background = (
+            int(background) if background is not None else None
+        )
 
         # BCE pos_weight reshaped to [1, 6, 1, 1, 1] so it broadcasts
         # over [B, 6, D, H, W]; None means uniform weighting.
@@ -449,16 +511,18 @@ class BoundaryLoss(nn.Module):
         image: torch.Tensor,
     ) -> torch.Tensor:
         """Per-instance localisation target (ch 1-9, min / avg / max)."""
-        full = build_boundary_target(labels, image)
+        full = build_boundary_target(labels, image, background=self.background)
         return full[:, 1:_N_LOC]
 
     @torch.no_grad()
     def _build_target_aff(self, labels: torch.Tensor) -> torch.Tensor:
         """6-channel SAME-pad affinity target (ch 10-15)."""
         if labels.is_cuda:
-            return _affinity_target_torch(labels.long())
+            return _affinity_target_torch(labels.long(), background=self.background)
         lbl_np = labels.detach().cpu().long().numpy()
-        return torch.from_numpy(_affinity_target_np(lbl_np)).to(labels.device)
+        return torch.from_numpy(
+            _affinity_target_np(lbl_np, background=self.background)
+        ).to(labels.device)
 
     @torch.no_grad()
     def build_target(
@@ -467,7 +531,7 @@ class BoundaryLoss(nn.Module):
         image: torch.Tensor,
     ) -> torch.Tensor:
         """Full 16-channel boundary target for ``(labels, image)``."""
-        return build_boundary_target(labels, image)
+        return build_boundary_target(labels, image, background=self.background)
 
     # Backwards-compat alias.
     def compute_target(
@@ -659,5 +723,6 @@ class BoundaryLoss(nn.Module):
             f"weight_iou={self.weight_iou}, "
             f"class_weights={self.class_weights}, "
             f"label_smoothing={self.label_smoothing}, "
-            f"foreground_only_loc={self.foreground_only_loc})"
+            f"foreground_only_loc={self.foreground_only_loc}, "
+            f"background={self.background})"
         )
