@@ -25,20 +25,18 @@ class TestCombinedLoss2D:
     def loss_fn(self) -> CombinedLoss:
         return CombinedLoss(
             spatial_dims=2,
-            weight_pull=1.0,
-            weight_push=1.0,
-            weight_norm=0.001,
-            weight_edge=1.0,
-            weight_bone=1.0,
-            delta_v=0.5,
-            delta_d=1.5,
+            weight_instance=dict(
+                weight=1.0,
+                weight_pull=1.0, weight_push=1.0, weight_norm=0.001,
+                delta_v=0.5, delta_d=1.5,
+            ),
         )
 
     @pytest.fixture()
     def sample_inputs(self):
         B, H, W = 2, 16, 16
         predictions = {
-            "semantic": torch.randn(B, 16, H, W),
+            "semantic": torch.sigmoid(torch.randn(B, 1, H, W)),
             "instance": torch.randn(B, 16, H, W),
         }
         labels = torch.zeros(B, H, W, dtype=torch.long)
@@ -67,7 +65,10 @@ class TestCombinedLoss2D:
         assert result["semantic/loss"].item() >= 0.0
 
     def test_iou_loss_activates(self, sample_inputs) -> None:
-        loss_fn = CombinedLoss(spatial_dims=2, weight_iou=1.0, weight_edge=1.0, weight_bone=1.0)
+        loss_fn = CombinedLoss(
+            spatial_dims=2,
+            weight_semantic=dict(weight=1.0, weight_iou=1.0),
+        )
         predictions, targets = sample_inputs
         result = loss_fn(predictions, targets)
         assert result["semantic/loss/iou"].item() > 0.0
@@ -84,7 +85,7 @@ class TestCombinedLoss2D:
     def test_zero_instances_no_error(self, loss_fn) -> None:
         B, H, W = 1, 8, 8
         predictions = {
-            "semantic": torch.randn(B, 16, H, W),
+            "semantic": torch.sigmoid(torch.randn(B, 1, H, W)),
             "instance": torch.randn(B, 16, H, W),
         }
         targets = {
@@ -97,8 +98,11 @@ class TestCombinedLoss2D:
     def test_custom_hyperparameters(self) -> None:
         loss_fn = CombinedLoss(
             spatial_dims=2,
-            weight_pull=2.0, weight_push=3.0, weight_norm=0.01,
-            delta_v=0.3, delta_d=2.0,
+            weight_instance=dict(
+                weight=1.0,
+                weight_pull=2.0, weight_push=3.0, weight_norm=0.01,
+                delta_v=0.3, delta_d=2.0,
+            ),
         )
         assert loss_fn.instance_loss.weight_pull == 2.0
         assert loss_fn.instance_loss.weight_push == 3.0
@@ -117,20 +121,18 @@ class TestCombinedLoss3D:
     def loss_fn(self) -> CombinedLoss:
         return CombinedLoss(
             spatial_dims=3,
-            weight_pull=1.0,
-            weight_push=1.0,
-            weight_norm=0.001,
-            weight_edge=1.0,
-            weight_bone=1.0,
-            delta_v=0.5,
-            delta_d=1.5,
+            weight_instance=dict(
+                weight=1.0,
+                weight_pull=1.0, weight_push=1.0, weight_norm=0.001,
+                delta_v=0.5, delta_d=1.5,
+            ),
         )
 
     @pytest.fixture()
     def sample_inputs(self):
         B, D, H, W = 1, 4, 8, 8
         predictions = {
-            "semantic": torch.randn(B, 16, D, H, W),
+            "semantic": torch.sigmoid(torch.randn(B, 1, D, H, W)),
             "instance": torch.randn(B, 16, D, H, W),
         }
         labels = torch.zeros(B, D, H, W, dtype=torch.long)
@@ -154,7 +156,10 @@ class TestCombinedLoss3D:
         assert result["loss"].isfinite()
 
     def test_iou_loss_activates(self, sample_inputs) -> None:
-        loss_fn = CombinedLoss(spatial_dims=3, weight_iou=1.0, weight_edge=1.0, weight_bone=1.0)
+        loss_fn = CombinedLoss(
+            spatial_dims=3,
+            weight_semantic=dict(weight=1.0, weight_iou=1.0),
+        )
         predictions, targets = sample_inputs
         result = loss_fn(predictions, targets)
         assert result["semantic/loss/iou"].item() > 0.0
@@ -214,7 +219,7 @@ class TestCombinedLoss3D:
 
         out_lazy = loss_fn(predictions, targets)
         # Force the shared-cache path explicitly.
-        targets["_cached_weights"] = loss_fn._build_targets(
+        targets["_cached_targets"] = loss_fn._build_targets(
             targets["labels"], targets,
         )
         out_cached = loss_fn(predictions, targets)

@@ -112,13 +112,10 @@ wrapper.py           # CosmosTransfer3DWrapper (the public class)
 ### `models/vista/`
 
 ```
-__init__.py              # re-exports Vista3DWrapper, VistaTaskHead3D,
-                         # PointPromptEncoder, sample_point_prompts
-wrapper.py               # Vista3DWrapper (the public class)
+__init__.py              # re-exports Vista3DWrapper, VistaTaskHead3D
+wrapper.py               # Vista3DWrapper (the public class; 3 heads)
 heads.py                 # VistaTaskHead3D (MONAI UnetrBasicBlock)
 hf_loader.py             # MONAI/VISTA3D-HF encoder download + partial-load
-point_prompt_encoder.py  # interactive proofread conditioning
-point_sampling.py        # GT-mask -> click-point dict
 ```
 
 ### `callbacks/tensorboard/`
@@ -173,7 +170,7 @@ class <Task>Loss(nn.Module):
 | Loss          | Components (keys in returned dict)                            | `task_channels` |
 | ------------- | ------------------------------------------------------------- | --------------- |
 | SemanticLoss  | `loss`, `ce`, `iou`, `dice`                                   | `semantic_channels` |
-| InstanceLoss  | `loss`, `pull`, `push`, `norm`, `aff_emb`                     | embedding `E`   |
+| InstanceLoss  | `loss`, `pull`, `push`, `norm`, `aff_emb`                     | embedding `E` (set by the model wrapper, not the loss) |
 | GeometryLoss  | `loss`, `raw`, `dir`, `cov`  -- channel layout `[raw(1) \| dir(S) \| cov(S*(S+1)/2)]`, source-of-truth in `geometry.py` | `1 + S + S*(S+1)//2` |
 | BoundaryLoss  | `loss`, `raw`, `avg`, `aff`, `aff_pred`, `aff_avg`, plus per-path `aff_{pred,avg}_{ce,dice,iou}` -- channel layout `[raw(1) \| avg(3) \| aff_pred(6)]` | `10`            |
 
@@ -344,11 +341,12 @@ Loss-weight blocks are densely commented (see `configs/snemi3d.yaml`
 `loss:` block) so newcomers can learn the loss by reading the config.
 Every head uses the **nested** loss schema (one mapping per head,
 e.g. ``weight_semantic: { weight: 1.0, ... }``) which keeps every
-head-scoped knob next to its weight.  The legacy *flat* sub-loss
-kwargs (e.g. ``weight_ce`` at top level routed to the semantic head;
-``boundary_weight_aff`` routed to the boundary head) are still accepted
-by :class:`brainbow.losses.CombinedLoss` for back-compat with old
-checkpoints' hparams, but no shipped config uses them.
+head-scoped knob next to its weight.  A bare scalar
+(``weight_semantic: 1.0``) is also accepted as shorthand for
+``{weight: 1.0}`` with no sub-knobs; a nested mapping without
+``weight:`` defaults to ``weight: 1.0``.  Set ``weight: 0`` to
+disable a head -- the sub-loss module is then not instantiated and
+the head's contribution is a cached zero scalar.
 
 ---
 

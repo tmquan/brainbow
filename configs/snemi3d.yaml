@@ -311,7 +311,6 @@ optimizer:
 # ---------------------------------------------------------------------
 loss:
   ignore_index: -100              # label value excluded from every loss term
-  learned_task_weights: false     # Kendall-style uncertainty weighting across heads
 
   # -------------------------------------------------------------------
   # Semantic head -- binary foreground / background (sigmoid, 1 class)
@@ -322,7 +321,6 @@ loss:
     weight: 1.0                   # 0 -> head disabled (instance head carries FG info)
     active_classes: 1             # only foreground is learnt for SNEMI3D
     class_weights: [0.1]          # per-class CE weighting (down-weights FG vs BG imbalance)
-    label_smoothing: 0.0
     weight_ce: 1.0                # cross-entropy sub-loss
     weight_iou: 0.0               # IoU sub-loss (0 -> skipped)
     weight_dice: 1.0              # Dice sub-loss (helps on heavy FG imbalance)
@@ -338,17 +336,18 @@ loss:
     delta_v: 0.5                  # pull margin: allowed intra-cluster radius
     delta_d: 1.5                  # push margin: half the minimum centroid separation
     normalize_embeddings: false   # L2-normalise embeddings before loss (cosine-like)
-    anchor_to_centroid: false     # anchor pull to running centroid (vs batch centroid)
+
     # Hard-pair mining for the push term.
-    #   0   -> use all pairs.  Memory grows ~K(K-1)/2 with crops that
-    #          contain hundreds of instances, pushing the allocator
-    #          high-water mark up and feeding steady-state OOM drift.
-    #   >0  -> top-k hardest pairs only.  Bounded memory and
+    #   0   -> use all upper-triangle pairs.  Backward memory grows
+    #          ~K(K-1)/2 with crops that contain hundreds of instances,
+    #          pushing the allocator high-water mark up and feeding
+    #          steady-state OOM drift.  (Forward materialises the K×K×E
+    #          difference tensor before topk regardless of this knob;
+    #          see GOTCHAS.md for the rationale.)
+    #   >0  -> top-k hardest pairs only.  Bounded backward memory and
     #          concentrates gradient on pairs that actually need
     #          separating.
     max_hard_pairs: 4096
-    weight_edge: 1.0              # per-voxel multiplier on boundary voxels (1.0 = off)
-    weight_bone: 1.0              # per-voxel multiplier on medial-axis voxels (1.0 = off)
 
     # Dense face-affinity supervision on the embedding (mirrors the
     # boundary head's `aff_avg` path).  At every fg-fg face-pair, a
@@ -370,7 +369,6 @@ loss:
   # -------------------------------------------------------------------
   weight_geometry:
     weight: 1.0
-    dir_target: centroid          # direction-field target: "centroid" or "skeleton"
     weight_dir: 1.0               # direction sub-loss
     weight_cov: 1.0               # covariance sub-loss (shape / anisotropy)
     weight_raw: 1.0               # raw-image reconstruction sub-loss (autoencoder-ish)

@@ -279,9 +279,6 @@ class CosmosTransfer3DWrapper(nn.Module):
                 or self._try_load_cosmos_package(
                     cache_dir, hf_token, checkpoint_variant,
                 )
-                or self._try_load_raw_checkpoint(
-                    cache_dir, hf_token, checkpoint_variant,
-                )
             )
         finally:
             torch.set_default_dtype(_saved_dtype)
@@ -390,103 +387,6 @@ class CosmosTransfer3DWrapper(nn.Module):
         except Exception as exc:
             logger.warning("cosmos_transfer2 load failed: %s", exc)
             return False
-
-    def _try_load_raw_checkpoint(
-        self,
-        cache_dir: Optional[str],
-        hf_token: Optional[str],
-        checkpoint_variant: str,
-    ) -> bool:
-        try:
-            local_path = _download_from_hf(
-                self.cfg.hf_repo_id,
-                revision=self.cfg.hf_revision,
-                cache_dir=cache_dir,
-                token=hf_token,
-            )
-        except Exception:
-            return False
-
-        local_path = Path(local_path)
-
-        # --- Load VAE from snapshot via diffusers ---
-        try:
-            from diffusers import AutoencoderKLWan  # type: ignore[import-untyped]
-
-            vae = AutoencoderKLWan.from_pretrained(
-                str(local_path), subfolder="vae",
-                torch_dtype=self._dtype,
-            )
-            vae = vae.to(self._dtype)
-            self._vae_ref = [vae]
-            self.vae_encoder = vae.encoder
-            self.vae_decoder = vae.decoder
-            logger.info("Loaded VAE encoder + decoder from snapshot.")
-        except Exception as exc:
-            logger.warning("Could not load VAE from snapshot: %s", exc)
-
-        # --- Load DiT: try diffusers first, then raw weights ---
-        try:
-            from diffusers import CosmosTransformer3DModel  # type: ignore[import-untyped]
-
-            self.dit = CosmosTransformer3DModel.from_pretrained(
-                str(local_path), subfolder="transformer",
-                torch_dtype=self._dtype,
-            ).to(self._dtype)
-            self._backbone_loaded = True
-            self._backend = "diffusers"
-            logger.info("Loaded DiT transformer from snapshot via diffusers.")
-            return True
-        except Exception as exc:
-            logger.warning("diffusers DiT load from snapshot failed: %s", exc)
-
-        self._build_standalone_backbone()
-
-        transformer_dir = local_path / "transformer"
-        ckpt_files = (
-            list(transformer_dir.glob("*.safetensors"))
-            + list(transformer_dir.glob("*.pt"))
-        ) if transformer_dir.is_dir() else (
-            list(local_path.glob("**/*.safetensors"))
-            + list(local_path.glob("**/*.pt"))
-        )
-        if not ckpt_files:
-            logger.warning("No checkpoint files found in %s.", local_path)
-            return False
-
-        loaded_any = False
-        for ckpt_file in ckpt_files:
-            try:
-                if ckpt_file.suffix == ".safetensors":
-                    from safetensors.torch import load_file  # type: ignore[import-untyped]
-                    state = load_file(str(ckpt_file), device="cpu")
-                else:
-                    state = torch.load(
-                        str(ckpt_file), map_location="cpu", weights_only=True,
-                    )
-                missing, unexpected = self.dit.load_state_dict(
-                    state, strict=False,
-                )
-                if missing:
-                    logger.debug(
-                        "Missing keys from %s: %d", ckpt_file.name, len(missing),
-                    )
-                if unexpected:
-                    logger.debug(
-                        "Unexpected keys in %s: %d",
-                        ckpt_file.name, len(unexpected),
-                    )
-                loaded_any = True
-            except Exception as exc:
-                logger.warning("Failed to load %s: %s", ckpt_file.name, exc)
-
-        if loaded_any:
-            self._backbone_loaded = True
-            self._backend = "raw_checkpoint"
-            logger.info(
-                "Loaded weights from raw checkpoint into standalone 3-D DiT."
-            )
-        return loaded_any
 
     def _build_standalone_backbone(self) -> None:
         self.dit = _StandaloneDiT3D(self.cfg)
@@ -699,20 +599,15 @@ class CosmosTransfer3DWrapper(nn.Module):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        semantic_ids: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Full forward pass: encode -> DiT features -> 3-D heads.
 
         Args:
             x: Input volume ``[B, C, D, H, W]``.
-            semantic_ids: Optional per-voxel class labels ``[B, D, H, W]``.
 
         Returns:
-            Dict with ``"semantic"``, ``"instance"``, ``"geometry"``
-            and optionally ``"semantic_ids"``.
+            Dict with ``"semantic"``, ``"instance"``, ``"geometry"``,
+            and ``"boundary"`` keys (per the four task heads).
         """
         original_dtype = x.dtype
         D_in, H_in, W_in = x.shape[-3], x.shape[-2], x.shape[-1]
@@ -731,13 +626,9 @@ class CosmosTransfer3DWrapper(nn.Module):
         latent = self._encode_to_latent(rgb.to(dtype=compute_dtype))
 
         features = self._extract_features(latent)
-
         features = features.to(dtype=original_dtype)
 
-        out = self.decoder_adapter(features, target_size=(D_in, H_in, W_in))
-        if semantic_ids is not None:
-            out["semantic_ids"] = semantic_ids
-        return out
+        return self.decoder_adapter(features, target_size=(D_in, H_in, W_in))
 
     # ------------------------------------------------------------------
     # Freeze / unfreeze

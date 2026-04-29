@@ -54,10 +54,6 @@ data:
   train_volumes: null  # List of {vol, seg} dicts; null = dataset defaults
   val_volumes: null    # Defaults to train_volumes
   test_volumes: null   # Defaults to train_volumes
-  # MICRONS-only: include cleft / mitochondria channels in the input volume.
-  # Ignored by other datasets.
-  include_clefts: true
-  include_mito: false
 
 # Model configuration
 model:
@@ -88,15 +84,11 @@ optimizer:
 #
 # Each ``weight_<head>`` is either a scalar (head's overall weight; all
 # sub-loss kwargs default) OR a mapping ``{weight: ..., <kwarg>: ...}``
-# whose entries are forwarded to the head's sub-loss constructor.
-#
-# Recipes that need to override a single sub-loss kwarg can use the
-# nested form OR the legacy flat form (e.g. ``weight_ce`` at top level
-# is routed to the semantic head; ``boundary_*`` keys are routed to the
-# boundary head); both still work and produce identical results.
+# whose entries are forwarded to the head's sub-loss constructor.  A
+# nested mapping without ``weight:`` defaults to ``weight: 1.0``; set
+# ``weight: 0`` (scalar or nested) to disable a head entirely.
 loss:
   ignore_index: -100              # label value excluded from every loss term
-  learned_task_weights: false     # Kendall-style uncertainty weighting across heads
 
   # Semantic head (sigmoid; multi-label binary per channel).  The model
   # wrapper applies sigmoid to the semantic head before the loss sees it.
@@ -120,13 +112,10 @@ loss:
     tau: 1.0                      # bandwidth of the soft similarity kernel
     delta_v: 0.5
     delta_d: 1.5
-    weight_edge: 10.0             # per-voxel multiplier on boundary voxels
-    weight_bone: 10.0             # per-voxel multiplier on medial-axis voxels
 
   # Geometry head (direction + covariance + raw).
   weight_geometry:
     weight: 0.0                   # disabled by default; enable per-recipe
-    dir_target: centroid          # "centroid" or "skeleton"
     weight_dir: 1.0
     weight_cov: 0.0
     weight_raw: 1.0

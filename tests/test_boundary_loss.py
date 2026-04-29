@@ -271,9 +271,14 @@ class TestBoundaryLoss:
         labels[0, 4:, 8:, 8:] = 2
         labels[1, 2:6, 4:12, 4:12] = 3
         image = torch.rand(B, D, H, W)
-        # ``BoundaryLoss`` consumes post-sigmoid probabilities on every
-        # boundary channel (raw + avg + direct aff); the model wrapper
-        # applies sigmoid before the loss sees the prediction.
+        # ``BoundaryLoss`` consumes a 10-channel prediction whose
+        # activation policy is applied by the model wrapper:
+        # **linear** on raw + avg (ch 0-3, regression) and
+        # **sigmoid** on aff (ch 4-9, BCE / Dice / IoU).  ``rand``
+        # values in ``[0, 1]`` are valid for both halves -- the linear
+        # half can technically receive any real, but in practice raw
+        # / avg targets sit in ``[0, 1]`` so a uniform random input is
+        # representative.
         raw = torch.rand(B, 1, D, H, W)
         avg = torch.rand(B, 3, D, H, W)
         aff = torch.rand(B, 6, D, H, W)
@@ -438,8 +443,10 @@ class TestBoundaryInCombinedLoss:
         labels[0, :2, :4, :4] = 1
         labels[0, 2:, 4:, 4:] = 2
         image = torch.rand(B, D, H, W)
-        # Match the wrapper's output contract: every boundary channel
-        # arrives in [0, 1] (sigmoid is applied by the model wrapper).
+        # Match the wrapper's output contract: ch 0-3 (raw + avg) are
+        # linear (regression-supervised), ch 4-9 (aff) are sigmoid
+        # (BCE/Dice/IoU); ``rand`` values in ``[0, 1]`` are
+        # representative for both halves.
         bnd = torch.cat(
             [torch.rand(B, 4, D, H, W), torch.rand(B, 6, D, H, W)], dim=1,
         ).detach().requires_grad_(True)

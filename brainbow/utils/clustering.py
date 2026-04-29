@@ -1,37 +1,33 @@
 """
-Embedding / offset clustering utilities for connectomics segmentation.
+Embedding clustering utilities for connectomics segmentation.
 
 Public API
 ----------
 - ``cluster_embeddings``      -- unified entry point; switch algorithm via
-                                 ``algorithm={"meanshift", "hdbscan",
-                                 "soft_meanshift", "spatial_cc"}``.  Picks
-                                 the fastest available backend (GPU → CPU).
+                                 ``algorithm={"hdbscan", "soft_meanshift",
+                                 "spatial_cc"}``.  Picks the fastest
+                                 available backend (GPU → CPU).
 - ``cluster_spatial_cc``      -- connected components on the spatial-neighbour
                                  embedding-affinity graph.  GPU via cupyx.
-- ``cluster_offsets_hough``   -- Hough voting on predicted spatial offsets.
 
-Back-compatible thin wrappers (kept so existing call sites keep working):
-- ``cluster_embeddings_meanshift``  -> ``cluster_embeddings(algorithm="meanshift")``
+Thin per-algorithm wrappers:
 - ``cluster_embeddings_soft``       -> ``cluster_embeddings(algorithm="soft_meanshift")``
 - ``cluster_embeddings_hdbscan``    -> ``cluster_embeddings(algorithm="hdbscan")``
-- ``cluster_embeddings_spatial_cc`` -> ``cluster_embeddings(algorithm="spatial_cc")``
 
 Backend selection (per algorithm, in preference order):
 
-- ``meanshift``       : cuML ``MeanShift`` (GPU) → sklearn ``MeanShift`` (CPU).
-- ``hdbscan``         : cuML ``HDBSCAN`` (GPU) → ``hdbscan.HDBSCAN`` (CPU C impl)
-                         → sklearn ``HDBSCAN`` (CPU, requires sklearn >= 1.3).
 - ``soft_meanshift``  : differentiable torch implementation
                          (:class:`brainbow.inference.clusterer.SoftMeanShift`);
                          runs on whatever device the input tensor lives on.
+- ``hdbscan``         : cuML ``HDBSCAN`` (GPU) → ``hdbscan.HDBSCAN`` (CPU C impl)
+                         → sklearn ``HDBSCAN`` (CPU, requires sklearn >= 1.3).
 - ``spatial_cc``      : ``cupyx.scipy.sparse.csgraph.connected_components``
                          (GPU, zero-copy via DLPack) → ``scipy.sparse.csgraph``
                          (CPU).  Neither cuml nor cucim provides sparse CC.
 
-All algorithms return an integer label tensor with the same spatial shape as
-the input, where ``0`` is background / noise and foreground instances are
-numbered ``1..K``.  Only ``soft_meanshift`` is differentiable.
+All algorithms return an integer label tensor with the same spatial shape
+as the input, where ``0`` is background / noise and foreground instances
+are numbered ``1..K``.  Only ``soft_meanshift`` is differentiable.
 """
 
 from __future__ import annotations
@@ -105,22 +101,6 @@ def _probe_cuml_hdbscan() -> Optional[Any]:
 
 
 @lru_cache(maxsize=1)
-def _probe_cuml_meanshift() -> Optional[Any]:
-    """Return ``cuml.cluster.MeanShift`` if importable, else None.
-
-    Note: RAPIDS dropped MeanShift in cuML 23.x; on modern installs this
-    probe will return None and MeanShift will fall back to sklearn.
-    """
-    if _probe_cupy() is None:
-        return None
-    try:
-        from cuml.cluster import MeanShift as _CuMeanShift
-    except Exception:
-        return None
-    return _CuMeanShift
-
-
-@lru_cache(maxsize=1)
 def _probe_hdbscan_pkg() -> Optional[Any]:
     """Return the standalone ``hdbscan`` package if installed, else None."""
     try:
@@ -138,15 +118,6 @@ def _probe_sklearn_hdbscan() -> Optional[Any]:
     except Exception:
         return None
     return _SKHDBSCAN
-
-
-@lru_cache(maxsize=1)
-def _probe_sklearn_meanshift() -> Optional[Any]:
-    try:
-        from sklearn.cluster import MeanShift as _SKMeanShift
-    except Exception:
-        return None
-    return _SKMeanShift
 
 
 @lru_cache(maxsize=1)
@@ -210,7 +181,7 @@ def _probe_cupy_csgraph() -> Optional[Tuple[Any, Any]]:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_VALID_ALGOS = ("meanshift", "hdbscan", "soft_meanshift", "spatial_cc")
+_VALID_ALGOS = ("hdbscan", "soft_meanshift", "spatial_cc")
 _VALID_BACKENDS = (
     "auto", "cuml", "cupy", "self", "hdbscan", "sklearn", "torch", "scipy",
 )
@@ -388,46 +359,6 @@ def _remap_consecutive(labels: np.ndarray, min_cluster_size: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Per-algorithm dispatchers
 # ---------------------------------------------------------------------------
-
-def _run_meanshift(
-    emb_fg: np.ndarray,
-    bandwidth: float,
-    bin_seeding: bool,
-    backend: str,
-) -> np.ndarray:
-    """Return ``[N]`` int labels with ``-1`` marking noise."""
-    cp = _probe_cupy()
-    cuml_cls = _probe_cuml_meanshift() if backend in ("auto", "cuml") else None
-    if cuml_cls is not None and cp is not None:
-        try:
-            emb_gpu = _as_fg_cupy(emb_fg)
-            model = cuml_cls(bandwidth=bandwidth, bin_seeding=bin_seeding)
-            labels_gpu = model.fit_predict(emb_gpu)
-            return cp.asnumpy(labels_gpu).astype(np.int64)
-        except Exception:
-            if backend == "cuml":
-                raise
-
-    if backend == "cuml":
-        raise RuntimeError(
-            "backend='cuml' requested for MeanShift but cuML.cluster.MeanShift "
-            "is not available (RAPIDS dropped MeanShift in cuML 23.x). "
-            "Use backend='auto' or 'sklearn' for CPU MeanShift, or switch to "
-            "algorithm='hdbscan' for a GPU-accelerated alternative."
-        )
-
-    sk_cls = _probe_sklearn_meanshift()
-    if sk_cls is None:
-        raise ImportError(
-            "MeanShift requires scikit-learn (cuML no longer ships MeanShift)."
-        )
-    try:
-        model = sk_cls(bandwidth=bandwidth, bin_seeding=bin_seeding)
-        return np.asarray(model.fit_predict(emb_fg), dtype=np.int64)
-    except ValueError:
-        # Happens when every point collapses to one cluster on degenerate input.
-        return np.zeros(len(emb_fg), dtype=np.int64)
-
 
 def _run_hdbscan(
     emb_fg: np.ndarray,
@@ -1024,7 +955,7 @@ def _spatial_cc_run_gpu(
 def cluster_embeddings(
     embedding: torch.Tensor,
     foreground_mask: Optional[torch.Tensor] = None,
-    algorithm: str = "meanshift",
+    algorithm: str = "soft_meanshift",
     *,
     bandwidth: DeltaV = 0.5,
     min_cluster_size: int = 50,
@@ -1034,8 +965,6 @@ def cluster_embeddings(
     min_samples: Optional[int] = None,
     cluster_selection_epsilon: Optional[float] = None,
     max_points: int = 200_000,
-    # meanshift
-    bin_seeding: bool = True,
     # soft_meanshift
     num_iters: int = 10,
     temperature: float = 1.0,
@@ -1045,22 +974,22 @@ def cluster_embeddings(
 ) -> torch.Tensor:
     """Cluster pixel / voxel embeddings into instance labels.
 
-    Works identically on 2-D and 3-D inputs.  Not differentiable unless
+    Works identically on 2-D and 3-D inputs.  Differentiable only when
     ``algorithm='soft_meanshift'``.
 
     Args:
         embedding: ``[E, *spatial]`` embedding tensor (unbatched).
         foreground_mask: Optional ``[*spatial]`` bool mask; background
             voxels always receive label 0.
-        algorithm: One of ``{"meanshift", "hdbscan", "soft_meanshift",
-            "spatial_cc"}``.  ``"spatial_cc"`` ignores ``max_points``,
-            ``min_samples``, ``cluster_selection_epsilon`` and all
-            SoftMeanShift knobs; it uses only ``bandwidth`` (= the
-            embedding-distance threshold) and ``min_cluster_size``.
-        bandwidth: Euclidean bandwidth for MeanShift / SoftMeanShift
-            (also the edge threshold for ``spatial_cc``).  For
-            discriminative-loss embeddings this should match ``delta_v``
-            (= 0.5 in the original paper).
+        algorithm: One of ``{"soft_meanshift", "hdbscan", "spatial_cc"}``.
+            ``"spatial_cc"`` ignores ``max_points``, ``min_samples``,
+            ``cluster_selection_epsilon`` and all SoftMeanShift knobs;
+            it uses only ``bandwidth`` (= the embedding-distance
+            threshold) and ``min_cluster_size``.
+        bandwidth: Euclidean bandwidth for SoftMeanShift (also the edge
+            threshold for ``spatial_cc``).  For discriminative-loss
+            embeddings this should match ``delta_v`` (= 0.5 in the
+            original paper).
         min_cluster_size: Clusters with fewer than this many voxels are
             discarded (mapped to background).
         normalize_embeddings: L2-normalise embeddings before clustering.
@@ -1075,9 +1004,8 @@ def cluster_embeddings(
             margin.
         max_points: Upper bound on points passed to HDBSCAN; larger
             foreground sets are uniformly subsampled and the remaining
-            points are assigned by nearest cluster center in embedding
+            points are assigned by nearest cluster centre in embedding
             space.
-        bin_seeding: MeanShift seed-grid flag.
         num_iters / temperature / max_seeds: SoftMeanShift knobs.
         seed: RNG seed for subsampling reproducibility.
 
@@ -1107,11 +1035,9 @@ def cluster_embeddings(
         )
 
     if algorithm == "spatial_cc":
-        # Spatial-affinity CC uses bandwidth as the embedding-distance
-        # threshold (semantically identical to delta_v).  It also
-        # accepts a per-axis list (anisotropic mode) — passed through
-        # untouched.  max_points, min_samples, cluster_selection_epsilon
-        # are all irrelevant here.
+        # ``bandwidth`` is the embedding-distance threshold (== delta_v).
+        # Accepts a per-axis list (anisotropic mode) -- passed through
+        # untouched.  max_points / min_samples / eps are irrelevant here.
         cc_backend = (
             backend if backend in ("auto", "cupy", "self", "scipy") else "auto"
         )
@@ -1124,6 +1050,7 @@ def cluster_embeddings(
             backend=cc_backend,
         )
 
+    # algorithm == "hdbscan"
     device = embedding.device
     emb_fg_np, fg_idx, spatial_shape = _as_fg_np(
         embedding, foreground_mask, normalize_embeddings,
@@ -1141,24 +1068,14 @@ def cluster_embeddings(
     )
 
     rng = np.random.default_rng(seed)
-
-    if algorithm == "meanshift":
-        # MeanShift scales ~O(N²); subsample like HDBSCAN for large volumes.
-        sub_emb, sub_idx = _subsample(emb_fg_np, max_points, rng)
-        sub_labels = _run_meanshift(
-            sub_emb, bandwidth=bandwidth, bin_seeding=bin_seeding, backend=backend,
-        )
-    elif algorithm == "hdbscan":
-        sub_emb, sub_idx = _subsample(emb_fg_np, max_points, rng)
-        sub_labels = _run_hdbscan(
-            sub_emb,
-            min_cluster_size=min_cluster_size,
-            min_samples=min_samples,
-            cluster_selection_epsilon=eps,
-            backend=backend,
-        )
-    else:  # pragma: no cover -- guarded above
-        raise AssertionError(algorithm)
+    sub_emb, sub_idx = _subsample(emb_fg_np, max_points, rng)
+    sub_labels = _run_hdbscan(
+        sub_emb,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        cluster_selection_epsilon=eps,
+        backend=backend,
+    )
 
     if sub_idx is None:
         # No subsampling: labels correspond 1-1 to foreground rows.
@@ -1220,28 +1137,6 @@ def _cluster_soft_meanshift(
 # Backward-compatible wrappers
 # ---------------------------------------------------------------------------
 
-def cluster_embeddings_meanshift(
-    embedding: torch.Tensor,
-    foreground_mask: Optional[torch.Tensor] = None,
-    bandwidth: float = 0.5,
-    min_cluster_size: int = 50,
-    normalize_embeddings: bool = False,
-    backend: str = "auto",
-    max_points: int = 200_000,
-) -> torch.Tensor:
-    """Cluster pixel embeddings via MeanShift (cuML GPU → sklearn CPU)."""
-    return cluster_embeddings(
-        embedding,
-        foreground_mask=foreground_mask,
-        algorithm="meanshift",
-        bandwidth=bandwidth,
-        min_cluster_size=min_cluster_size,
-        normalize_embeddings=normalize_embeddings,
-        backend=backend,
-        max_points=max_points,
-    )
-
-
 def cluster_embeddings_hdbscan(
     embedding: torch.Tensor,
     foreground_mask: Optional[torch.Tensor] = None,
@@ -1290,80 +1185,3 @@ def cluster_embeddings_soft(
     )
 
 
-def cluster_embeddings_spatial_cc(
-    embedding: torch.Tensor,
-    foreground_mask: Optional[torch.Tensor] = None,
-    delta_v: DeltaV = 0.5,
-    min_cluster_size: int = 50,
-    connectivity: int = 1,
-    normalize_embeddings: bool = False,
-    backend: str = "auto",
-) -> torch.Tensor:
-    """Connected components on the spatial-neighbour embedding-affinity graph."""
-    return cluster_spatial_cc(
-        embedding,
-        foreground_mask=foreground_mask,
-        delta_v=delta_v,
-        min_cluster_size=min_cluster_size,
-        connectivity=connectivity,
-        normalize_embeddings=normalize_embeddings,
-        backend=backend,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Offset-based (Hough voting) -- unchanged
-# ---------------------------------------------------------------------------
-
-def cluster_offsets_hough(
-    offsets: torch.Tensor,
-    foreground_mask: Optional[torch.Tensor] = None,
-    bin_size: float = 2.0,
-    sigma: float = 2.0,
-    threshold: float = 0.3,
-    min_votes: int = 50,
-) -> torch.Tensor:
-    """Cluster via Hough voting on predicted spatial offsets."""
-    from brainbow.inference.clusterer import HoughVoting
-
-    batched = offsets.dim() >= 4
-    if not batched:
-        offsets = rearrange(offsets, "... -> 1 ...")
-        if foreground_mask is not None:
-            foreground_mask = rearrange(foreground_mask, "... -> 1 ...")
-
-    voter = HoughVoting(
-        bin_size=bin_size,
-        sigma=sigma,
-        threshold=threshold,
-        min_votes=min_votes,
-    )
-    labels, _soft, _centers = voter(offsets, foreground_mask)
-
-    if not batched:
-        labels = rearrange(labels, "1 ... -> ...")
-    return labels
-
-
-# ---------------------------------------------------------------------------
-# Introspection helper (useful for logging which backend ran)
-# ---------------------------------------------------------------------------
-
-def available_backends() -> Dict[str, Dict[str, bool]]:
-    """Report which clustering backends are installed on this machine."""
-    return {
-        "meanshift": {
-            "cuml": _probe_cuml_meanshift() is not None,
-            "sklearn": _probe_sklearn_meanshift() is not None,
-        },
-        "hdbscan": {
-            "cuml": _probe_cuml_hdbscan() is not None,
-            "hdbscan": _probe_hdbscan_pkg() is not None,
-            "sklearn": _probe_sklearn_hdbscan() is not None,
-        },
-        "soft_meanshift": {"torch": True},
-        "spatial_cc": {
-            "cupy": _probe_cupy_csgraph() is not None,
-            "scipy": _probe_scipy_csgraph() is not None,
-        },
-    }

@@ -10,15 +10,12 @@ import torch
 
 from brainbow.utils.io import find_folder, load_volume, save_volume, ensure_data, SUPPORTED_EXTENSIONS
 from brainbow.transforms.label import Labeld
-from brainbow.utils.clustering import cluster_embeddings_meanshift
 from brainbow.metrics.instance import (
     _prepare_flat_labels,
     compute_per_point_ari as compute_ari_point,
     compute_per_point_ami as compute_ami_point,
-    compute_per_point_axi as compute_axi_point,
     compute_per_batch_ari as compute_ari_batch,
     compute_per_batch_ami as compute_ami_batch,
-    compute_per_batch_axi as compute_axi_batch,
 )
 
 
@@ -157,52 +154,35 @@ class TestLabeld:
 
 
 class TestComputeMetricsPoint:
-    """Tests for per-sample ARI/AMI/AXI computation."""
+    """Tests for per-sample ARI / AMI computation."""
 
     def test_perfect_ari(self) -> None:
-        """Test ARI with perfect segmentation."""
         labels = torch.tensor([[1, 1, 2, 2], [1, 1, 2, 2]])
         assert compute_ari_point(labels, labels) == pytest.approx(1.0, abs=1e-6)
 
     def test_perfect_ami(self) -> None:
-        """Test AMI with perfect segmentation."""
         labels = torch.tensor([[1, 1, 2, 2], [1, 1, 2, 2]])
         assert compute_ami_point(labels, labels) == pytest.approx(1.0, abs=1e-6)
 
-    def test_perfect_axi(self) -> None:
-        """Test AXI with perfect segmentation."""
-        labels = torch.tensor([[1, 1, 2, 2], [1, 1, 2, 2]])
-        assert compute_axi_point(labels, labels) == pytest.approx(1.0, abs=1e-6)
-
     def test_all_background(self) -> None:
-        """Test with all background."""
         pred = torch.zeros(4, 4, dtype=torch.long)
         true = torch.zeros(4, 4, dtype=torch.long)
         assert compute_ari_point(pred, true) == 0.0
         assert compute_ami_point(pred, true) == 0.0
-        assert compute_axi_point(pred, true) == 0.0
 
 
 class TestComputeMetricsBatch:
-    """Tests for batch ARI/AMI/AXI computation."""
+    """Tests for batch ARI / AMI computation."""
 
     def test_batch_ari(self) -> None:
-        """Test batch ARI."""
         pred = torch.tensor([[[1, 1, 2, 2]], [[3, 3, 4, 4]]])
         true = torch.tensor([[[1, 1, 2, 2]], [[3, 3, 4, 4]]])
         assert compute_ari_batch(pred, true) > 0.0
 
     def test_batch_ami(self) -> None:
-        """Test batch AMI."""
         pred = torch.tensor([[[1, 1, 2, 2]], [[3, 3, 4, 4]]])
         true = torch.tensor([[[1, 1, 2, 2]], [[3, 3, 4, 4]]])
         assert compute_ami_batch(pred, true) > 0.0
-
-    def test_batch_axi(self) -> None:
-        """Test batch AXI."""
-        pred = torch.tensor([[[1, 1, 2, 2]], [[3, 3, 4, 4]]])
-        true = torch.tensor([[[1, 1, 2, 2]], [[3, 3, 4, 4]]])
-        assert compute_axi_batch(pred, true) > 0.0
 
 
 class TestEnsureData:
@@ -312,72 +292,11 @@ class TestComputeMetricsExtended:
         ami = compute_ami_point(pred, true)
         assert 0.0 <= ami <= 1.0
 
-    def test_axi_is_geometric_mean(self) -> None:
-        labels = torch.tensor([[1, 1, 2, 2], [1, 1, 2, 2]])
-        axi = compute_axi_point(labels, labels)
-        ari = compute_ari_point(labels, labels)
-        ami = compute_ami_point(labels, labels)
-        expected = float(np.sqrt(max(ari, 0) * max(ami, 0)))
-        assert abs(axi - expected) < 1e-6
-
     def test_batch_metrics_with_single_sample(self) -> None:
         pred = torch.tensor([[[1, 1, 2, 2]]])
         true = torch.tensor([[[1, 1, 2, 2]]])
         assert compute_ari_batch(pred, true) > 0
         assert compute_ami_batch(pred, true) > 0
-        assert compute_axi_batch(pred, true) > 0
-
-
-class TestClusterEmbeddingsMeanshift:
-    """Tests for cluster_embeddings_meanshift."""
-
-    def test_2d_clustering_basic(self) -> None:
-        embedding = torch.zeros(8, 16, 16)
-        embedding[:, :8, :] = 1.0
-        embedding[:, 8:, :] = -1.0
-
-        fg_mask = torch.ones(16, 16)
-
-        labels = cluster_embeddings_meanshift(
-            embedding, foreground_mask=fg_mask, bandwidth=0.5, min_cluster_size=10,
-        )
-        assert labels.shape == (16, 16)
-        assert labels.max() >= 1
-
-    def test_3d_clustering_basic(self) -> None:
-        embedding = torch.zeros(4, 4, 8, 8)
-        embedding[:, :, :4, :] = 1.0
-        embedding[:, :, 4:, :] = -1.0
-
-        labels = cluster_embeddings_meanshift(
-            embedding, bandwidth=0.5, min_cluster_size=5,
-        )
-        assert labels.shape == (4, 8, 8)
-
-    def test_empty_foreground(self) -> None:
-        embedding = torch.randn(4, 8, 8)
-        fg_mask = torch.zeros(8, 8)
-        labels = cluster_embeddings_meanshift(
-            embedding, foreground_mask=fg_mask,
-        )
-        assert labels.shape == (8, 8)
-        assert labels.sum() == 0
-
-    def test_no_foreground_mask(self) -> None:
-        embedding = torch.randn(4, 8, 8)
-        labels = cluster_embeddings_meanshift(
-            embedding, bandwidth=1.0, min_cluster_size=1,
-        )
-        assert labels.shape == (8, 8)
-
-    def test_min_cluster_size_filters(self) -> None:
-        embedding = torch.zeros(4, 10, 10)
-        embedding[:, 0, 0] = 100.0
-
-        labels = cluster_embeddings_meanshift(
-            embedding, bandwidth=0.5, min_cluster_size=50,
-        )
-        assert labels.shape == (10, 10)
 
 
 if __name__ == "__main__":

@@ -6,27 +6,46 @@ that hosts the four task heads (semantic, instance, geometry,
 boundary).
 
 Head activations (applied exactly once, here, before loss / metric /
-visualisation consume the outputs)::
+visualisation consume the outputs).  The rule is **sigmoid for
+classification heads, linear for regression heads** -- regression on
+a sigmoid output saturates the gradient at boundary voxels (the
+prediction asymptotes the target instead of reaching it), so we
+keep the sigmoid only where the loss is BCE / Dice / IoU::
 
     semantic :  sigmoid on every channel (per-channel multi-label
-                binary probabilities)
+                binary probabilities; SemanticLoss does BCE + Dice +
+                IoU on probabilities).
     instance :  linear (discriminative embedding; unbounded Euclidean
                 space -- sigmoid would collapse it into the unit
-                hypercube)
-    geometry :  sigmoid on ch 0 (``raw``, [0, 1] target); linear on
-                ``dir`` and ``cov`` (signed values -- sigmoid would
-                kill the sign).  Channel layout is owned by
+                hypercube).
+    geometry :  fully linear.  Channel layout is owned by
                 :class:`brainbow.losses.geometry.GeometryLoss`::
                     [raw(1) | dir(S) | cov(S*(S+1)/2)]
-    boundary :  sigmoid on every channel (every target lives in
-                [0, 1]: raw intensity, normalised centroid xyz colour,
-                binary face affinities).  Channel layout is owned by
+                ``raw`` is supervised with L1 / MSE / Smooth-L1
+                regression against the (normalised) input image, so a
+                sigmoid would only saturate the gradient at the
+                ``0`` / ``1`` extremes.  ``dir`` and ``cov`` are
+                signed regression targets and were never sigmoided.
+    boundary :  sigmoid on **ch 4-9 only** (the 6 binary face
+                affinities; classification-supervised via BCE + Dice
+                + IoU).  Linear on ch 0 (raw intensity, regression)
+                and ch 1-3 (normalised centroid xyz, regression).
+                Channel layout is owned by
                 :mod:`brainbow.losses.boundary`::
                     [raw(1) | avg(3) | aff_pred(6)]  -> 10 channels
 
 Keeping the activation policy in a single place (this file) means the
-loss modules consume probabilities directly and the TensorBoard
-image logger never has to re-apply any activation.
+loss modules consume the right input directly and the TensorBoard
+image logger never has to re-apply any activation.  ``raw`` / ``avg``
+panels in the visualizer already ``clamp(0, 1)`` for display, so the
+linear-prediction policy is display-safe.
+
+Migration from the previous policy (sigmoid on raw + avg + aff for
+boundary, and sigmoid on geometry ch 0): existing checkpoints' head
+weights for ``head_geometry[0]`` and ``head_boundary[0..3]`` were
+trained to produce *pre*-sigmoid logits.  Loading them under the new
+linear policy gives garbage on those rows -- re-init or fine-tune.
+See ``doc/GOTCHAS.md`` for the migration entry.
 """
 
 import logging
@@ -275,31 +294,32 @@ class _DecoderAdapter3D(nn.Module):
             # trap every voxel in the unit hypercube.
             out["instance"] = self.head_instance(decoded)
         if "geometry" not in self._disabled_heads:
-            # Geometry head layout: [raw(1) | dir(S) | cov(S*(S+1)/2)].
-            # - raw (ch 0)    : [0, 1] target -> sigmoid.
-            # - dir (ch 1..S) : signed unit-vector components in [-1, 1];
-            #   leave linear (sigmoid would kill the sign).
-            # - cov (last T)  : trace-normalised covariance with signed
-            #   off-diagonals; leave linear for the same reason.
-            # Concatenation (not in-place) keeps autograd happy and avoids
-            # a view that would break torch.compile.
-            geom = self.head_geometry(decoded)
-            out["geometry"] = torch.cat(
-                [geom[:, :1].sigmoid(), geom[:, 1:]], dim=1,
-            )
+            # Geometry head [raw(1) | dir(S) | cov(S*(S+1)/2)] is
+            # fully linear: raw is L1/MSE-regressed, dir / cov are
+            # signed regression targets, none of them want a sigmoid.
+            # Visualization clamps raw to [0, 1] for display; the
+            # loss penalises drift outside that range via the
+            # regression loss directly.
+            out["geometry"] = self.head_geometry(decoded)
         if "boundary" not in self._disabled_heads:
-            # Boundary head: every target lives in [0, 1] --
-            # ch 0 is the normalised raw image, ch 1-3 is the
-            # per-instance centroid xyz / (D, H, W), and ch 4-9 are
-            # binary face affinities.  A single sigmoid on all 10
-            # channels is therefore the correct activation; the BCE /
-            # Dice / IoU sub-losses on the affinity block expect
-            # pre-sigmoided probabilities.  The loss also derives a
-            # second 6-face affinity from the predicted ch 1-3 (see
-            # :func:`brainbow.losses.boundary.soft_aff_from_avg`); that
-            # derived signal lives entirely on the loss side -- the
-            # decoder still emits exactly 10 channels.
-            out["boundary"] = self.head_boundary(decoded).sigmoid()
+            # Boundary head [raw(1) | avg(3) | aff_pred(6)]: only the
+            # 6 affinity channels are classification-supervised
+            # (BCE + Dice + IoU), so only those get a sigmoid.  Raw
+            # and avg are regression-supervised (L1 / MSE), so we
+            # keep them linear -- a sigmoid there would saturate the
+            # gradient at boundary voxels (very dark / very bright
+            # pixels for raw, voxels near a patch corner for avg).
+            # The loss also derives a second 6-face affinity from
+            # the predicted ch 1-3 (see
+            # :func:`brainbow.losses.boundary.soft_aff_from_avg`);
+            # that kernel is ``exp(-tau * L1)`` and is therefore
+            # already in ``(0, 1]`` regardless of the avg activation.
+            # Concatenation (not in-place) keeps autograd happy and
+            # avoids a view that would break torch.compile.
+            bnd = self.head_boundary(decoded)
+            out["boundary"] = torch.cat(
+                [bnd[:, :4], bnd[:, 4:].sigmoid()], dim=1,
+            )
         return out
 
 

@@ -228,22 +228,15 @@ all leaves.
 
 ---
 
-## 11. `pmap` falls back to sequential on ANY exception
+## 11. (Removed in April-2026 cleanup -- ``pmap`` / ``utils.parallel``)
 
-**Symptom.** A bug inside the worker function (e.g. an `IndexError`)
-makes the loop run sequentially with no warning, ~10x slower.
-
-**Where.** `brainbow/utils/parallel.py:66-73`.  `except Exception` ->
-`logger.debug(...)` (which is hidden by default).
-
-**Why.** Multiprocessing setup can fail in container environments
-(no `/dev/shm`, broken `forkserver`).  The fall-back keeps training
-alive.
-
-**Remediation.** Phase 3f narrows the exception to the actual
-multiprocessing setup errors and re-raises everything else.  Until
-then, set `logging.getLogger("brainbow.utils.parallel").setLevel("DEBUG")`
-when investigating slow target construction.
+The forkserver-based parallel-map helper backed the boundary /
+skeleton-weight CPU paths in :class:`InstanceLoss`.  Both that helper
+(``brainbow.utils.parallel``) and those weight paths were dropped in
+the lean-up: the production config disabled them anyway
+(``weight_edge: 1.0`` / ``weight_bone: 1.0``), and removing the
+machinery cuts ~150 LOC plus the silent-fallback footgun this gotcha
+described.
 
 ---
 
@@ -299,21 +292,13 @@ Phase 4 reconciles the comment / default mismatch between
 
 ---
 
-## 15. `HoughVoting.forward` returns `(labels, None, None)`
+## 15. (Removed in April-2026 cleanup -- ``HoughVoting`` clusterer)
 
-**Symptom.** Reading the source, `HoughVoting` looks like it should be
-a drop-in for `SoftMeanShift` -- and it is, but only after Phase 3e:
-older revisions returned `labels` alone and crashed any caller that
-unpacked the documented 3-tuple.
-
-**Where.** `brainbow/inference/clusterer.py:HoughVoting.forward`.
-
-**Why.** `HoughVoting` is bin-coordinate based, so there are no
-embedding-space soft assignments / centers.  The contract is honoured
-by padding with `None`s rather than synthesising fake values.
-
-**Remediation.** Don't rely on the second / third tuple slots when the
-clusterer is `hough_voting`; treat them as optional everywhere.
+The Hough-voting clusterer (offset-head based) was dropped: no model
+in the repo emits an offset head, and no shipped config selected
+``name: hough_voting``.  The remaining clusterers are
+``soft_meanshift`` (training-time, differentiable), ``hdbscan``, and
+``spatial_cc`` -- see ``brainbow/inference/clusterer.py``.
 
 ---
 
@@ -734,38 +719,19 @@ top of every training log.
 
 ---
 
-## 32. Vista geometry head's `raw` channel is **not** sigmoided
+## 32. Vista geometry head's `raw` channel was **not** sigmoided (resolved by #39)
 
-**Symptom.** Training the **Vista3D** wrapper with
-``weight_geometry.weight_raw > 0`` produces a high
-``geometry/loss/raw`` that doesn't decay below ~0.5 even after many
-epochs, while the same loss config drops to ~0.07 on the Cosmos
+**Symptom (historical).** Training the **Vista3D** wrapper with
+``weight_geometry.weight_raw > 0`` produced a high
+``geometry/loss/raw`` that didn't decay below ~0.5 even after many
+epochs, while the same loss config dropped to ~0.07 on the Cosmos
 wrapper.
 
-**Where.**
-[`brainbow/models/vista/wrapper.py`](../brainbow/models/vista/wrapper.py)
-(``forward`` returns ``geometry`` linearly) vs
-[`brainbow/models/cosmos_transfer_2_5/decoder.py`](../brainbow/models/cosmos_transfer_2_5/decoder.py)
-(``head_geometry`` output is composed as
-``torch.cat([geom[:, :1].sigmoid(), geom[:, 1:]], dim=1)``).
-
-**Why.** ``GeometryLoss._compute_loss_raw`` clamps the **target**
-``raw_image`` to ``[0, 1]`` and then regresses ``pred_raw`` against
-it.  On the Cosmos path, ``pred_raw`` is already in ``[0, 1]`` thanks
-to the channel-0 sigmoid in the decoder; on the Vista path,
-``pred_raw`` is unbounded logits, so the target / pred ranges don't
-match and the L1 / MSE loss is artificially high.
-
-**Remediation.** **Open issue.**  Either:
-
-1. apply the same channel-0 sigmoid in the Vista wrapper's
-   ``forward`` (preferred -- centralise the activation contract);
-2. set ``weight_geometry.weight_raw: 0`` on Vista runs;
-3. drop the target clamp inside ``GeometryLoss._compute_loss_raw``
-   and rely on the wrapper to make the ranges match (less safe).
-
-The Cosmos path is the production training target, so this only
-bites Vista debug runs today.
+**Resolved by #39.**  The activation policy is now uniform across
+both wrappers: every regression channel (raw, avg, dir, cov) is
+linear; only classification channels (semantic, boundary aff) carry
+sigmoid.  The mismatch this gotcha described disappeared as soon as
+the Cosmos path stopped sigmoiding geometry ch 0.
 
 ---
 
@@ -887,24 +853,14 @@ LRU patch cache on top of ``LazyVolDataset`` if you really need it.
 
 ## 37. `include_clefts` / `include_mito` config keys are dropped
 
-**Symptom.** Multi-channel MICrONS supervision described in
-``configs/default.yaml`` (``include_clefts``, ``include_mito``)
-doesn't change the dataset's emitted batch keys; predictions still
-come out as the standard 4-head set.
-
-**Where.** ``scripts/train.py::_build_datamodule_kwargs`` populates
-the keys, but ``inspect.signature(cls).parameters`` filters them
-out at the call site (no datamodule constructor accepts them).
-
-**Why.** Implementation gap -- the keys were added to the config
-namespace ahead of the multi-channel datamodule that would consume
-them.
-
-**Remediation.** **Open issue.** Either implement a multi-channel
-MICrONS datamodule that accepts the keys or drop them from
-``configs/default.yaml`` and ``_build_datamodule_kwargs``.  Today
-they're load-bearing only in the configs themselves; nothing in
-``brainbow/datamodules/*.py`` references them.
+**Resolved by the April-2026 cleanup**: ``include_clefts`` /
+``include_mito`` were dropped from ``configs/default.yaml`` and from
+``scripts/train.py::_build_datamodule_kwargs``.  Multi-channel
+MICrONS supervision was never implemented in any datamodule; the
+config knobs were forward-looking placeholders and accumulated
+config noise, so they're now gone.  If you do need cleft / mito
+supervision later, add the channels to the relevant
+``MICRONSDataModule`` constructor and re-introduce the keys then.
 
 ---
 
@@ -931,3 +887,128 @@ flush twice.
 but candidates for cleanup: drop the module-level call when
 ``CudaEmptyCacheCallback`` is enabled in the callback set, or pick
 one canonical location.
+
+---
+
+## 39. Activation policy migration April 2026: regression heads are now linear
+
+**Symptom (historical).** ``geometry/loss/raw``,
+``boundary/loss/raw``, and ``boundary/loss/avg`` decayed slower than
+expected -- on `geometry/loss/raw` the curve flattened around 0.07
+on Cosmos and ~0.5 on Vista.  Loading any pre-April 2026 checkpoint
+under the new code produces nonsense on those channels.
+
+**Where.**
+[`brainbow/models/cosmos_transfer_2_5/decoder.py`](../brainbow/models/cosmos_transfer_2_5/decoder.py)
+(``_DecoderAdapter3D.forward`` -- the activation contract),
+[`brainbow/models/vista/wrapper.py`](../brainbow/models/vista/wrapper.py)
+(forward -- mirrors the contract),
+[`brainbow/losses/geometry.py::_compute_loss_raw`](../brainbow/losses/geometry.py)
+(target no longer clamped to ``[0, 1]``),
+[`brainbow/losses/boundary.py`](../brainbow/losses/boundary.py)
+(module docstring + sub-loss docstrings).
+
+**Why.** The previous policy was "sigmoid everywhere we could".  For
+the **classification-supervised** channels (semantic, the 6 boundary
+affinities) that's correct -- BCE and Dice / IoU consume
+probabilities by construction.  For the **regression-supervised**
+channels (geometry's raw / dir / cov, boundary's raw and avg(3))
+sigmoid + L1 has a saturation problem: the chain-rule factor
+through ``sigmoid'(x) = p(1-p)`` collapses to ~0 whenever the target
+is near ``0`` or ``1``, so very dark / very bright voxels get
+effectively zero gradient and the loss stalls.  Moving those heads
+to linear gives the regression loss a constant gradient magnitude
+(``±1`` for L1 everywhere except the kink) and lets the model
+actually reach the extremes.
+
+The new rule is **sigmoid only where the loss is BCE / Dice / IoU**:
+
+| Head      | Channel(s)              | Supervision     | Activation |
+| --------- | ----------------------- | --------------- | ---------- |
+| semantic  | all                     | BCE/Dice/IoU    | sigmoid    |
+| instance  | embedding               | discriminative  | linear     |
+| geometry  | raw, dir, cov           | L1 / MSE        | linear     |
+| boundary  | raw, avg(3)             | L1 / MSE        | linear     |
+| boundary  | aff(6)                  | BCE/Dice/IoU    | sigmoid    |
+
+**Remediation.** **Re-train from scratch** for any head whose
+activation just changed.  Concretely, ``head_geometry`` (channel 0
+permutes range pre-/post-fix) and ``head_boundary`` channels 0-3
+will produce wrong outputs if you load a pre-fix checkpoint without
+fixing up the corresponding rows of ``head.weight`` and
+``head.bias``.
+
+If you must resume an in-flight pre-fix run, three options:
+
+1. **Re-init only the changed rows**::
+
+       with torch.no_grad():
+           m.head_geometry.conv_out.weight[:1].normal_(0, 1e-2)
+           m.head_geometry.conv_out.bias[:1].zero_()
+           m.head_boundary.conv_out.weight[:4].normal_(0, 1e-2)
+           m.head_boundary.conv_out.bias[:4].zero_()
+
+   Other rows (``head_geometry[1:]``, ``head_boundary[4:]``,
+   semantic, instance) are unaffected because their activation
+   policy didn't change.  Expect ~few hundred steps to recover
+   ``raw`` / ``avg`` quality.
+2. **Inverse-sigmoid the existing weights.**  The pre-fix model
+   produced ``sigmoid(z)``; the post-fix model wants to produce ``z``
+   directly.  The bias shift to keep the output mean at the target
+   mean ``μ`` is ``b_new = logit(μ)``; the weight scale matters less
+   because the data overrides it within a few steps.  Faster to
+   converge than option 1 but only worth doing if the run is far
+   in.
+3. **Start a new run.**  Cleanest -- the val curves will be
+   comparable to literature numbers without the saturation
+   confound.
+
+The TensorBoard ``raw`` / ``avg`` panels already ``clamp(0, 1)``
+before display
+([`brainbow/callbacks/tensorboard/heads.py`](../brainbow/callbacks/tensorboard/heads.py)
+``_log_geometry`` line 284, ``_add_boundary_panels`` lines 444-446),
+so the visualizer is display-safe under the linear-prediction
+policy.  Sliding-window inference / downstream consumers should
+clamp at the boundary if they need a strict ``[0, 1]`` output for
+visualization or thresholding.
+
+**Replaces gotcha #32** (Vista geometry raw not sigmoided).  Under
+the new uniform policy, both wrappers emit linear geometry and the
+mismatch is gone.
+
+---
+
+## 40. April-2026 cleanup -- features removed for leanness
+
+A pass over the codebase dropped a handful of features that no
+shipped config exercised and that contributed cognitive overhead
+without paying their way in production.  If you're reading old
+notebooks or external code that imported any of these, here's the
+shortest path forward.
+
+| Removed                                                  | Replacement                                                            |
+| -------------------------------------------------------- | ---------------------------------------------------------------------- |
+| ``HoughVoting`` clusterer + ``cluster_offsets_hough``    | none -- no model emits offsets; use ``soft_meanshift`` / ``hdbscan`` / ``spatial_cc`` |
+| ``MeanShiftClusterer`` + ``cluster_embeddings_meanshift`` | ``HDBSCANClusterer`` (cuML / CPU; auto-K) or ``SpatialCCClusterer`` (anisotropy-aware) |
+| AXI metric (geometric mean of ARI and AMI)               | log ARI and AMI separately; plot the geometric mean offline if needed  |
+| ``InstanceLoss(weight_edge=..., weight_bone=...)``       | per-voxel boundary / skeleton weighting was disabled in the production config (=1.0) and the cpu/torch kernels were 4 paths (~150 LOC) keeping a feature nobody used |
+| ``InstanceLoss(anchor_to_centroid=..., centroid_scale=...)`` | sinusoidal-encoding centroid anchor; experimental, never enabled in any config |
+| ``InstanceLoss(... semantic_ids=...)`` multi-class branch | no datamodule populated ``semantic_ids``; the loss is single-class only |
+| ``CombinedLoss(... learned_task_weights=True)``          | Kendall-Gal uncertainty weighting; never enabled in any shipped config |
+| ``SemanticLoss(label_smoothing=...)``                    | sigmoid BCE has no native smoothing knob; the param was stored but never used |
+| Flat-form loss config schema (``weight_ce`` at top level, ``boundary_*`` prefix) | nested form (``weight_<head>: { weight: ..., ... }``) is now the only schema |
+| ``data.include_clefts`` / ``data.include_mito``          | placeholders for a multi-channel MICrONS pipeline that was never wired in |
+| Vista ``PointPromptEncoder`` + ``sample_point_prompts`` + ``forward(... point_prompts=...)`` | interactive proofreading was never wired into a training loop; the encoder was added then frozen on every step |
+| ``CosmosTransfer3DWrapper._try_load_raw_checkpoint``     | the dead third loader path that loaded HF safetensors into a ``_StandaloneDiT3D`` (different architecture) -- the `_try_load_diffusers` and `_try_load_cosmos_package` paths cover the production path; if both fail the wrapper now uses the random-init standalone DiT explicitly |
+| ``brainbow.utils.parallel`` (``pmap``)                   | only used by the boundary / skeleton-weight CPU path that's also gone |
+
+Total: ~1,300 LOC removed, 8 files / modules deleted, two tests
+classes (AXI, MeanShift) dropped.  185/185 remaining tests pass.
+
+If you discover something you actually need that was cut, the
+restoration recipe is one of:
+
+1. ``git revert`` the cleanup commit's removal of the specific file
+   / branch.
+2. Re-apply the patch from a previous commit (``git log --all -- <path>``
+   to find the last revision that had it).

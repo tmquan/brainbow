@@ -213,18 +213,22 @@ sequenceDiagram
 | `boundary`  | `head_boundary(decoder_features)` -> `[B, 10, ...]`   | **not present** (Vista is 3-head)   |
 
 Activation policy (applied **once**, in the wrapper, before any loss
-or metric or callback sees the prediction):
+or metric or callback sees the prediction).  The rule is **sigmoid
+where the loss is BCE / Dice / IoU (classification), linear where
+the loss is L1 / MSE / Smooth-L1 (regression)**:
 
-| Head        | Cosmos                                                 | Vista                            |
-| ----------- | ------------------------------------------------------ | -------------------------------- |
-| `semantic`  | `sigmoid` on every channel                             | `sigmoid` on every channel       |
-| `instance`  | linear (unbounded embedding)                           | linear                           |
-| `geometry`  | `sigmoid` on ch 0 (raw); linear on dir + cov           | linear (loss handles activation) |
-| `boundary`  | `sigmoid` on every channel (all 10 targets ∈ `[0, 1]`) | n/a                              |
+| Head        | Cosmos                                                                    | Vista                              |
+| ----------- | ------------------------------------------------------------------------- | ---------------------------------- |
+| `semantic`  | `sigmoid` on every channel                                                | `sigmoid` on every channel         |
+| `instance`  | linear (unbounded embedding)                                              | linear                             |
+| `geometry`  | linear on every channel (raw / dir / cov are all regression-supervised)   | linear                             |
+| `boundary`  | linear on ch 0-3 (raw + avg, regression); `sigmoid` on ch 4-9 (aff, BCE/Dice/IoU) | n/a                        |
 
 See `brainbow/models/cosmos_transfer_2_5/decoder.py` for the canonical
-docstring on the policy; the loss modules consume probabilities (or
-linear values) directly under that contract.
+docstring on the policy.  Earlier policy (sigmoid on geometry ch 0
+and on every boundary channel) is documented as "regression-on-
+sigmoid saturated boundary voxels" -- see [`GOTCHAS.md` #39](./GOTCHAS.md)
+for the migration entry.
 
 ### 5.2 What `CombinedLoss` returns
 

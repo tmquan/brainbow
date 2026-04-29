@@ -2,16 +2,21 @@
 Boundary loss: per-instance centroid colour + raw intensity + face-affinity,
 with two parallel affinity supervision paths.
 
-The boundary head emits **10** channels per voxel:
+The boundary head emits **10** channels per voxel.  Activation policy
+(applied by the model wrapper) is mixed: **linear** on ch 0-3 (the
+regression-supervised raw + avg block) and **sigmoid** on ch 4-9 (the
+binary face affinities, BCE / Dice / IoU)::
 
-  =====  ========================================================
-  ch     meaning                                                supervision
-  =====  ========================================================
-  0      *raw*    (raw, normalised image intensity)             regression vs raw
-  1-3    *avg*    (normalised z, y, x of instance centroid)     regression vs avg
-  4-9    *aff*    (direct face-affinity prediction;             BCE + Dice + IoU
-                   T, B, U, D, L, R; Z-Y-X order)                 vs binary aff target
-  =====  ========================================================
+  =====  ===========  ============  ============================
+  ch     meaning      activation    supervision
+  =====  ===========  ============  ============================
+  0      *raw*        linear        regression (L1 / MSE) vs raw
+  1-3    *avg*        linear        regression (L1 / MSE) vs avg
+                                    (normalised centroid xyz)
+  4-9    *aff*        sigmoid       BCE + Dice + IoU vs binary
+                                    aff target (T,B,U,D,L,R;
+                                    Z-Y-X order)
+  =====  ===========  ============  ============================
 
 In addition to the model's *direct* aff prediction (ch 4-9), the loss
 also derives a **soft 6-face affinity from the predicted avgloc** (ch 1-3)
@@ -450,15 +455,16 @@ class BoundaryLoss(nn.Module):
         weight_ce:    Weight of the BCE sub-loss on the 6 affinity
             channels.  Applied to **both** the direct and derived
             paths; the path weights above scale the per-path total.
-            The model wrapper applies ``sigmoid`` to all 10 boundary
-            channels before this loss sees them, so the direct aff is
-            already in ``[0, 1]``; the derived aff is in ``(0, 1]`` by
-            construction.  The BCE is computed on probabilities (not
-            logits) via :func:`F.binary_cross_entropy`, with
+            The model wrapper applies ``sigmoid`` to the 6 affinity
+            channels (ch 4-9) before this loss sees them, so the
+            direct aff arrives in ``[0, 1]``; the derived aff is in
+            ``(0, 1]`` by construction (kernel is ``exp(-tau * L1)``).
+            The BCE is computed on probabilities (not logits) via
+            :func:`F.binary_cross_entropy`, with
             ``pos_weight = class_weights`` when provided.
         weight_dice:  Weight of the soft-Dice sub-loss on the 6 affinity
             channels (MONAI :class:`DiceLoss` with ``sigmoid=False`` --
-            the wrapper has already applied sigmoid).
+            the wrapper has already applied sigmoid to ch 4-9).
         weight_iou:   Weight of the soft-Jaccard sub-loss on the 6
             affinity channels (MONAI :class:`DiceLoss` with
             ``sigmoid=False, jaccard=True``).
@@ -542,11 +548,13 @@ class BoundaryLoss(nn.Module):
         else:
             self._aff_pos_weight = None
 
-        # Sigmoid is applied externally (in the model wrapper) to every
-        # boundary channel: BCE consumes probabilities directly via
-        # F.binary_cross_entropy, and the Dice / IoU sub-losses are MONAI
-        # DiceLoss with sigmoid=False so they do not re-apply any
-        # activation.
+        # Sigmoid is applied externally (in the model wrapper) to the
+        # 6 affinity channels (ch 4-9) only -- raw and avg arrive
+        # linear so the regression sub-losses see unbounded
+        # predictions.  BCE on aff consumes probabilities directly via
+        # ``stable_bce_on_probs``, and the Dice / IoU sub-losses are
+        # MONAI DiceLoss with ``sigmoid=False`` so they do not
+        # re-apply any activation.
         _dice_kwargs = dict(
             sigmoid=False,
             include_background=True,
@@ -631,8 +639,9 @@ class BoundaryLoss(nn.Module):
 
         Used for **both** the direct prediction (ch 4-9) and the
         derived-from-avgloc soft affinity.  ``pred`` is **already** in
-        ``[0, 1]``: the model wrapper applies sigmoid to every boundary
-        channel and :func:`soft_aff_from_avg` returns probabilities by
+        ``[0, 1]``: the model wrapper applies sigmoid to the boundary
+        head's affinity channels (ch 4-9), and
+        :func:`soft_aff_from_avg` returns probabilities by
         construction (``exp(-tau * L1)``).  Returns a dict with keys
         ``ce``, ``dice``, ``iou``; each sub-term is only computed when
         its weight is non-zero, the rest are filled with a zero tensor
@@ -690,9 +699,13 @@ class BoundaryLoss(nn.Module):
         """Compute the boundary regression + dual-aff loss.
 
         Args:
-            prediction:     ``[B, 10, D, H, W]`` model output (post-sigmoid;
-                see :class:`brainbow.models.cosmos_transfer_2_5.decoder._DecoderAdapter3D`).
-                Channel layout: ``[raw(1) | avg(3) | aff_pred(6)]``.
+            prediction:     ``[B, 10, D, H, W]`` model output.  Channel
+                layout: ``[raw(1) | avg(3) | aff_pred(6)]``.  Activation
+                policy (applied by the wrapper, see
+                :class:`brainbow.models.cosmos_transfer_2_5.decoder._DecoderAdapter3D`):
+                **linear** on ch 0-3 (regression-supervised raw / avg)
+                and **sigmoid** on ch 4-9 (BCE / Dice / IoU on the
+                binary face affinities).
             labels:         ``[B, D, H, W]``    instance ids.
             image:          ``[B, D, H, W]``    normalised image.
             cached_target:  Optional precomputed ``[B, 10, D, H, W]`` target

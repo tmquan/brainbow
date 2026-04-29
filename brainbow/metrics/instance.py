@@ -4,7 +4,6 @@ Instance segmentation metrics for connectomics evaluation.
 Provides per-point and per-batch variants of:
 - ARI  (Adjusted Rand Index)
 - AMI  (Adjusted Mutual Information)
-- AXI  (geometric mean of ARI and AMI)
 - VOI  (Variation of Information, with split/merge decomposition)
 - TED  (Tolerant Edit Distance -- min split+merge corrections)
 """
@@ -140,34 +139,6 @@ def compute_per_batch_ami(
     total, count = 0.0, 0
     for b in range(pred_labels.shape[0]):
         total += compute_per_point_ami(pred_labels[b], true_labels[b], ignore_background)
-        count += 1
-    return total / count if count > 0 else 0.0
-
-
-# ======================================================================
-# AXI  (geometric mean of ARI and AMI)
-# ======================================================================
-
-def compute_per_point_axi(
-    pred_labels: torch.Tensor,
-    true_labels: torch.Tensor,
-    ignore_background: bool = True,
-) -> float:
-    """Geometric mean of ARI and AMI for a single sample."""
-    ari = compute_per_point_ari(pred_labels, true_labels, ignore_background)
-    ami = compute_per_point_ami(pred_labels, true_labels, ignore_background)
-    return float(np.sqrt(max(ari, 0.0) * max(ami, 0.0)))
-
-
-def compute_per_batch_axi(
-    pred_labels: torch.Tensor,
-    true_labels: torch.Tensor,
-    ignore_background: bool = True,
-) -> float:
-    """AXI averaged over a batch [B, ...]."""
-    total, count = 0.0, 0
-    for b in range(pred_labels.shape[0]):
-        total += compute_per_point_axi(pred_labels[b], true_labels[b], ignore_background)
         count += 1
     return total / count if count > 0 else 0.0
 

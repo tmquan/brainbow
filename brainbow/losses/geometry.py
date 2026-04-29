@@ -306,9 +306,13 @@ class GeometryLoss(nn.Module):
         """Dense raw-reconstruction loss over every voxel in the batch.
 
         Matches :class:`BoundaryLoss` -- the raw channel is supervised
-        on all voxels (no FG mask, no batch-filter).
+        on all voxels (no FG mask, no batch-filter).  Both pred and
+        target are linear (the wrapper emits raw as a linear regression
+        head; the data pipeline normalises images to roughly ``[0, 1]``
+        but doesn't clamp them, so any genuine out-of-range pixel
+        flows through the loss without truncation).
         """
-        img = raw_image.detach().clamp(0.0, 1.0).to(torch.float32)
+        img = raw_image.detach().to(torch.float32)
         if img.dim() == geometry_ndim - 1:
             img = img.unsqueeze(1)  # [B, *spatial] -> [B, 1, *spatial]
         target = rearrange(img[:, :1], "b c ... -> b c (...)")

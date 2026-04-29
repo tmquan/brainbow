@@ -188,8 +188,6 @@ def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
         "patch_size": tuple(patch_size) if patch_size else None,
         "num_samples": data_cfg.get("num_samples"),
         "slice_mode": data_cfg.get("slice_mode", True),
-        "include_clefts": data_cfg.get("include_clefts", True),
-        "include_mito": data_cfg.get("include_mito", False),
     }
 
 

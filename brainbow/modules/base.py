@@ -30,16 +30,20 @@ This matches the image tags emitted by
 scalars for a given head collapse into the same TensorBoard group.
 """
 
+import logging
 import warnings
 from collections import defaultdict
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 import pytorch_lightning as pl
 from einops import rearrange, reduce
 
 from brainbow.inference.clusterer import build_clusterer
+
+logger = logging.getLogger(__name__)
 from brainbow.metrics import (
     compute_per_batch_ari,
     compute_per_batch_ami,
@@ -172,11 +176,6 @@ class BaseCircuitModule(pl.LightningModule):
         )
         self.clusterer = build_clusterer(clusterer_name, **clusterer_config)
 
-        # Point-prompt training isn't wired up in any current recipe; keep
-        # the encoder frozen so DDP's ``find_unused_parameters`` is happy.
-        if hasattr(self.model, "point_encoder"):
-            self.model.point_encoder.requires_grad_(False)
-
         self._eval_accum: Dict[str, List[float]] = defaultdict(lambda: [0.0, 0.0])
 
     def _build_model(self, model_config: Dict[str, Any]) -> torch.nn.Module:
@@ -239,31 +238,27 @@ class BaseCircuitModule(pl.LightningModule):
         if labels.dim() == ndim_with_channel:
             labels = rearrange(labels, squeeze)
 
-        sem = batch.get("semantic_ids", (labels > 0).long())
-        if sem.dim() == ndim_with_channel:
-            sem = rearrange(sem, squeeze)
-
+        # Binary FG/BG semantic target: foreground is anything with a
+        # positive instance id.  No multi-class semantic supervision is
+        # populated by any current datamodule.
         targets: Dict[str, Any] = {
-            "semantic_labels": sem,
+            "semantic_labels": (labels > 0).long(),
             "labels": labels,
         }
-        if "semantic_ids" in batch:
-            sid = batch["semantic_ids"]
-            targets["semantic_ids"] = (
-                rearrange(sid, squeeze) if sid.dim() == ndim_with_channel else sid
-            )
         needs_raw = (
             self.criterion.weight_geometry > 0
-            or getattr(self.criterion, "weight_boundary", 0.0) > 0
+            or self.criterion.weight_boundary > 0
         )
         if "image" in batch and needs_raw:
             targets["raw_image"] = batch["image"]
         for key in ("label_direction", "label_covariance"):
             if key in batch:
                 targets[key] = batch[key]
-        # Hoisted from training_step: keep the cache build inside this
-        # @no_grad context to skip autograd-tape overhead on every op.
-        targets["_cached_weights"] = self.criterion._build_targets(
+        # Build the per-step shared targets (geometry per-batch dirs/covs,
+        # full 10-channel boundary target, 6-aff target shared with
+        # InstanceLoss) once here, inside the @no_grad context, so the
+        # ops don't pay autograd-tape overhead on every step.
+        targets["_cached_targets"] = self.criterion._build_targets(
             targets["labels"], targets,
         )
         return targets
@@ -355,7 +350,7 @@ class BaseCircuitModule(pl.LightningModule):
         images = self._expand_image_channel(batch["image"])
 
         targets = self._prepare_targets(batch)
-        predictions = self.model(images, semantic_ids=targets.get("semantic_ids"))
+        predictions = self.model(images)
         losses = self.criterion(predictions, targets)
 
         prefix = self._scalar_prefix(stage)

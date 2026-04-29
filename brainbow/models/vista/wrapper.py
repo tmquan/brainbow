@@ -28,7 +28,6 @@ from brainbow.models.vista.hf_loader import (
     DEFAULT_VISTA3D_REVISION,
     load_pretrained_vista3d_encoder,
 )
-from brainbow.models.vista.point_prompt_encoder import PointPromptEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -138,12 +137,6 @@ class Vista3DWrapper(nn.Module):
             dropout=dropout,
         )
 
-        self.point_encoder = PointPromptEncoder(
-            num_classes=num_classes,
-            feature_size=feature_size,
-            spatial_dims=_SPATIAL_DIMS,
-        )
-
     def _build_backbone(self, encoder_name: str, **kwargs: Any) -> None:
         """Build backbone encoder: SegResNetDS2 (VISTA3D encoder) or SegResNet fallback."""
         if encoder_name in ("vista3d", "segresnet_ds2"):
@@ -225,44 +218,22 @@ class Vista3DWrapper(nn.Module):
                 "back to random initialisation.", exc,
             )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        semantic_ids: Optional[torch.Tensor] = None,
-        point_prompts: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Forward pass through backbone + three parallel heads.
 
-        Args:
-            x: Input tensor [B, C, D, H, W].
-            semantic_ids: Optional per-voxel semantic class labels [B, D, H, W].
-                Passed through so the loss can compute per-class instance losses.
-            point_prompts: Optional dict with keys ``pos_points``,
-                ``neg_points``, ``target_semantic_ids``, ``target_instance_ids``
-                as produced by :func:`sample_point_prompts`.
+        Activation policy mirrors the Cosmos
+        :class:`brainbow.models.cosmos_transfer_2_5.decoder._DecoderAdapter3D`
+        contract: **sigmoid only where the loss is classification-supervised**
+        (BCE / Dice / IoU).  That's just the semantic head here -- instance
+        embeddings are linear (unbounded space) and the geometry head is
+        fully linear (raw / dir / cov are all regression-supervised).
+        Vista has no boundary head.
         """
         feat = self.backbone(x)
         if isinstance(feat, (tuple, list)):
             feat = feat[0]
-
-        if point_prompts is not None:
-            feat = feat + self.point_encoder(
-                pos_points=point_prompts["pos_points"],
-                neg_points=point_prompts["neg_points"],
-                target_semantic_ids=point_prompts["target_semantic_ids"],
-                target_instance_ids=point_prompts["target_instance_ids"],
-                spatial_shape=feat.shape[2:],
-            )
-
-        # Semantic head is sigmoid-only (multi-label per-channel binary);
-        # apply the activation here so loss / metrics / tensorboard all
-        # consume probabilities directly -- there is exactly one sigmoid
-        # in the pipeline, and it lives here.
-        out: Dict[str, torch.Tensor] = {
+        return {
             "semantic": self.head_semantic(feat).sigmoid(),
             "instance": self.head_instance(feat),
             "geometry": self.head_geometry(feat),
         }
-        if semantic_ids is not None:
-            out["semantic_ids"] = semantic_ids
-        return out

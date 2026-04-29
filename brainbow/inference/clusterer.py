@@ -1,12 +1,12 @@
 """
 Clustering modules for instance segmentation.
 
-All embedding clusterers share a common ``nn.Module`` interface::
+All clusterers share a common ``nn.Module`` interface::
 
     clusterer(embedding, foreground_mask) ->
-        labels:      [B, *spatial]        long   -- 0=background, 1..K=instances
+        labels:      [B, *spatial]        long   -- 0 = background, 1..K = instances
         soft_assign: [B, K, *spatial]     float  -- soft probabilities (may be empty)
-        centers:     [B, K, E]            float  -- cluster centers      (may be empty)
+        centers:     [B, K, E]            float  -- cluster centres    (may be empty)
 
 so they are drop-in swappable at validation / inference time.
 
@@ -14,36 +14,23 @@ Implementations
 ---------------
 
 ``SoftMeanShift``
-    Differentiable temperature-scaled Gaussian mean-shift.  The only
-    clusterer usable during training (preserves gradients) and the
-    historical default.
-
-``MeanShiftClusterer``
-    Non-differentiable MeanShift wrapper around
-    :func:`brainbow.utils.clustering.cluster_embeddings`.  Uses cuML when
-    available (note: RAPIDS dropped ``MeanShift`` in cuML 23.x, so this
-    currently falls back to scikit-learn on recent cuML installs).
+    Differentiable temperature-scaled Gaussian mean-shift.  Preserves
+    gradients, so it's the only option usable during training.  Default
+    in the shipped configs.
 
 ``HDBSCANClusterer``
-    Non-differentiable HDBSCAN wrapper around
-    :func:`brainbow.utils.clustering.cluster_embeddings`.  Uses cuML GPU
-    HDBSCAN when available (≈4× faster than SoftMeanShift on real
-    validation patches), else the ``hdbscan`` package, else
-    ``sklearn.cluster.HDBSCAN``.  Auto-determines ``K``.
+    Non-differentiable HDBSCAN.  Uses cuML on CUDA, the ``hdbscan``
+    package, or ``sklearn.cluster.HDBSCAN`` -- whichever is installed.
+    Auto-determines ``K``; honest but silent until the embedding
+    actually separates.
 
 ``SpatialCCClusterer``
-    Non-differentiable connected-components clusterer over the
-    spatial-neighbour embedding-affinity graph (two neighbouring
-    voxels are linked iff their embedding distance is below
-    ``delta_v``).  Respects spatial connectivity — unrelated cells
-    with similar mean embeddings cannot merge.  Uses
-    ``cupyx.scipy.sparse.csgraph.connected_components`` on CUDA
-    (zero-copy via DLPack), else :mod:`scipy.sparse.csgraph`.
-
-``HoughVoting``
-    Offset-based instance segmentation (not embedding based).  Kept here
-    because it shares the "turn dense predictions into instance labels"
-    role of the embedding clusterers, not because it shares their API.
+    Non-differentiable connected components on the spatial-neighbour
+    embedding-affinity graph (two neighbouring voxels are linked iff
+    their embedding distance is below ``delta_v``).  Respects spatial
+    connectivity -- unrelated cells with similar mean embeddings
+    cannot merge.  GPU path: ``cupyx.scipy.sparse.csgraph`` or our own
+    self-contained CuPy union-find kernel; CPU path: scipy.
 
 ``build_clusterer(name, **kw)``
     Factory that returns the appropriate clusterer from a config string.
@@ -520,198 +507,6 @@ class SpatialCCClusterer(_BaseUnsupervisedClusterer):
         )
 
 
-class MeanShiftClusterer(_BaseUnsupervisedClusterer):
-    """Non-differentiable MeanShift clusterer (cuML → sklearn).
-
-    Note:
-        RAPIDS dropped :class:`cuml.cluster.MeanShift` in cuML 23.x.  On
-        modern cuML builds this clusterer transparently falls back to
-        :class:`sklearn.cluster.MeanShift` (CPU).  For a GPU-accelerated
-        alternative prefer :class:`HDBSCANClusterer`.
-
-    Args:
-        bandwidth: MeanShift bandwidth (typically equal to
-            discriminative-loss ``delta_v``).
-        bin_seeding: Discretize initial seeds onto a grid for speed.
-        min_cluster_size: Clusters smaller than this are discarded.
-        normalize_embeddings: L2-normalise embeddings before clustering.
-        max_points: Foreground sets larger than this are uniformly
-            subsampled (MeanShift scales ~O(N²)).
-        backend: ``"auto"`` | ``"cuml"`` | ``"sklearn"``.
-        seed: RNG seed for subsampling reproducibility.
-    """
-
-    algorithm = "meanshift"
-
-    def __init__(
-        self,
-        bandwidth: float = 0.5,
-        bin_seeding: bool = True,
-        min_cluster_size: int = 50,
-        normalize_embeddings: bool = False,
-        max_points: int = 50_000,
-        backend: str = "auto",
-        seed: Optional[int] = 0,
-    ) -> None:
-        super().__init__()
-        self.bandwidth = bandwidth
-        self.bin_seeding = bin_seeding
-        self.min_cluster_size = min_cluster_size
-        self.normalize_embeddings = normalize_embeddings
-        self.max_points = max_points
-        self.backend = backend
-        self.seed = seed
-
-    def _cluster_single(
-        self, embedding: torch.Tensor, foreground_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        from brainbow.utils.clustering import cluster_embeddings
-
-        return cluster_embeddings(
-            embedding,
-            foreground_mask=foreground_mask,
-            algorithm="meanshift",
-            bandwidth=self.bandwidth,
-            min_cluster_size=self.min_cluster_size,
-            normalize_embeddings=self.normalize_embeddings,
-            backend=self.backend,
-            max_points=self.max_points,
-            bin_seeding=self.bin_seeding,
-            seed=self.seed,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Offset-based Hough voting (unchanged, kept here for API symmetry)
-# ---------------------------------------------------------------------------
-
-
-class HoughVoting(nn.Module):
-    """Differentiable Hough voting for offset-based instance segmentation.
-
-    Each foreground pixel votes for a spatial location by adding its
-    predicted offset to its coordinate.  Votes are accumulated into a
-    smooth vote map via Gaussian splatting, then peaks are detected as
-    instance centres.
-
-    Args:
-        bin_size: Spatial bin size for the vote accumulator.
-        sigma: Gaussian sigma for vote splatting (in voxels).
-        threshold: Relative peak threshold (fraction of max vote).
-        min_votes: Minimum votes for a valid peak.
-    """
-
-    def __init__(
-        self,
-        bin_size: float = 2.0,
-        sigma: float = 2.0,
-        threshold: float = 0.3,
-        min_votes: int = 50,
-    ) -> None:
-        super().__init__()
-        self.bin_size = bin_size
-        self.sigma = sigma
-        self.threshold = threshold
-        self.min_votes = min_votes
-
-    @staticmethod
-    def _make_coords(spatial_shape, device):
-        """Build [S, *spatial] coordinate grid."""
-        ranges = [torch.arange(s, device=device, dtype=torch.float32)
-                  for s in spatial_shape]
-        grids = torch.meshgrid(*ranges, indexing="ij")
-        return torch.stack(list(reversed(grids)), dim=0)
-
-    def forward(
-        self,
-        offsets: torch.Tensor,
-        foreground_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """Cluster via Hough voting on predicted offsets.
-
-        Args:
-            offsets: [B, S, *spatial] predicted spatial offsets.
-            foreground_mask: [B, *spatial] boolean mask (optional).
-
-        Returns:
-            ``(labels, soft_assign, centers)`` to honour the shared
-            :class:`_BaseUnsupervisedClusterer` contract.  Hough voting
-            is hard (no soft assignment) and bin-coordinate based (no
-            embedding-space centers), so the latter two are always
-            ``None``.
-
-            * ``labels``: ``[B, *spatial]`` long tensor (``0`` = bg).
-            * ``soft_assign``: ``None``.
-            * ``centers``: ``None``.
-        """
-        B, S = offsets.shape[:2]
-        spatial_shape = offsets.shape[2:]
-        device = offsets.device
-
-        coords = self._make_coords(spatial_shape, device)
-        votes = repeat(coords, "s ... -> b s ...", b=B) + offsets
-
-        if foreground_mask is None:
-            foreground_mask = torch.ones(B, *spatial_shape, device=device, dtype=torch.bool)
-
-        all_labels = []
-        for b in range(B):
-            fg = foreground_mask[b]
-            vote_flat = rearrange(votes[b], "s ... -> s (...)")[
-                :, rearrange(fg, "... -> (...)")]
-
-            if vote_flat.shape[1] == 0:
-                all_labels.append(torch.zeros(spatial_shape, device=device, dtype=torch.long))
-                continue
-
-            bins = (vote_flat / self.bin_size).round().long()
-
-            bin_min = reduce(bins, "s m -> s", "min")
-            bins_shifted = bins - rearrange(bin_min, "s -> s 1")
-            bin_max = reduce(bins_shifted, "s m -> s", "max") + 1
-
-            acc_shape = tuple(bin_max.tolist())
-            accumulator = torch.zeros(acc_shape, device=device, dtype=torch.float32)
-
-            flat_idx = torch.zeros(bins_shifted.shape[1], device=device, dtype=torch.long)
-            stride = 1
-            for dim_i in range(S - 1, -1, -1):
-                flat_idx = flat_idx + bins_shifted[dim_i] * stride
-                stride *= acc_shape[dim_i]
-            ones = torch.ones(flat_idx.shape[0], device=device, dtype=torch.float32)
-            rearrange(accumulator, "... -> (...)").scatter_add_(0, flat_idx, ones)
-
-            # Optional box-filter smoothing (unified 2D / 3D)
-            if self.sigma > 0:
-                k = int(3 * self.sigma) * 2 + 1
-                conv_fn = F.conv3d if S == 3 else F.conv2d
-                kernel = torch.ones((1, 1) + (k,) * S, device=device) / (k ** S)
-                acc_nd = rearrange(accumulator, "... -> 1 1 ...")
-                smoothed = conv_fn(acc_nd, kernel, padding=k // 2)
-                accumulator = rearrange(smoothed, "1 1 ... -> ...")
-
-            peak_threshold = accumulator.max() * self.threshold
-            peaks_mask = accumulator >= max(peak_threshold, self.min_votes)
-
-            if peaks_mask.sum() == 0:
-                all_labels.append(torch.zeros(spatial_shape, device=device, dtype=torch.long))
-                continue
-
-            peak_coords = torch.nonzero(peaks_mask, as_tuple=False).float()
-
-            fg_indices = torch.where(rearrange(fg, "... -> (...)"))[0]
-            fg_bins = bins_shifted.float().T
-
-            dists = torch.cdist(fg_bins, peak_coords)
-            nearest = dists.argmin(dim=1) + 1
-
-            label_flat = torch.zeros(fg.numel(), device=device, dtype=torch.long)
-            label_flat[fg_indices] = nearest
-            all_labels.append(_reshape_to_spatial(label_flat, spatial_shape))
-
-        return torch.stack(all_labels), None, None
-
-
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
@@ -720,7 +515,6 @@ class HoughVoting(nn.Module):
 _CLUSTERER_REGISTRY: Dict[str, type] = {
     "soft_meanshift": SoftMeanShift,
     "softmeanshift": SoftMeanShift,   # convenience alias
-    "meanshift": MeanShiftClusterer,
     "hdbscan": HDBSCANClusterer,
     "spatial_cc": SpatialCCClusterer,
     "spatialcc": SpatialCCClusterer,   # convenience alias
@@ -732,13 +526,19 @@ def build_clusterer(name: str, **kwargs: Any) -> nn.Module:
     """Instantiate a clusterer from its short name.
 
     Args:
-        name: One of ``"soft_meanshift"`` (default, differentiable),
-            ``"meanshift"``, ``"hdbscan"``, or ``"spatial_cc"``.
+        name: One of ``"soft_meanshift"`` (default, differentiable;
+            usable during training), ``"hdbscan"`` (auto-K density
+            clusterer; cuML or CPU), or ``"spatial_cc"`` (connected
+            components on the spatial-neighbour embedding-affinity
+            graph; CuPy or scipy).
         **kwargs: Forwarded to the selected class's constructor.
+            Knobs the chosen class doesn't accept are dropped silently
+            so a user can switch ``name:`` without pruning every
+            adjacent option (e.g. ``backend`` / ``connectivity`` are
+            irrelevant to :class:`SoftMeanShift`).
 
     Returns:
-        An ``nn.Module`` whose ``forward`` signature matches
-        :class:`SoftMeanShift` — i.e. returns
+        An ``nn.Module`` whose ``forward`` returns the standard tuple
         ``(labels, soft_assign, centers)``.
 
     Raises:
@@ -752,10 +552,6 @@ def build_clusterer(name: str, **kwargs: Any) -> nn.Module:
         )
     cls = _CLUSTERER_REGISTRY[key]
 
-    # Drop kwargs that the selected class does not accept so that users
-    # can switch `name:` between clusterers without pruning every
-    # adjacent option from their config (e.g. `backend`, `connectivity`
-    # are irrelevant to `SoftMeanShift`).
     sig = inspect.signature(cls.__init__)
     accepts_var_kw = any(
         p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
@@ -780,9 +576,7 @@ def build_clusterer(name: str, **kwargs: Any) -> nn.Module:
 
 __all__ = [
     "SoftMeanShift",
-    "MeanShiftClusterer",
     "HDBSCANClusterer",
     "SpatialCCClusterer",
-    "HoughVoting",
     "build_clusterer",
 ]

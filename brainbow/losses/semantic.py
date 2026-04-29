@@ -4,25 +4,26 @@ Semantic segmentation loss: CE + IoU + Dice.
 Dimension-agnostic -- works for both 2-D and 3-D inputs.
 
 This loss is **sigmoid-only**: every channel is treated as an independent
-binary indicator (multi-label).  The softmax / mutually-exclusive variant
-that used to live behind a ``mode`` switch has been removed; if you need
-softmax CE for a future multi-class head, fork :class:`SemanticLoss`
-rather than reviving the dead branch.
+binary indicator (multi-label).  If you need softmax CE for a future
+multi-class head, fork :class:`SemanticLoss` rather than reviving the
+dead branch.
 
 Activation contract
 -------------------
 
 The model wrapper applies ``torch.sigmoid`` to the semantic head **before**
 this loss (and the TensorBoard callbacks) see it -- so ``prediction``
-arriving at :meth:`forward` is already in ``[0, 1]``.  CE uses
-:class:`torch.nn.BCELoss` (probability inputs, not logits) and the Dice /
-IoU sub-losses are :class:`monai.losses.DiceLoss` instances configured
-with ``sigmoid=False`` so they do **not** re-apply any activation.
+arriving at :meth:`forward` is already in ``[0, 1]``.  BCE uses
+:func:`stable_bce_on_probs` (probability inputs, not logits, with
+fp32 log math under bf16 autocast) and the Dice / IoU sub-losses are
+:class:`monai.losses.DiceLoss` instances configured with
+``sigmoid=False`` so they do **not** re-apply any activation.
 
 Channel layout (what ``prediction`` looks like)::
 
-    prediction: [B, num_classes, *spatial]       per-channel sigmoid probabilities
-    labels:     [B, *spatial]  (int ids)  OR     [B, num_classes, *spatial]  (float target)
+    prediction: [B, num_classes, *spatial]   per-channel sigmoid probabilities
+    labels:     [B, *spatial]  (int ids)
+                or [B, num_classes, *spatial]  (dense float target)
 """
 
 from __future__ import annotations
@@ -60,9 +61,6 @@ class SemanticLoss(nn.Module):
             ``None`` means use all channels.  Set to e.g. 2 when the model
             outputs 16 channels but only classes 0-1 have labels today;
             channels beyond ``active_classes`` receive zero gradient.
-        label_smoothing: Kept for parity with the previous softmax-mode
-            signature; sigmoid BCE has no native label-smoothing knob, so
-            this value is stored but **unused**.
     """
 
     def __init__(
@@ -73,7 +71,6 @@ class SemanticLoss(nn.Module):
         class_weights: Optional[List[float]] = None,
         ignore_index: int = -100,
         active_classes: Optional[int] = None,
-        label_smoothing: float = 0.0,
     ) -> None:
         super().__init__()
 
@@ -82,7 +79,6 @@ class SemanticLoss(nn.Module):
         self.weight_dice = float(weight_dice)
         self.ignore_index = ignore_index
         self.active_classes = active_classes
-        self.label_smoothing = float(label_smoothing)
         self.class_weights = (
             list(map(float, class_weights)) if class_weights is not None else None
         )
@@ -312,6 +308,5 @@ class SemanticLoss(nn.Module):
             f"weight_iou={self.weight_iou}, "
             f"weight_dice={self.weight_dice}, "
             f"class_weights={self.class_weights}, "
-            f"ignore_index={self.ignore_index}, "
-            f"label_smoothing={self.label_smoothing})"
+            f"ignore_index={self.ignore_index})"
         )

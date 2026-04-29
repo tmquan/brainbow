@@ -154,16 +154,14 @@ standalone-DiT fallback, and a variant registry.
 | `standalone_dit.py`   | Random-init DiT fallback for `pretrained=False`.                      |
 | `hf_loader.py`        | Rank-aware HF snapshot download (ignores `text_encoder/*`).           |
 
-#### `models/vista/` — Vista3D wrapper + head + prompt I/O
+#### `models/vista/` — Vista3D wrapper + head
 
 | File                       | Purpose                                                             |
 | -------------------------- | ------------------------------------------------------------------- |
-| `__init__.py`              | Re-exports `Vista3DWrapper`, `VistaTaskHead3D`, prompt utils.       |
-| `wrapper.py`               | `Vista3DWrapper` — the public class.                                |
+| `__init__.py`              | Re-exports `Vista3DWrapper`, `VistaTaskHead3D`.                     |
+| `wrapper.py`               | `Vista3DWrapper` — the public class (3 heads: semantic/instance/geometry). |
 | `heads.py`                 | `VistaTaskHead3D` (MONAI `UnetrBasicBlock`).                        |
 | `hf_loader.py`             | MONAI `VISTA3D-HF` encoder download + partial-load.                 |
-| `point_prompt_encoder.py`  | `PointPromptEncoder` (proofread / interactive conditioning).        |
-| `point_sampling.py`        | `sample_point_prompts` — GT mask → click-point dict.                |
 
 ### `brainbow/modules/` — Lightning modules
 
@@ -197,7 +195,7 @@ concrete `module.py`.
 | File                    | Purpose                                                             |
 | ----------------------- | ------------------------------------------------------------------- |
 | `sliding_window.py`     | Blended sliding-window inference over arbitrarily large volumes.    |
-| `clusterer.py`          | Discriminative-embedding → instance-id clustering. Five strategies via `build_clusterer(name=...)`: `soft_meanshift` (differentiable, training-time default), `meanshift` (cuML/sklearn), `hdbscan` (cuML/CPU fallback), `spatial_cc` (connected-components on per-voxel embedding-affinity graph; CuPy/scipy backends), and `hough` (offset-based; for non-embedding heads). |
+| `clusterer.py`          | Discriminative-embedding → instance-id clustering. Three strategies via `build_clusterer(name=...)`: `soft_meanshift` (differentiable, training-time default), `hdbscan` (auto-K density clustering; cuML or CPU), and `spatial_cc` (connected components on the spatial-neighbour embedding-affinity graph; CuPy or scipy). |
 
 ### `brainbow/preprocessors/` — format converters
 
@@ -215,10 +213,9 @@ concrete `module.py`.
 
 | File            | Purpose                                                 |
 | --------------- | ------------------------------------------------------- |
-| `io.py`         | Volume read/write + norm-stat caching.                  |
-| `parallel.py`   | `pmap` — forkserver-based parallel map for CPU work.    |
-| `clustering.py` | Scalar post-processing for inference (CC, watershed).   |
-| `manifold.py`   | UMAP / t-SNE helpers for embedding-space diagnostics.   |
+| `io.py`         | Volume read / write façade over `preprocessors/*`.      |
+| `clustering.py` | Embedding-clustering primitives (`cluster_embeddings`, `cluster_spatial_cc`) shared by the inference clusterers and notebooks. |
+| `manifold.py`   | PCA / UMAP / t-SNE helpers for embedding-space diagnostics. |
 
 ### `brainbow/visualizer/` — interactive web volume renderer
 
@@ -240,7 +237,7 @@ concrete `module.py`.
 | --------------------------------------- | ---------- |
 | `brainbow/transforms/`                  | 10 (incl. `__init__`, `_region_field`)               |
 | `brainbow/models/cosmos_transfer_2_5/`  |  7 (incl. `__init__`)                                |
-| `brainbow/models/vista/`                |  6 (incl. `__init__`)                                |
+| `brainbow/models/vista/`                |  4 (incl. `__init__`)                                |
 | `brainbow/callbacks/tensorboard/`       |  6 (incl. `__init__`)                                |
 | `brainbow/losses/`                      |  7 (incl. `__init__`, `_common`)                     |
 | `brainbow/datamodules/` + `datasets/`   |  5 + 7 (datasets incl. `lazy.py`, `_patches.py`)     |
@@ -248,7 +245,7 @@ concrete `module.py`.
 | `brainbow/modules/`                     |  2 (top-level) + 3 + 3 (per arch package)            |
 | `brainbow/metrics/`                     |  3                                                   |
 | `brainbow/inference/`                   |  3                                                   |
-| `brainbow/utils/`                       |  5 (incl. `__init__`)                                |
+| `brainbow/utils/`                       |  4 (incl. `__init__`)                                |
 | `brainbow/callbacks/`                   |  3 (top-level: `__init__`, `memory.py`, plus `tensorboard/` package above) |
 | `brainbow/visualizer/`                  |  4 py + 4 static                                     |
 

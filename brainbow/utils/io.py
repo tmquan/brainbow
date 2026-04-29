@@ -1,26 +1,24 @@
 """
 Volume I/O utilities.
 
-Why this file exists
---------------------
 A thin façade over :mod:`brainbow.preprocessors` that picks the right
 preprocessor by file suffix so callers don't have to.
 
 Public surface
 --------------
-* :func:`find_folder` -- recursively locate a file by basename or
-  extension under a search root.  Used by every dataset to resolve
-  ``vol`` / ``seg`` keys against ``data_root``.
+* :func:`find_folder` -- locate a volume file in a directory by base
+  name (any of the :data:`SUPPORTED_EXTENSIONS`).  **Non-recursive** by
+  design: every dataset resolves ``vol`` / ``seg`` keys against the
+  flat ``data_root`` directory, so the lookup is just
+  ``root / f"{base}{ext}"``.
 * :func:`load_volume` / :func:`save_volume` -- format-agnostic reader
   / writer; suffix dispatches to a :class:`BasePreprocessor` subclass.
-* :func:`ensure_data` -- "make sure this is a numpy array" coerce with
-  a common error path.
+* :func:`ensure_data` -- ``mkdir(parents=True, exist_ok=True)`` helper.
 
-Extending this module
----------------------
-A new format only needs a new :class:`BasePreprocessor` subclass; the
-suffix dispatch here will pick it up automatically once the class is
-registered in ``preprocessors/__init__.py``.
+Extending this module: a new format only needs a new
+:class:`BasePreprocessor` subclass; the suffix dispatch here will pick
+it up automatically once the class is registered in
+``preprocessors/__init__.py``.
 """
 
 from pathlib import Path
@@ -39,15 +37,7 @@ SUPPORTED_EXTENSIONS: List[str] = [
 
 
 def ensure_data(path: Union[str, Path]) -> Path:
-    """
-    Ensure path exists, creating it if necessary.
-
-    Args:
-        path: Directory path.
-
-    Returns:
-        Path object for the directory.
-    """
+    """``mkdir(parents=True, exist_ok=True)`` helper that returns ``Path``."""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -58,24 +48,21 @@ def find_folder(
     base_name: str,
     extensions: Optional[List[str]] = None,
 ) -> Optional[Path]:
-    """
-    Search for a file by base name across multiple supported extensions.
+    """Resolve ``root / f"{base_name}{ext}"`` for the first matching ``ext``.
 
-    Scans the given root directory for ``base_name`` combined with each
-    extension in priority order and returns the first match.
+    The function is **not recursive**: it tests one path per extension
+    and returns the first that exists.  Sufficient for our ``data_root``
+    layout (one flat directory per dataset).
 
     Args:
-        root: Directory to search in.
-        base_name: Base filename without extension (e.g., 'AC4_inputs').
-        extensions: List of extensions to try, in priority order.
-            Defaults to all supported connectomics extensions.
+        root: Directory containing the volume files.
+        base_name: Filename stem without extension (e.g. ``"AC4_inputs"``).
+        extensions: Extensions to try, in priority order.  Defaults to
+            :data:`SUPPORTED_EXTENSIONS`.
 
     Returns:
-        Path to the first matching file, or None if not found.
-
-    Example:
-        >>> path = find_folder("/data/snemi3d", "AC4_inputs")
-        >>> # Returns e.g. Path("/data/snemi3d/AC4_inputs.h5")
+        ``Path`` of the first match, or ``None`` if none of the
+        candidates exists.
     """
     root = Path(root)
     if extensions is None:

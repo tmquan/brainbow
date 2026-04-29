@@ -67,10 +67,10 @@ instance for exact numbers.
 | `feature_projector` output   | **64**   | 1 / (4, 8, 8)           |
 | `to_latent` back to VAE      | **16**   | 1 / (4, 8, 8)           |
 | Decoder output (trilinear up)| **64**   | 1                       |
-| `head_semantic`              | `semantic_channels = 1`   |
-| `head_instance`              | `instance_channels = 10`  |
-| `head_geometry`              | `geometry_channels = 1 + 3 + 6 = 10`  (raw / dir / cov-upper-triangle) |
-| `head_boundary`              | `boundary_channels = 1 + 3 + 6 = 10`  (raw / avg RGB / direct aff). The loss adds a 6-channel aff derived from the predicted avgloc on top of these 10 outputs — it doesn't change the head width. |
+| `head_semantic`              | `semantic_channels = 1` (sigmoid)   |
+| `head_instance`              | `instance_channels = 10` (linear)  |
+| `head_geometry`              | `geometry_channels = 1 + 3 + 6 = 10` (raw / dir / cov-upper-triangle, all linear) |
+| `head_boundary`              | `boundary_channels = 1 + 3 + 6 = 10` (raw / avg RGB / direct aff). Activation is mixed: **linear on ch 0-3** (regression), **sigmoid on ch 4-9** (BCE/Dice/IoU). The loss adds a 6-channel aff derived from the predicted avgloc on top of these 10 outputs — it doesn't change the head width. |
 
 ### 1.3 The DiT variant (2B)
 
@@ -199,9 +199,7 @@ frozen and contributes zero trainable params.
    ▼
 [B, 64, D, H, W]  full-resolution feature map
    │
-   │ (optional) point_encoder residual add                  ~0.1 M params
-   ▼
-   ├─ head_semantic  (VistaTaskHead3D, 64 → 16)             ≈ 0.7 M params
+   ├─ head_semantic  (VistaTaskHead3D, 64 → 1)              ≈ 0.7 M params
    ├─ head_instance  (VistaTaskHead3D, 64 → 10)             ≈ 0.7 M params
    └─ head_geometry  (VistaTaskHead3D, 64 → 10)             ≈ 0.7 M params
 ```
@@ -216,9 +214,9 @@ upsampling internally.
 | Input (EM)                   | **1**    |
 | `init_filters`               | **64** (default; MONAI pretrained weights require **48**) |
 | Backbone output / head input | **`feature_size` = 64** |
-| `head_semantic`              | `semantic_channels = 1` |
-| `head_instance`              | `instance_channels = 10` |
-| `head_geometry`              | `geometry_channels = 1 + 3 + 6 = 10` (raw / dir / cov-upper-triangle) |
+| `head_semantic`              | `semantic_channels = 1` (sigmoid) |
+| `head_instance`              | `instance_channels = 10` (linear) |
+| `head_geometry`              | `geometry_channels = 1 + 3 + 6 = 10` (raw / dir / cov-upper-triangle, all linear) |
 
 ### 2.3 Pretraining
 
@@ -247,7 +245,6 @@ only ships with the Cosmos wrapper.  `Vista3DWrapper` exposes
 |-------------------|----------:|
 | SegResNetDS2 (64) | ~30-45 M  |
 | 3 × task heads    | ~2 M      |
-| Point encoder     | ~0.1 M    |
 | **Total**         | **~35 M** |
 
 Running Vista is roughly **70× cheaper per step** than full-unfrozen
