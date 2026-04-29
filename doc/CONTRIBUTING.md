@@ -151,102 +151,35 @@ in <1 s.
 
 ---
 
-## 2. Add a new loss head
+## 2. Add a new unified-head field / loss term
 
-Three places to touch:
+Most changes now happen in two places:
 
 ```
-brainbow/losses/<name>.py             # the loss itself
-brainbow/losses/__init__.py           # re-export
-brainbow/losses/combined.py           # add a weight + result-dict section
+brainbow/losses/_common.py            # channel slice / constants if the head layout changes
+brainbow/losses/combined.py           # loss weights, target build, scalar keys
 ```
 
-### 2.1 Loss skeleton
+### 2.1 Add a new field
 
-Every loss in `brainbow/losses/` follows the same template -- see
-`brainbow/losses/_common.py` for the contract.  Copy
-`brainbow/losses/semantic.py` if your loss is per-voxel categorical or
-`brainbow/losses/geometry.py` if it's per-voxel regression.
+1. Add `CH_<FIELD>` and `<FIELD>_SLICE` to `losses/_common.py`.
+2. Bump `HEAD_CHANNELS` and `model.head_channels` in the configs.
+3. Update `slice_head()` tests in `tests/test_losses.py`.
+4. In `CombinedLoss.__init__`, add `weight_<field>` config parsing.
+5. In `CombinedLoss.forward`, slice the field and add scalar keys under
+   `loss/<field>`.
 
-```python
-# brainbow/losses/myhead.py
-import torch
-import torch.nn as nn
+### 2.2 TensorBoard
 
-class MyHeadLoss(nn.Module):
-    def __init__(self, *, weight_a: float = 1.0, weight_b: float = 1.0):
-        super().__init__()
-        self.weight_a = weight_a
-        self.weight_b = weight_b
+If the field has a useful visualisation, add it in
+`brainbow/callbacks/tensorboard/heads.py::_log_predictions` under
+`pred/<field>...`, and keep scalar tags parallel under
+`loss/<field>...`.
 
-    @property
-    def task_channels(self) -> int:
-        return 4   # whatever your head emits
+### 2.3 Test
 
-    @torch.no_grad()
-    def build_target(self, labels, image=None, cached_target=None):
-        # Build the deterministic supervision target.
-        ...
-
-    def forward(self, prediction, labels, image=None, *, cached_target=None):
-        target = cached_target if cached_target is not None else self.build_target(...)
-        a = self._compute_a(prediction, target)
-        b = self._compute_b(prediction, target)
-        loss = self.weight_a * a + self.weight_b * b
-        return {"loss": loss, "a": a, "b": b}
-
-    def __repr__(self):
-        return f"MyHeadLoss(weight_a={self.weight_a}, weight_b={self.weight_b})"
-```
-
-### 2.2 Re-export and combine
-
-```python
-# brainbow/losses/__init__.py
-from brainbow.losses.myhead import MyHeadLoss
-__all__ += ["MyHeadLoss"]
-```
-
-In `brainbow/losses/combined.py::CombinedLoss.__init__`:
-
-```python
-weight_myhead = loss_kwargs.pop("weight_myhead", 0.0)
-if isinstance(weight_myhead, Mapping):
-    self.myhead_loss = MyHeadLoss(**weight_myhead)
-elif weight_myhead > 0:
-    self.myhead_loss = MyHeadLoss()
-else:
-    self.myhead_loss = None
-```
-
-In `forward`, after the existing per-head sections::
-
-```python
-if self.myhead_loss is not None and "myhead" in predictions:
-    out = self.myhead_loss(predictions["myhead"], labels, images)
-    result["myhead/loss"] = out["loss"]
-    for k, v in out.items():
-        if k != "loss":
-            result[f"myhead/loss/{k}"] = v
-```
-
-### 2.3 Surface in the model wrapper
-
-If your head is per-voxel, add a `head_myhead = VistaTaskHead3D(...)`
-to the model wrapper(s) that should support it (see Cosmos or Vista
-wrapper for the existing examples) and emit it from `forward` under
-the key `"myhead"`.
-
-### 2.4 Surface in TensorBoard
-
-Add a `_log_myhead` function to
-`brainbow/callbacks/tensorboard/heads.py` and add `"myhead"` to
-`HEADS` in `brainbow/callbacks/tensorboard/tags.py`.
-
-### 2.5 Test
-
-Drop a synthetic 8x32x32 test in `tests/test_losses.py`.  Verify
-shapes, that the loss is non-negative, and that gradients flow.
+Drop a synthetic 3-D test in `tests/test_losses.py`.  Verify the field
+slice shape, finite scalar(s), and gradient flow.
 
 ---
 
@@ -273,8 +206,9 @@ brainbow/modules/<arch>/module.py         # concrete Lightning class
 
 * Inherit from `torch.nn.Module` (or `BaseModel` if you want the type
   guarantees).
-* `forward(x: Tensor) -> Dict[str, Tensor]` keyed by head name.
-  Logits stay raw; activations are applied in the loss.
+* `forward(x: Tensor) -> Tensor` returning the unified
+  `[B, HEAD_CHANNELS, *spatial]` tensor.  The wrapper applies sigmoid
+  only to `SEM_SLICE`; all other channels stay linear.
 * If your backbone has frozen modules under DDP, follow Cosmos's
   approach: `requires_grad_(False)` + `.eval()` + `.detach()` on the
   output of the frozen subgraph (see `cosmos_transfer_2_5/wrapper.py`).
@@ -424,9 +358,8 @@ returning a single tensor is **not** -- see
 | DataModules          | `tests/test_datamodules.py`        |
 | Preprocessors        | `tests/test_preprocessors.py`      |
 | Losses               | `tests/test_losses.py`             |
-| BoundaryLoss         | `tests/test_boundary_loss.py`      |
 | Utils (io / parallel)| `tests/test_utils.py`              |
-| Sliding window       | `tests/test_sliding_window.py` (new) |
+| Sliding window       | `tests/test_sliding_window.py`     |
 | Clustering           | `tests/test_clustering.py` (new)   |
 | Modules / Trainer    | `tests/test_modules.py` (new, Phase 5) |
 

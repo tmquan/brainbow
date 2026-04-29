@@ -519,6 +519,8 @@ class CombinedLoss(nn.Module):
         weight_ce: float,
         weight_dice: float,
         pos_weight: Optional[torch.Tensor],
+        *,
+        normalize_field: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Generic 12-channel derived-affinity loss for a continuous field.
 
@@ -535,7 +537,7 @@ class CombinedLoss(nn.Module):
                 f"_loss_aff_path: field must be [B, C, D, H, W]; got "
                 f"{tuple(field.shape)}."
             )
-        if self.normalize_embeddings:
+        if normalize_field:
             field = torch.nn.functional.normalize(field, p=2, dim=1, eps=1e-6)
 
         aff_pred = soft_aff_from_field(field, tau=tau)        # [B, 12, D, H, W]
@@ -725,6 +727,7 @@ class CombinedLoss(nn.Module):
                 weight_ce=self.aff_emb_weight_ce,
                 weight_dice=self.aff_emb_weight_dice,
                 pos_weight=self._aff_emb_pos_weight,
+                normalize_field=self.normalize_embeddings,
             )
             out["loss/aff_emb"] = ae["loss"]
             if self.aff_emb_weight_ce > 0:
@@ -746,6 +749,7 @@ class CombinedLoss(nn.Module):
                 weight_ce=self.aff_avg_weight_ce,
                 weight_dice=self.aff_avg_weight_dice,
                 pos_weight=self._aff_avg_pos_weight,
+                normalize_field=False,
             )
             out["loss/aff_avg"] = aa["loss"]
             if self.aff_avg_weight_ce > 0:

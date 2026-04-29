@@ -23,62 +23,47 @@ flowchart LR
     dm --> tr
     mod --> tr
     tr --> step["training_step"]
-    step --> wrap["Backbone wrapper<br/>VAE -> DiT -> task heads"]
-    wrap -->|semantic, instance,<br/>geometry, boundary| loss["CombinedLoss"]
+    step --> wrap["Backbone wrapper<br/>VAE -> DiT -> unified head"]
+    wrap -->|"[B, 30, ...]"| loss["CombinedLoss"]
     loss --> log["TensorBoard<br/>scalars + image panels"]
 ```
 
 Two end-to-end backbones live under `brainbow/models/`:
 
-- **`CosmosTransfer3DWrapper`** — Cosmos-Transfer 2.5 DiT + Wan VAE; four heads
-  (semantic, instance, geometry, boundary).
-- **`Vista3DWrapper`** — SegResNetDS2; three heads (no boundary head).
+- **`CosmosTransfer3DWrapper`** — Cosmos-Transfer 2.5 DiT + Wan VAE;
+  one unified 30-channel head.
+- **`Vista3DWrapper`** — SegResNetDS2; the same unified 30-channel head
+  for fast local iteration.
 
-For the per-head channel layouts and the math behind each loss, see
+For the channel layout and the math behind the loss, see
 [`doc/ARCHITECT.md`](doc/ARCHITECT.md).
 
 ## What it does
 
 For every connected-component label `> 0` in a volumetric segmentation,
-`brainbow` builds a **10-channel per-voxel target** directly from the
-label volume + raw EM image -- no learnable target parameters:
+`brainbow` trains one **30-channel per-voxel head**:
 
-|   channels  | meaning                                                                   |
-|-------------|---------------------------------------------------------------------------|
-|    0        | **raw**      := raw image intensity at the voxel                          |
-|    1 - 3    | **avg**      := normalised (z, y, x) of the instance centroid             |
-|    4 - 9    | **aff_pred** := binary face-affinity to 6 neighbours, Z-Y-X order (T, B, U, D, L, R) |
+| channels | field | meaning |
+|---:|---|---|
+| 0 | `raw` | raw image reconstruction |
+| 1 | `sem` | foreground probability |
+| 2-4 | `dir` | unit vector to the instance centroid |
+| 5-10 | `cov` | upper-triangle covariance field |
+| 11-13 | `avg` | normalised `(z, y, x)` instance centroid |
+| 14-29 | `emb` | 16-D discriminative embedding |
 
-The 3 `avg` channels are divided by the patch dimensions `(D, H, W)`
-so they live in `[0, 1]` regardless of anisotropy or patch size; they
-are zero on background voxels.  The 6 affinity channels use **SAME /
-replicate padding** at the crop boundary (foreground voxels at the
-edge are self-connected, `aff = 1`) and are masked to `0` on
-background voxels so every voxel has a well-defined target without
-explicit masking elsewhere.  The target map is computed in a single
-vectorised pass (no Python loops over voxels): `numpy.bincount` on
-CPU, `torch.scatter_add_` on CUDA.
-
-On top of the model's *direct* affinity prediction (ch 4-9), the loss
-also derives a **soft 6-face affinity from the predicted avgloc**
-(ch 1-3) and supervises that derived signal against the same binary
-aff target:
+The loss also derives **12-direction, second-order face affinity** from
+both `avg` and `emb` and supervises those soft affinities against a
+label-derived binary target:
 
 ```
-aff_avg[c] = exp(-tau * sum_i |avg[i] - shift_replicate(avg[i], dir_c)|)
+aff_field[c] = exp(-tau * sum_i |field[i] - shift_replicate(field[i], dir_c)|)
 ```
 
 Voxels in the same instance share their predicted centroid so the
 kernel evaluates to ≈ 1; voxels across an instance boundary disagree
-on it and the kernel decays.  `weight_aff_pred` and `weight_aff_avg`
-scale the two paths separately; both go through the same CE / Dice /
-IoU sub-losses.  Conceptually the supervision is `1 + 3 + 6 + 6 = 16`
-slots even though the model head still emits only 10 channels.
-
-The model is a `CosmosTransfer3DWrapper` with a dedicated 10-channel
-boundary head attached after the shared VAE-decoder refinement stack;
-the `semantic`, `instance`, and `geometry` heads can be combined with
-it via weighted sums in `CombinedLoss`.
+on it and the kernel decays.  The 12 directions are
+`±1` and `±2` along each of Z, Y, and X.
 
 ## Layout
 
@@ -110,7 +95,7 @@ pip install -e ".[gpu-cu13]" --extra-index-url https://pypi.nvidia.com
 ## Train
 
 ```bash
-# Plain SNEMI3D run with the standard three-head recipe:
+# Plain SNEMI3D run:
 python scripts/train.py --config-name snemi3d
 
 # Multi-dataset (SNEMI3D + neurons + MICrONS) joint training:
@@ -119,9 +104,8 @@ python scripts/train.py --config-name combine
 # DDP, custom batch size:
 python scripts/train.py --config-name combine data.batch_size=4 training.devices=4
 
-# Boundary-head-only training: override loss weights inline.
-python scripts/train.py --config-name combine \
-    loss.weight_semantic=0.0 loss.weight_instance=0.0 loss.weight_geometry=0.0
+# Example: disable avg-affinity supervision.
+python scripts/train.py --config-name combine loss.weight_aff_avg.weight=0.0
 ```
 
 ### GPU memory: avoiding slow OOM drift on long runs
@@ -160,38 +144,15 @@ Watch the trajectory in TensorBoard under the `cuda_memory/*` tags
 ## Loss
 
 ```python
-from brainbow.losses import BoundaryLoss, build_boundary_target
+from brainbow.losses import CombinedLoss, HEAD_CHANNELS, slice_head
 
-loss_fn = BoundaryLoss(
-    loss_avg="smooth_l1",     # regression loss for the 3 avg channels (1-3)
-    loss_raw="l1",             # regression loss for the raw channel (0)
-    weight_avg=1.0,            # avg centroid regression (channels 1-3)
-    weight_raw=1.0,            # raw-intensity regression (channel 0)
-    weight_aff_pred=1.0,       # path weight on direct aff prediction (channels 4-9)
-    weight_aff_avg=1.0,        # path weight on aff derived from predicted avgloc
-    tau=1.0,                   # bandwidth of soft_aff_from_avg's kernel
-    weight_dice=1.0,           # soft-Dice on sigmoid(aff); applied to BOTH paths
-    weight_ce=0.0,             # optional binary CE; applied to BOTH paths
-    weight_iou=0.0,            # optional soft-IoU; applied to BOTH paths
-    aff_eps=1.0e-5,            # smoothing in the soft-Dice denominator
-    foreground_only_loc=True,  # mask the 3 avg channels by labels > 0
-    background=0,              # mask aff target to 0 where labels == background
-)
-
-# prediction: [B, 10, D, H, W]  (post-sigmoid)
-# labels:     [B, D, H, W]      (instance ids; 0 = background)
-# image:      [B, D, H, W]      (normalised raw EM)
-out = loss_fn(prediction, labels, image)
-# out -> {"loss", "raw", "avg", "aff",
-#         "aff_pred", "aff_avg",
-#         "aff_pred_{ce,dice,iou}", "aff_avg_{ce,dice,iou}"}
+loss_fn = CombinedLoss()
+# head:      [B, 30, D, H, W]
+# labels:    [B, D, H, W]
+# raw_image: [B, 1, D, H, W]
+out = loss_fn(head, {"labels": labels, "raw_image": raw_image})
+fields = slice_head(head)  # raw / sem / dir / cov / avg / emb views
 ```
-
-The ``aff`` term aggregates ``weight_aff_pred * aff_pred +
-weight_aff_avg * aff_avg``, where each per-path total is
-``weight_dice * dice + weight_ce * ce + weight_iou * iou`` on the six
-face-affinity channels.  Disabling either path (``weight_aff_pred=0``
-or ``weight_aff_avg=0``) zeros out its sub-terms entirely.
 
 ## Tests
 
@@ -205,7 +166,7 @@ pytest tests/ -q
 | -------------------------------------------------------------- | ------------------------------------------------------------- |
 | Skim the codebase before doing anything                        | [`doc/STRUCTURE.md`](doc/STRUCTURE.md)                        |
 | Understand what one training batch actually does               | [`doc/WALKTHROUGH.md`](doc/WALKTHROUGH.md)                    |
-| Know each head's math + channel layout                         | [`doc/ARCHITECT.md`](doc/ARCHITECT.md)                        |
+| Know the unified head's math + channel layout                  | [`doc/ARCHITECT.md`](doc/ARCHITECT.md)                        |
 | Add a new dataset / loss / backbone / transform                | [`doc/CONTRIBUTING.md`](doc/CONTRIBUTING.md)                  |
 | Debug a silent failure (UMAP→PCA, head dropping, freeze, ...)  | [`doc/GOTCHAS.md`](doc/GOTCHAS.md)                            |
 | Tour all docs at once                                          | [`doc/INDEX.md`](doc/INDEX.md)                                |

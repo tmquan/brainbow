@@ -409,10 +409,10 @@ class BaseCircuitModule(pl.LightningModule):
         prefix = self._scalar_prefix(stage)
         prog_bar_names = {
             f"{prefix}/loss",
-            f"{prefix}/semantic/metric/acc",
-            f"{prefix}/semantic/metric/iou",
-            f"{prefix}/semantic/metric/dice",
-            f"{prefix}/instance/metric/ari",
+            f"{prefix}/sem/metric/acc",
+            f"{prefix}/sem/metric/iou",
+            f"{prefix}/sem/metric/dice",
+            f"{prefix}/emb/metric/ari",
         }
         for i, name in enumerate(names):
             if counts[i] > 0:

@@ -97,7 +97,10 @@ def _log_predictions(
     fields = slice_head(head_pred[:n])
 
     # ----- true panels -----
-    tb.add_images(head.tag("true/image"), _normalise(images[:n]), global_step=epoch)
+    true_img = _normalise(images[:n])
+    if true_img.shape[1] == 1:
+        true_img = repeat(true_img, "b 1 h w -> b 3 h w")
+    tb.add_images(head.tag("true/image"), true_img, global_step=epoch)
     tb.add_images(
         head.tag("true/label"),
         _label_to_rgb(labels[:n]),

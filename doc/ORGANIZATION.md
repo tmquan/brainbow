@@ -47,8 +47,7 @@ brainbow/
     ├── datamodules/      # Lightning DataModules (base + per-dataset).
     ├── datasets/         # MONAI CacheDatasets (base + per-dataset + lazy).
     ├── inference/        # sliding-window inference + instance clustering.
-    ├── losses/           # SemanticLoss / InstanceLoss / GeometryLoss /
-    │                     # BoundaryLoss / CombinedLoss.
+    ├── losses/           # Unified 30-channel CombinedLoss + shared helpers.
     ├── metrics/          # per-head evaluation metrics.
     ├── models/           # model wrappers (BaseModel + per-arch packages).
     ├── modules/          # Lightning modules (BaseCircuitModule + per-arch).
@@ -113,7 +112,7 @@ wrapper.py           # CosmosTransfer3DWrapper (the public class)
 
 ```
 __init__.py              # re-exports Vista3DWrapper, VistaTaskHead3D
-wrapper.py               # Vista3DWrapper (the public class; 3 heads)
+wrapper.py               # Vista3DWrapper (the public class; unified head)
 heads.py                 # VistaTaskHead3D (MONAI UnetrBasicBlock)
 hf_loader.py             # MONAI/VISTA3D-HF encoder download + partial-load
 ```
@@ -122,9 +121,9 @@ hf_loader.py             # MONAI/VISTA3D-HF encoder download + partial-load
 
 ```
 __init__.py      # re-exports ImageLogger
-tags.py          # TagContext: {stage}/{mode}/[{head}/]{panel}
+tags.py          # TagContext: {stage}/{mode}/{panel}
 geometry.py      # geometry-head visual helpers
-heads.py         # _log_semantic / _log_instance / _log_geometry / _log_boundary
+heads.py         # unified-head panel logger
 viz.py           # colour-map, overlay, tile builders
 image_logger.py  # ImageLogger callback (the public class)
 ```
@@ -141,84 +140,60 @@ image_logger.py  # ImageLogger callback (the public class)
 
 ---
 
-## 5. Unified loss skeleton
+## 5. Unified 30-channel loss
 
-Every task loss in `losses/` follows the same template:
+The current loss package has one public loss, `CombinedLoss`, and one
+shared helper module, `_common.py`.
+
+`_common.py` owns the channel layout:
+
+| Field | Slice | Channels |
+| ----- | ----- | -------- |
+| `raw` | `[0, 1)` | 1 |
+| `sem` | `[1, 2)` | 1 |
+| `dir` | `[2, 5)` | 3 |
+| `cov` | `[5, 11)` | 6 |
+| `avg` | `[11, 14)` | 3 |
+| `emb` | `[14, 30)` | 16 |
+
+It also owns the 12-direction second-order affinity convention
+(`T1/B1/U1/D1/L1/R1/T2/B2/U2/D2/L2/R2`) and helpers such as
+`slice_head`, `affinity_target`, `soft_aff_from_field`, and
+`upper_tri_to_matrix`.
+
+`CombinedLoss` consumes the model's unified head tensor directly:
 
 ```python
-class <Task>Loss(nn.Module):
-    def __init__(...)                        # weights, config, sub-modules
-
-    @property
-    def task_channels                        # expected prediction width
-
-    # --- Target construction -----------------------------------------
-    @torch.no_grad() def _build_target_<component>(...)
-    @torch.no_grad() def build_target(...)   # public dispatcher
-
-    # --- Per-voxel weights (optional) --------------------------------
-    def compute_weights(labels)              # None by default
-
-    # --- Sub-losses --------------------------------------------------
-    def _compute_loss_<component>(...)       # scalar per component
-
-    # --- Forward -----------------------------------------------------
-    def forward(...) -> Dict[str, Tensor]    # {"loss", <component>, ...}
-    def __repr__()
+out = criterion(head, {
+    "labels": labels,
+    "raw_image": image,
+    "label_direction": direction,
+    "label_covariance": covariance,
+})
 ```
 
-| Loss          | Components (keys in returned dict)                            | `task_channels` |
-| ------------- | ------------------------------------------------------------- | --------------- |
-| SemanticLoss  | `loss`, `ce`, `iou`, `dice`                                   | `semantic_channels` |
-| InstanceLoss  | `loss`, `pull`, `push`, `norm`, `aff_emb`                     | embedding `E` (set by the model wrapper, not the loss) |
-| GeometryLoss  | `loss`, `raw`, `dir`, `cov`  -- channel layout `[raw(1) \| dir(S) \| cov(S*(S+1)/2)]`, source-of-truth in `geometry.py` | `1 + S + S*(S+1)//2` |
-| BoundaryLoss  | `loss`, `raw`, `avg`, `aff`, `aff_pred`, `aff_avg`, plus per-path `aff_{pred,avg}_{ce,dice,iou}` -- channel layout `[raw(1) \| avg(3) \| aff_pred(6)]` | `10`            |
+It emits scalar keys under `loss/<field>`:
 
-**Why this matters:**
-
-- **Symmetry.**  Given any loss, a reader already knows which methods
-  to open and what each one returns.
-- **Pluggability.**  `CombinedLoss` treats each task loss identically —
-  it calls `compute_weights` once, then `forward`, then scatters the
-  returned dict under `{head}/loss/{component}`.
-- **Target caching, shared across heads.**  `build_target(...)` is the
-  per-loss public dispatcher, and `CombinedLoss._build_targets(...)`
-  is the orchestrator that builds **all** shared targets in one pass
-  -- per-voxel instance weights, geometry direction / covariance, and
-  the boundary head's full 10-channel target -- caching them in
-  `targets["_cached_weights"]`.  When both `BoundaryLoss` and
-  `InstanceLoss(weight_aff_emb > 0)` are active, the boundary target's
-  6-channel aff slice is **reused** as the instance head's
-  `cached_aff_target=`, so `_affinity_target_torch(labels)` runs at
-  most once per step regardless of how many heads consume it.
-
-Shared regression-loss name resolution lives in `losses/_common.py`
-(``canonical_regression_name``, ``regression_loss_fn``); the soft
-face-affinity kernel that backs both the boundary head's `aff_avg`
-path and the instance head's `aff_emb` path is
-`brainbow.losses.boundary.soft_aff_from_field` (also re-exported as
-`soft_aff_from_avg` for the `C == 3` avg-specific call site).
-Individual losses reuse these helpers instead of each duplicating
-the kernel / regression-name resolution.
+| Scalar group | Meaning |
+| ------------ | ------- |
+| `loss/raw` | raw reconstruction |
+| `loss/sem/{ce,dice}` | binary foreground supervision |
+| `loss/dir`, `loss/cov`, `loss/avg` | foreground-only regression fields |
+| `loss/emb/{pull,push,norm}` | discriminative embedding |
+| `loss/aff_emb/{ce,dice}` | 12-aff derived from embedding |
+| `loss/aff_avg/{ce,dice}` | 12-aff derived from avg |
 
 ---
 
 ## 6. CombinedLoss: head-oriented key hierarchy
 
-`CombinedLoss` composes the four task losses into a single
-dict-returning module.  Every scalar it emits uses the head-oriented
-tag hierarchy that **mirrors the image-tag layout** emitted by
+`CombinedLoss` emits scalars using a field-oriented tag hierarchy that
+**mirrors the image-tag layout** emitted by
 `callbacks.tensorboard.ImageLogger`:
 
 ```
 loss                                       # global total
-{head}/loss                                # per-head total
-{head}/loss/{component}                    # flat per-head breakdown
-                                           # (e.g. semantic/loss/ce)
-{head}/loss/<field>[/<component>]          # per-field breakdown
-                                           # parallels {head}/pred/<field>
-eff_w/{head}                               # effective task weights
-                                           # (learned-task-weight mode)
+loss/<field>[/<component>]                 # per-field breakdown
 ```
 
 When the same predicted *field* feeds both a visualisation and a loss,
@@ -227,12 +202,9 @@ both live under the same `<field>` subgroup in TB.  Concrete pairs
 
 | image tag                                | scalar tag(s)                                                          |
 | ---------------------------------------- | ----------------------------------------------------------------------- |
-| `instance/pred/emb/aff/{t,b,u,d,l,r}`    | `instance/loss/emb/aff`                                                 |
-| `boundary/pred/aff/{t,b,u,d,l,r}`        | `boundary/loss/aff` (path total) + `boundary/loss/aff/{ce,dice,iou}`*   |
-| `boundary/pred/avg/aff/{t,b,u,d,l,r}`    | `boundary/loss/avg/aff` (path total) + `boundary/loss/avg/aff/{ce,dice,iou}`* |
-
-(* the per-sub-component scalars are emitted only when their weight
-is non-zero — same conditional pattern as `semantic/loss/{iou,dice}`.)
+| `pred/emb/aff/{t1,...,r2}`               | `loss/aff_emb`, `loss/aff_emb/{ce,dice}`                                |
+| `pred/avg/aff/{t1,...,r2}`               | `loss/aff_avg`, `loss/aff_avg/{ce,dice}`                                |
+| `pred/dir`, `pred/cov`, `pred/raw`       | `loss/dir`, `loss/cov`, `loss/raw`                                      |
 
 This way, when TensorBoard alphabetically sorts tags, each head's
 scalars cluster next to its images — e.g. `instance/loss/emb/aff`
@@ -240,20 +212,14 @@ sits beside `train/automatic/instance/pred/emb/aff/{t,b,...}`.  The
 per-sub-component scalars let you debug "why is dice high but CE low?"
 without keeping disabled-sub scalars in the TB tree.
 
-**Visualisation-only mask on aff panels.**  All four affinity image
-groups (`instance/pred/emb/aff`, `boundary/pred/aff`,
-`boundary/pred/avg/aff`, `boundary/true/aff`) are multiplied by the
-predicted semantic foreground (`sem_ids > 0`, falling back to GT
-labels when the semantic head is disabled) **before** being written
-to TB.  This mirrors the supervision footprint so background pixels
-black out and the panels look like what the loss actually saw.  The
-loss continues to consume the **unmasked** aff tensors — the mask is
-display-only.  See `_aff_fg_mask_2d` in
-`brainbow/callbacks/tensorboard/heads.py`.
+**Visualisation-only mask on aff panels.**  The `pred/emb/aff`,
+`pred/avg/aff`, and `true/aff` panels are multiplied by the predicted
+semantic foreground (or GT labels for true panels) before being written
+to TB.  This is display-only; the loss uses the unmasked tensors.
 
-**Convention:** all `<head>/loss/<sub>` scalars hold the
-**un-weighted-by-head** sub-loss value; only `<head>/loss` (the head
-total) and `loss` (the global total) include the head / path weights.
+**Convention:** all `loss/<field>/<sub>` scalars hold the unweighted
+sub-loss value; only `loss/<field>` and `loss` include the field/path
+weights.
 This is what lets you reason about each component's contribution
 independent of its multiplier in the current run.
 
