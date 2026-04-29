@@ -364,3 +364,570 @@ and the older `BasePreprocessor` class docstring.
 **Remediation.** The `__init__.py` docstring now states `save()` is
 optional.  When in doubt, check `hasattr(p, "save")` or wrap the call
 in `try/except NotImplementedError`.
+
+---
+
+## 19. Geometry channel layout was swapped in April 2026
+
+**Symptom.** Loading an older `head_geometry` checkpoint produces
+nonsense direction / covariance predictions while ``raw`` (ch 0) looks
+fine.  The total geometry loss starts ~10× higher than the same model
+trained from a fresh init.
+
+**Where.**
+[`brainbow/losses/geometry.py`](../brainbow/losses/geometry.py) (forward slice),
+[`brainbow/models/cosmos_transfer_2_5/decoder.py`](../brainbow/models/cosmos_transfer_2_5/decoder.py)
+(activation policy), and
+[`brainbow/callbacks/tensorboard/heads.py`](../brainbow/callbacks/tensorboard/heads.py)
+(`_log_geometry`).
+
+**Why.** Before April 2026 the geometry head was laid out as
+``[raw(1) | cov(S*(S+1)/2) | dir(S)]``.  It was swapped to
+``[raw(1) | dir(S) | cov(S*(S+1)/2)]`` so the (cheaper, more
+visualisable) direction channels sit immediately after raw and the
+larger covariance block lives at the tail.  The total channel count
+(`10` in 3-D) is unchanged, and the activation policy still applies
+sigmoid only to ch 0 — both `dir` and `cov` carry signed values, so
+sigmoid would clip them.  But the saved weights for `head_geometry`
+permute their output rows under the new layout.
+
+**Remediation.** Either (a) re-train fresh under the new layout, or
+(b) write a tiny `state_dict` shim that permutes
+`model.head_geometry.weight` and `.bias` rows
+``[0, 7, 8, 9, 1, 2, 3, 4, 5, 6]`` -> ``[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]``
+before `load_state_dict(strict=False)`.  Channel layout is owned by
+:class:`brainbow.losses.GeometryLoss` — that's the single source of
+truth, every other doc / wrapper / callback now mirrors it.
+
+---
+
+## 20. Affinity targets default to `background=-1` (no masking)
+
+**Symptom.** A run trained with the old `background=0` mask suddenly
+shows a denser supervised aff target after pulling main; the
+TensorBoard `boundary/true/aff/{...}` panels are visibly less
+"checkerboard-y" along instance edges.
+
+**Where.**
+[`brainbow/losses/boundary.py`](../brainbow/losses/boundary.py)
+(`BoundaryLoss(__init__)` default `background: Optional[int] = -1`),
+[`brainbow/losses/instance.py`](../brainbow/losses/instance.py)
+(`InstanceLoss(__init__)` default `background: Optional[int] = -1`),
+and the explicit `background: -1` for both heads in
+[`configs/snemi3d.yaml`](../configs/snemi3d.yaml).
+
+**Why.** The `FindBoundariesd` transform sets boundary voxels (the
+ones between adjacent instances) to label `0`.  With `background=0`,
+those voxels were masked out of the aff target, producing alternating
+"aff=1, aff=0" pixels along every instance border — a visible
+checkerboard in TB.  Setting `background=-1` (a sentinel that no
+voxel ever has) keeps every voxel in the target: boundary-to-boundary
+face pairs become `aff=1`, boundary-to-foreground stays `aff=0`.  No
+checkerboard, denser supervision.
+
+**Remediation.** **Intentional**, but if you resume an old checkpoint
+trained with `background=0`, the supervised signal changes.  Loss
+values will jump by a few percent for a few hundred steps while the
+model adapts.  No state-dict fixup is needed; only the target
+construction is affected.  Pass `null` (YAML `~`) to opt out of any
+masking explicitly — semantically identical to `-1` here, but kept
+in the public API for symmetry with `BoundaryLoss`.
+
+---
+
+## 21. `max_hard_pairs` does not bound the push-loss forward peak
+
+**Symptom.** A MICrONS crop with thousands of instances spikes
+`cuda_memory/max_allocated_gb_train` even though
+`weight_instance.max_hard_pairs: 4096` is set.  It looks like the
+knob is broken.
+
+**Where.**
+[`brainbow/losses/instance.py::_compute_loss_push`](../brainbow/losses/instance.py)
+(``diff = rearrange(centers, "i e -> i 1 e") - rearrange(centers, "j e -> 1 j e")``).
+
+**Why.** The full ``[K, K, E]`` pairwise difference tensor is
+materialised first, then the upper triangle is taken, then ``topk``
+filters down to ``max_hard_pairs``.  The forward peak therefore
+scales as ``O(K² · E)`` regardless of the post-topk cap.  ``K`` is
+the number of unique instance ids in a single crop, which on dense
+MICrONS volumes can be 1k–4k.  At ``E = 10`` and bf16 batch 4, that's
+``[K, K, 10]`` per batch element — 40 MB at K=1k, 2.5 GB at K=4k.
+
+**Remediation.** ``max_hard_pairs`` still helps gradient memory and
+concentrates supervision on the actually-touching pairs; it just
+doesn't bound the forward.  If you really need to cap the forward
+peak by ``K``, the loss has to compute ``pw`` row-blockwise (e.g. 256
+rows at a time, pre-mining top-k within each block before
+concatenating).  See the comment block in
+[`configs/snemi3d.yaml`](../configs/snemi3d.yaml) `weight_instance`
+for the wording.
+
+---
+
+## 22. VOI metric is *mean-of-per-volume*, not global
+
+**Symptom.** Comparing your val/automatic/instance/metric/voi to a
+literature number ("VOI on MICrONS = ...") gives a confusing offset.
+
+**Where.**
+[`brainbow/metrics/instance.py::compute_per_batch_voi`](../brainbow/metrics/instance.py).
+
+**Why.** The implementation averages per-sample VOI split / merge
+across the batch and reports their sum as `total`.  VOI on pooled
+voxels (the literature definition) would compute a single global
+contingency table across the entire dataset.  These are not the same
+number — they coincide only when every batch element has identical
+class distribution.
+
+**Remediation.** Document expected delta when comparing to
+literature; if you need the global value, dump per-batch contingency
+tables and aggregate offline.
+
+---
+
+## 23. `BaseModel.get_output_channels()` returns `int`, docstring says `Dict[str, int]`
+
+**Symptom.** A multi-head consumer expects a dict ``{"semantic": 1,
+"instance": 10, ...}`` and gets a single integer
+(`semantic_channels`).  Code that walks the dict crashes with
+"int has no attribute keys".
+
+**Where.** `brainbow/models/base.py` declares the abstract method as
+returning `int`; the package docstring at
+`brainbow/models/__init__.py` claims `Dict[str, int]`.
+`CosmosTransfer3DWrapper.get_output_channels` returns `num_classes`
+only (semantic head); `Vista3DWrapper` doesn't implement it at all.
+
+**Why.** API drift.  Originally a single-head abstraction; multi-head
+support was bolted on at the wrapper level without retrofitting the
+ABC.
+
+**Remediation.** **Open issue.**  Don't rely on
+`get_output_channels()` for anything other than `semantic_channels`
+today.  If you need per-head widths, read them from the loss
+modules (`<loss>.task_channels`) or from the config block
+(`model.{semantic,instance,boundary}_channels`).
+
+---
+
+## 24. HuggingFace download failure on rank 0 produces noisy errors on other ranks
+
+**Symptom.** You restart training without internet and rank 0 prints
+"HuggingFace download failed: …", then ranks 1-7 print
+"FileNotFoundError" or "EntryNotFoundError" and the run aborts with
+mixed errors.
+
+**Where.** [`brainbow/models/cosmos_transfer_2_5/hf_loader.py`](../brainbow/models/cosmos_transfer_2_5/hf_loader.py)
+(`_download_from_hf`) and the parallel
+[`brainbow/models/vista/hf_loader.py`](../brainbow/models/vista/hf_loader.py).
+
+**Why.** When rank 0's download fails, it calls `dist.barrier()` then
+re-raises.  The other ranks unblock at the barrier, then call
+`snapshot_download(local_files_only=True)` against the (empty) cache,
+which fails with a different error class.  Not a deadlock — but the
+log noise can mask the real cause on rank 0.
+
+**Remediation.** Ensure outbound network on at least rank 0.  If you
+need to retrain offline, pre-populate `~/.cache/huggingface/hub` on
+the launch host before starting the multi-node run.  A future fix
+should broadcast a "download succeeded" flag from rank 0 before
+non-zero ranks attempt their `local_files_only` load.
+
+---
+
+## 25. `instance/loss/norm` rises monotonically during training
+
+**Symptom.** Embedding-norm regulariser scalar climbs steadily from
+~3 to ~4 over 30 epochs even though `weight_norm: 0.001` is enabled.
+
+**Where.**
+[`brainbow/losses/instance.py::_compute_loss_norm`](../brainbow/losses/instance.py)
+and the `weight_norm` knob in
+[`configs/snemi3d.yaml`](../configs/snemi3d.yaml) `weight_instance`.
+
+**Why.** The push term repels centroids out to a margin of
+`2 * delta_d = 3.0`.  When a single crop contains many instances
+(MICrONS minnie65 averages 100s-1000s), centroids are pushed in many
+directions simultaneously, growing their norms.  The norm
+regulariser only damps proportionally to its weight (`0.001`), so it
+tames but doesn't reverse the growth.
+
+**Remediation.** **Intentional but tunable.**  Either (a) raise
+`weight_norm` (e.g. to `0.01`) for a stronger pull toward the origin,
+(b) set `normalize_embeddings: true` to bound each centroid to the
+unit hypersphere (eliminates the norm growth entirely; you'll also
+want to lower `delta_d` since distances are now bounded by `2`), or
+(c) lower `delta_d` so the push margin is reachable without
+inflating norms.  Watch
+`val/automatic/instance/metric/ari` to confirm the trade-off doesn't
+hurt clustering.
+
+---
+
+## 26. Eval pipeline used to apply random augmentations (fixed April 2026)
+
+**Symptom (historical).** Validation / test metrics
+(`val/automatic/instance/metric/{ari,ami,voi,ted}`,
+`val/automatic/semantic/metric/{acc,iou,dice}`) drift run-to-run with
+the same checkpoint, and disagree with metrics measured by an
+external evaluator on the same volumes.  Loss curves look noisier on
+val than on train despite val being a smaller, fixed set.
+
+**Where.**
+[`brainbow/datamodules/base.py::CircuitDataModule.get_val_transforms`](../brainbow/datamodules/base.py).
+
+**Why.** Before the fix, `get_val_transforms` chained
+`*_original_transforms(sd)` and `*_semantic_transforms(sd)` -- the
+exact same hooks that the train pipeline uses -- which meant every
+val pass ran:
+
+| Transform                | Probability                |
+| ------------------------ | -------------------------- |
+| ``RandFlipd`` × 3 axes   | 0.5 each                   |
+| ``RandRotate90d``        | 0.5                        |
+| ``RandTransposeXYd``     | 0.5                        |
+| ``Rand3DElasticd``       | ``data.elastic_prob``      |
+| ``RandGaussianNoised``   | **1.0**  (always applied)  |
+| ``RandAdjustContrastd``  | **1.0**  (always applied)  |
+
+Because these were random, validation metrics measured **model + a
+fresh stochastic augmentation realisation per batch**, not the
+model's response to the held-out volume.  ARI / AMI / VOI on
+SNEMI3D's `val/automatic/instance/metric/*` curves up to commit
+`<this fix>` are therefore lower-bounded by what the model would
+score on clean inputs.
+
+**Remediation.** Fixed: `get_val_transforms` now only runs
+deterministic ops (`EnsureChannelFirstd` → `FindBoundariesd` →
+pad+center-crop or resize → `_instance_transforms` (CC relabel) →
+`_geometry_transforms` (direction / covariance)).  In-progress runs
+will see the val curves shift on the **next** validation tick after
+pulling main; the train curves are unaffected.
+
+---
+
+## 27. `freeze_dit_backbone: N` is an epoch count, not a layer count
+
+**Symptom.** ``model.freeze_dit_backbone: 2`` in a config -- you read
+it as "freeze the first 2 DiT blocks" because that's a familiar
+fine-tuning idiom, but every DiT parameter shows
+``requires_grad: True`` from epoch 2 onward.
+
+**Where.**
+[`brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start`](../brainbow/modules/cosmos_transfer_2_5/base.py)
+and the ``freeze_dit_backbone`` table in
+[`doc/ARCHITECT.md`](./ARCHITECT.md) §1.6 .
+
+**Why.** The integer form is **phased epoch-count semantics**: ``N``
+means "freeze the *entire* DiT during epochs ``0 .. N-1``, then
+unfreeze at the start of epoch ``N`` (and rebuild the optimiser so
+the new param group picks up ``optimizer.dit_backbone_lr``)".  There
+is **no** "freeze first N blocks" code path -- `freeze_dit_backbone()`
+on the wrapper toggles `requires_grad` on every parameter under
+``self.dit``.
+
+**Remediation.** Read the SNEMI3D config comment block (now
+corrected) or the `ARCHITECT.md` table.  If you genuinely need
+per-block layer freezing, you'd have to walk
+`self.dit.blocks[:N].requires_grad_(False)` yourself; not currently
+exposed via Hydra.
+
+---
+
+## 28. `weight_geometry.dir_target: skeleton` raises at construction
+
+**Symptom (historical).**  Setting
+``weight_geometry.dir_target: skeleton`` in a YAML config didn't
+actually change supervision -- the direction-field target was still
+the centroid-pointing field.
+
+**Where.**
+[`brainbow/losses/geometry.py::GeometryLoss.__init__`](../brainbow/losses/geometry.py),
+[`brainbow/transforms/direction.py::compute_direction_field`](../brainbow/transforms/direction.py),
+[`brainbow/callbacks/tensorboard/heads.py::_log_geometry`](../brainbow/callbacks/tensorboard/heads.py).
+
+**Why.**  Before the fix, ``GeometryLoss`` swallowed every unknown
+kwarg via ``**kwargs`` (kept for ``CombinedLoss``-side flat-kwarg
+forwarding flexibility), so ``dir_target=skeleton`` was silently
+dropped.  ``compute_direction_field`` only implements the centroid
+target; there is no skeleton path.  The TB callback read
+``getattr(geom_loss, "dir_target", "centroid")`` and so always
+labelled the panel ``geometry/pred/dir_centroid``.
+
+**Remediation.** Fixed: ``GeometryLoss(dir_target=...)`` now stores
+the value and **raises** at construction unless ``dir_target ==
+"centroid"``.  When you actually want a skeleton target, implement
+the skeleton branch in
+``compute_direction_field`` and relax the guard.  The TB callback
+keeps reading ``loss.dir_target`` so the new tag flows through
+automatically once the implementation lands.
+
+---
+
+## 29. `dataset: neurons` used to crash at startup
+
+**Symptom (historical).** Setting ``data.dataset: neurons`` in the
+config raised
+``ValueError: Unknown dataset type: 'neurons'`` from
+``scripts/train.py::build_datamodule`` even though
+``NeuronsDataModule`` was exported by ``brainbow.datamodules``.
+
+**Where.** ``scripts/train.py::build_datamodule`` registry.
+
+**Why.** The registry only listed ``snemi3d`` and ``microns``.
+
+**Remediation.** Fixed: ``"neurons": NeuronsDataModule`` is now in
+the registry.  Other datasets follow the same one-line edit pattern.
+
+---
+
+## 30. `dit_backbone_lr: 0` silently fell back to base LR
+
+**Symptom (historical).** A config block::
+
+    optimizer:
+      lr: 2e-4
+      dit_backbone_lr: 0
+
+reported four parameter groups with the **same** LR (``2e-4``) on
+all of them, not a frozen-rate backbone.
+
+**Where.**
+[`brainbow/modules/cosmos_transfer_2_5/base.py::configure_optimizers`](../brainbow/modules/cosmos_transfer_2_5/base.py).
+
+**Why.** Before the fix the line was
+``backbone_lr = self.optimizer_config.get("dit_backbone_lr") or lr`` --
+``0 or lr`` is ``lr`` because Python ``or`` returns the first truthy
+value and ``0`` is falsy.  The argument was effectively
+"any non-zero number, or default".
+
+**Remediation.** Fixed: explicit ``is None`` check -- a deliberate
+``0`` is now honoured.
+
+---
+
+## 31. Resume-from-checkpoint path in YAML comment was wrong
+
+**Symptom (historical).** The header comment in
+[`configs/snemi3d.yaml`](../configs/snemi3d.yaml) suggested::
+
+    training.resume_from_checkpoint=<output_dir>/<run_dir>/checkpoints/last.ckpt
+
+but ``output_dir`` doesn't contain the run dir at runtime.
+
+**Where.**
+[`scripts/train.py`](../scripts/train.py) -- the timestamped run
+directory **overwrites** ``cfg.output_dir`` via
+``OmegaConf.update(cfg, "output_dir", str(run_dir), force_add=True)``
+just after creating it.
+
+**Why.** Two-segment templates (``<output_dir>/<run_dir>``) read
+naturally but didn't survive that overwrite.  Every checkpoint write
+afterward uses ``Path(output_dir) / "checkpoints"`` -- which is now
+``<run_dir>/checkpoints``.
+
+**Remediation.** Fixed: the YAML comment now reads
+``training.resume_from_checkpoint=<run_dir>/checkpoints/last.ckpt``
+and points at the literal "Run directory: ..." line printed at the
+top of every training log.
+
+---
+
+## 32. Vista geometry head's `raw` channel is **not** sigmoided
+
+**Symptom.** Training the **Vista3D** wrapper with
+``weight_geometry.weight_raw > 0`` produces a high
+``geometry/loss/raw`` that doesn't decay below ~0.5 even after many
+epochs, while the same loss config drops to ~0.07 on the Cosmos
+wrapper.
+
+**Where.**
+[`brainbow/models/vista/wrapper.py`](../brainbow/models/vista/wrapper.py)
+(``forward`` returns ``geometry`` linearly) vs
+[`brainbow/models/cosmos_transfer_2_5/decoder.py`](../brainbow/models/cosmos_transfer_2_5/decoder.py)
+(``head_geometry`` output is composed as
+``torch.cat([geom[:, :1].sigmoid(), geom[:, 1:]], dim=1)``).
+
+**Why.** ``GeometryLoss._compute_loss_raw`` clamps the **target**
+``raw_image`` to ``[0, 1]`` and then regresses ``pred_raw`` against
+it.  On the Cosmos path, ``pred_raw`` is already in ``[0, 1]`` thanks
+to the channel-0 sigmoid in the decoder; on the Vista path,
+``pred_raw`` is unbounded logits, so the target / pred ranges don't
+match and the L1 / MSE loss is artificially high.
+
+**Remediation.** **Open issue.**  Either:
+
+1. apply the same channel-0 sigmoid in the Vista wrapper's
+   ``forward`` (preferred -- centralise the activation contract);
+2. set ``weight_geometry.weight_raw: 0`` on Vista runs;
+3. drop the target clamp inside ``GeometryLoss._compute_loss_raw``
+   and rely on the wrapper to make the ranges match (less safe).
+
+The Cosmos path is the production training target, so this only
+bites Vista debug runs today.
+
+---
+
+## 33. `loss.weight_geometry: { weight_dir: 1.0 }` (no `weight:`) used to silently disable the head
+
+**Symptom (historical).**  A nested mapping omits the head's
+``weight:`` key, intending to inherit the default::
+
+    weight_geometry:
+      weight_dir: 1.0
+      weight_cov: 1.0
+      weight_raw: 1.0
+
+The geometry head is then **not instantiated** and every geometry
+sub-loss kwarg is silently dropped.  No warning, no zero-scalar, just
+nothing.
+
+**Where.**
+[`brainbow/losses/combined.py::_split_head`](../brainbow/losses/combined.py).
+
+**Why.** Before the fix, ``_split_head`` used a per-head
+``default_weight`` argument (``0.0`` for geometry / boundary,
+``1.0`` for semantic / instance).  In the nested-mapping branch
+``d.pop("weight", default_weight)`` therefore returned ``0.0`` for
+geometry / boundary, and the head was skipped.
+
+**Remediation.** Fixed: a nested mapping without ``weight:`` is now
+treated as ``weight: 1.0`` regardless of head -- a user who wrote a
+nested block clearly intended to enable the head.  If you want the
+head disabled, write ``weight_<head>: 0`` (scalar) or
+``weight_<head>: { weight: 0 }`` (nested explicit).
+
+---
+
+## 34. Per-volume `find_boundaries` keys are no-op in lazy 3-D mode
+
+**Symptom.** A YAML volume entry like::
+
+    train_volumes:
+      - vol: foo_volume
+        seg: foo_segmentation
+        root: data/SNEMI3D
+        find_boundaries: 0          # I want no boundary stripping for this volume
+
+is silently ignored on the SNEMI3D recipe (which uses
+``slice_mode: false`` ⇒ 3-D lazy reads); only the global
+``data.find_boundaries`` knob applies via the
+``FindBoundariesd`` MONAI transform in the train pipeline.
+
+**Where.**
+[`brainbow/datasets/lazy.py::LazyVolDataset._discover_volumes`](../brainbow/datasets/lazy.py)
+strips per-volume entries to ``vol`` / ``seg`` / ``root`` only.  The
+eager branches in ``brainbow/datasets/{snemi3d,microns,neurons}.py``
+honour the per-volume key at load time.
+
+**Why.** Lazy reads stream the raw volume on demand from disk; per-
+volume label-stripping would require a second pre-processed copy of
+each volume which isn't materialised today.  The global
+``data.find_boundaries`` works because it's a probabilistic
+transform that runs after the lazy read.
+
+**Remediation.** **Open issue.** Document ``find_boundaries`` as
+"global probability only on the lazy path" or thread the per-volume
+override into ``LazyVolDataset`` -- requires either a sidecar mask
+or a transform inserted into the pipeline that consults the volume
+key.  Today's recipes (``snemi3d.yaml``, ``combine.yaml``) don't
+exercise the per-volume override so the silent no-op hasn't bitten
+in production.
+
+---
+
+## 35. Lazy train vs val/test patch read sizes diverge with resolution zoom
+
+**Symptom.** With ``resolution_zoom_prob: 1.0`` and a downsampling
+range, training crops are sometimes obtained from a
+``_safe_patch_size()``-enlarged read (e.g. 96 × 320 × 320 for
+target ``80 × 256 × 256``) while validation crops use the literal
+``patch_size``.  Boundary voxels visible to the model differ between
+train and val.
+
+**Where.**
+[`brainbow/datamodules/base.py::_safe_patch_size`](../brainbow/datamodules/base.py)
+and the lazy split builders in each dataset's datamodule
+(``snemi3d.py`` ~120, ``microns.py`` ~120, ``neurons.py`` ~120).
+
+**Why.** Train uses ``_effective_read_size()`` to provision a margin
+for the post-zoom center-crop; val / test always use ``patch_size``.
+This is a deliberate train/eval asymmetry so the eval pipeline stays
+deterministic, but it does mean ``ResolutionZoom`` artefacts at the
+crop edge differ between train and val.
+
+**Remediation.** **Intentional**, but document the asymmetry so
+users don't compare a literature paper's eval-on-full-volume number
+to a Brainbow eval-on-patches number directly.
+
+---
+
+## 36. `cache_rate` is silently ignored in lazy 3-D mode
+
+**Symptom.** Setting ``data.cache_rate: 1.0`` to "fit everything in
+RAM" doesn't change steady-state RAM usage on a 3-D SNEMI3D run.
+
+**Where.** ``data.cache_rate`` is forwarded to the eager
+``CircuitDataset`` constructor in
+[`brainbow/datamodules/base.py::setup`](../brainbow/datamodules/base.py)
+but not consumed by ``LazyVolDataset`` (the path used when
+``slice_mode: false`` ⇒ default for SNEMI3D / MICrONS / neurons).
+
+**Why.** Caching a ``LazyVolDataset`` would defeat its purpose --
+it exists to avoid materialising whole volumes in worker memory.
+The MONAI ``CacheDataset`` semantics ``cache_rate`` was designed
+for don't apply.
+
+**Remediation.** Document; raise a warning when
+``cache_rate > 0`` and the lazy path is selected; or add a small
+LRU patch cache on top of ``LazyVolDataset`` if you really need it.
+
+---
+
+## 37. `include_clefts` / `include_mito` config keys are dropped
+
+**Symptom.** Multi-channel MICrONS supervision described in
+``configs/default.yaml`` (``include_clefts``, ``include_mito``)
+doesn't change the dataset's emitted batch keys; predictions still
+come out as the standard 4-head set.
+
+**Where.** ``scripts/train.py::_build_datamodule_kwargs`` populates
+the keys, but ``inspect.signature(cls).parameters`` filters them
+out at the call site (no datamodule constructor accepts them).
+
+**Why.** Implementation gap -- the keys were added to the config
+namespace ahead of the multi-channel datamodule that would consume
+them.
+
+**Remediation.** **Open issue.** Either implement a multi-channel
+MICrONS datamodule that accepts the keys or drop them from
+``configs/default.yaml`` and ``_build_datamodule_kwargs``.  Today
+they're load-bearing only in the configs themselves; nothing in
+``brainbow/datamodules/*.py`` references them.
+
+---
+
+## 38. CUDA `empty_cache()` is called twice at val end
+
+**Symptom.** A small extra latency at the end of every validation
+epoch and a stronger-than-expected drop in
+``cuda_memory/reserved_gb`` between val and the next train epoch.
+
+**Where.** Two separate hooks both call ``torch.cuda.empty_cache()``
+at ``on_validation_epoch_end``:
+
+1. [`brainbow/modules/base.py`](../brainbow/modules/base.py) -- the
+   Lightning module's own override.
+2. [`brainbow/callbacks/memory.py::CudaEmptyCacheCallback`](../brainbow/callbacks/memory.py)
+   -- the opt-in callback.
+
+**Why.** The module-level hook predates the callback; the callback
+was added later for finer-grained control.  Lightning runs callback
+hooks first, then the module hook -- so when both are enabled we
+flush twice.
+
+**Remediation.** **Cosmetic only** (``empty_cache`` is idempotent),
+but candidates for cleanup: drop the module-level call when
+``CudaEmptyCacheCallback`` is enabled in the callback set, or pick
+one canonical location.

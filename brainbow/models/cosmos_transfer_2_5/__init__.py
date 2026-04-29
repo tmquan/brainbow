@@ -6,9 +6,10 @@ extractor for the four-head volumetric segmentation task:
 
 - **Semantic**: per-voxel class logits  (``semantic_channels`` channels)
 - **Instance**: per-voxel embedding vectors  (``instance_channels`` channels)
-- **Geometry**: per-voxel raw intensity, covariance, and direction.
-  Channel layout mirrors BoundaryLoss: ``ch 0`` = raw, then cov
-  upper-triangle (S*(S+1)/2 channels), then dir (S channels).
+- **Geometry**: per-voxel raw intensity, direction, and covariance.
+  Channel layout mirrors BoundaryLoss with ``ch 0`` = raw: ``[raw(1) |
+  dir(S) | cov(S*(S+1)/2)]`` -- 10 channels in 3-D. Source of truth is
+  :class:`brainbow.losses.GeometryLoss`.
 - **Boundary**: per-voxel raw-intensity + per-instance centroid colour +
   direct face-affinity (``boundary_channels`` = 10: 1 raw, 3 avg RGB,
   6 face-affinity neighbours in Z-Y-X order T/B/U/D/L/R).  The loss

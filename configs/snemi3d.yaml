@@ -25,13 +25,14 @@
 #   python scripts/train.py --config-name snemi3d
 #   python scripts/train.py --config-name snemi3d data.batch_size=8
 #
-# Resuming a crashed run.  Lightning writes the timestamped resume
-# checkpoint as ``<output_dir>/<run_dir>/checkpoints/last.ckpt`` (the
-# exact ``run_dir`` is printed at the top of every run's log).  Pass
-# that path verbatim::
+# Resuming a crashed run.  ``scripts/train.py`` overwrites
+# ``cfg.output_dir`` with the timestamped run directory it just
+# created, so the resume path printed at the top of the log is the
+# **flat** ``<run_dir>/checkpoints/last.ckpt`` (the run directory line
+# in the log is the literal value to use here)::
 #
 #   python scripts/train.py --config-name snemi3d \
-#     training.resume_from_checkpoint=<output_dir>/<run_dir>/checkpoints/last.ckpt
+#     training.resume_from_checkpoint=<run_dir>/checkpoints/last.ckpt
 # =====================================================================
 
 defaults:
@@ -171,7 +172,16 @@ model:
   feature_size: 64
 
   # What to freeze.  Backbone is pretrained, so we adapt only the heads
-  # by default.  `freeze_dit_backbone: 2` freezes the first 2 DiT blocks.
+  # by default.  ``freeze_dit_backbone`` accepts:
+  #   true  -> permanently frozen
+  #   false -> permanently trainable
+  #   N     -> freeze the **entire** DiT during epochs 0 .. N-1, then
+  #            unfreeze at the start of epoch N (optimizer rebuilt so
+  #            the new param group picks up ``optimizer.dit_backbone_lr``).
+  # i.e. the integer is an **epoch count, not a layer count**.  The
+  # phased-schedule machinery lives in
+  # ``brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start``;
+  # see ``doc/ARCHITECT.md`` § 1.6 for the parameter-budget table.
   freeze_vae_encoder: true
   freeze_dit_backbone: 2
   freeze_vae_decoder: true

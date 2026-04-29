@@ -53,18 +53,23 @@ from brainbow.losses.boundary import (
 HeadConfig = Union[float, int, Mapping[str, Any]]
 
 
-def _split_head(
-    cfg: HeadConfig, default_weight: float,
-) -> Tuple[float, Dict[str, Any]]:
+def _split_head(cfg: HeadConfig) -> Tuple[float, Dict[str, Any]]:
     """Split a head config into ``(head_weight, sub_kwargs)``.
 
     Accepts either a scalar (flat form -- only the head weight is set,
     sub-kwargs come from the outer flat kwargs) or a mapping of the
     form ``{weight: float, **sub_kwargs}`` (nested form, recommended).
+
+    When the nested mapping omits ``weight`` we fall back to ``1.0``:
+    a user who wrote a nested block clearly intended to enable the
+    head and is just listing sub-knobs; silently disabling it because
+    they forgot to repeat ``weight: 1.0`` is a footgun (the head would
+    be skipped at construction time and every sub-loss kwarg would be
+    silently dropped).
     """
     if isinstance(cfg, Mapping):
         d = dict(cfg)
-        w = float(d.pop("weight", default_weight))
+        w = float(d.pop("weight", 1.0))
         return w, d
     return float(cfg), {}
 
@@ -147,11 +152,13 @@ class CombinedLoss(nn.Module):
         super().__init__()
         self.spatial_dims = spatial_dims
 
-        # Split head configs into (scalar_weight, nested_kwargs).
-        w_sem, sem_nested = _split_head(weight_semantic, 1.0)
-        w_ins, ins_nested = _split_head(weight_instance, 1.0)
-        w_geom, geom_nested = _split_head(weight_geometry, 0.0)
-        w_bnd, bnd_nested = _split_head(weight_boundary, 0.0)
+        # Split head configs into (scalar_weight, nested_kwargs).  A
+        # nested mapping without an explicit ``weight:`` key is treated
+        # as ``weight: 1.0`` regardless of head -- see ``_split_head``.
+        w_sem, sem_nested = _split_head(weight_semantic)
+        w_ins, ins_nested = _split_head(weight_instance)
+        w_geom, geom_nested = _split_head(weight_geometry)
+        w_bnd, bnd_nested = _split_head(weight_boundary)
 
         self.weight_semantic = w_sem
         self.weight_instance = w_ins
@@ -355,7 +362,16 @@ class CombinedLoss(nn.Module):
 
         # Instance
         if self.instance_loss is not None and "instance" in predictions:
-            sem_ids = targets.get("semantic_ids") or predictions.get("semantic_ids")
+            # Explicit ``is None`` check.  ``A or B`` would call
+            # ``bool(A)`` first, which raises on a multi-element tensor:
+            # ``RuntimeError: Boolean value of Tensor with more than one
+            # element is ambiguous``.  Today no datamodule populates
+            # ``semantic_ids`` so the bug stays dormant, but the moment a
+            # multi-class semantic pipeline is wired up the unguarded
+            # ``or`` would crash the first training step.
+            sem_ids = targets.get("semantic_ids")
+            if sem_ids is None:
+                sem_ids = predictions.get("semantic_ids")
             ins = self.instance_loss(
                 predictions["instance"],
                 labels,
@@ -465,12 +481,24 @@ class CombinedLoss(nn.Module):
             # the image tags::
             #     boundary/pred/aff/{...}      <-> boundary/loss/aff
             #     boundary/pred/avg/aff/{...}  <-> boundary/loss/avg/aff
-            # The total weighted sum of both paths is omitted from
-            # scalars to keep the layout uniform with the image tags;
-            # ``boundary/loss`` already aggregates everything for the
-            # head, and TB's "add scalars" can sum the two paths.
+            # The path-totals (CE + Dice + IoU summed by the per-sub
+            # weights) are emitted unconditionally so the scalar set is
+            # stable; the per-sub CE / Dice / IoU breakdowns are
+            # surfaced only when their weight is non-zero, mirroring the
+            # semantic head's pattern above.  Lets you debug "why is
+            # dice high but CE low?" without keeping disabled-sub
+            # scalars in the TB tree.
             out["boundary/loss/aff"] = bnd["aff_pred"]
             out["boundary/loss/avg/aff"] = bnd["aff_avg"]
+            if self.boundary_loss.weight_ce > 0:
+                out["boundary/loss/aff/ce"] = bnd["aff_pred_ce"]
+                out["boundary/loss/avg/aff/ce"] = bnd["aff_avg_ce"]
+            if self.boundary_loss.weight_dice > 0:
+                out["boundary/loss/aff/dice"] = bnd["aff_pred_dice"]
+                out["boundary/loss/avg/aff/dice"] = bnd["aff_avg_dice"]
+            if self.boundary_loss.weight_iou > 0:
+                out["boundary/loss/aff/iou"] = bnd["aff_pred_iou"]
+                out["boundary/loss/avg/aff/iou"] = bnd["aff_avg_iou"]
 
         if self.learned_task_weights:
             if self.weight_semantic > 0:

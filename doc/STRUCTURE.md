@@ -90,8 +90,7 @@ and the loss targets.  No learnable state.
 | `edt.py`                   | Exact Euclidean distance transform (scipy-backed).                     |
 | `find_boundaries.py`       | Connectivity-1 inner/outer boundary masks (cucim / skimage / torch).   |
 | `label.py`                 | Relabel / remap / consolidate instance ids.                            |
-| `defect.py`                | Simulated acquisition defects (scratches, fold-overs).                 |
-| `missing_section.py`       | Drop random z-slices to simulate missing sections.                     |
+| `_region_field.py`         | Private helper for per-voxel per-instance regionprops fields (shared by `direction.py` / `covariance.py`). |
 | `rand_crop_foreground.py`  | Random crop biased toward foreground voxels.                           |
 | `rand_transpose_xy.py`     | Random xy-transpose augmentation.                                      |
 | `resolution_zoom.py`       | Per-axis resolution scaling for multi-resolution training.             |
@@ -198,7 +197,7 @@ concrete `module.py`.
 | File                    | Purpose                                                             |
 | ----------------------- | ------------------------------------------------------------------- |
 | `sliding_window.py`     | Blended sliding-window inference over arbitrarily large volumes.    |
-| `clusterer.py`          | Discriminative-embedding → instance-id clustering (meanshift / BFS).|
+| `clusterer.py`          | Discriminative-embedding → instance-id clustering. Five strategies via `build_clusterer(name=...)`: `soft_meanshift` (differentiable, training-time default), `meanshift` (cuML/sklearn), `hdbscan` (cuML/CPU fallback), `spatial_cc` (connected-components on per-voxel embedding-affinity graph; CuPy/scipy backends), and `hough` (offset-based; for non-embedding heads). |
 
 ### `brainbow/preprocessors/` — format converters
 
@@ -239,18 +238,19 @@ concrete `module.py`.
 
 | Subsystem                               | .py files  |
 | --------------------------------------- | ---------- |
-| `brainbow/transforms/`                  | 11         |
-| `brainbow/models/cosmos_transfer_2_5/`  |  7         |
-| `brainbow/models/vista/`                |  6         |
-| `brainbow/callbacks/tensorboard/`       |  5 (+ pkg) |
-| `brainbow/losses/`                      |  7         |
-| `brainbow/datamodules/` + `datasets/`   |  5 + 6     |
-| `brainbow/preprocessors/`               |  5         |
-| `brainbow/modules/`                     |  7         |
-| `brainbow/metrics/`                     |  3         |
-| `brainbow/inference/`                   |  3         |
-| `brainbow/utils/`                       |  5         |
-| `brainbow/visualizer/`                  |  4 py + 4 static |
+| `brainbow/transforms/`                  | 10 (incl. `__init__`, `_region_field`)               |
+| `brainbow/models/cosmos_transfer_2_5/`  |  7 (incl. `__init__`)                                |
+| `brainbow/models/vista/`                |  6 (incl. `__init__`)                                |
+| `brainbow/callbacks/tensorboard/`       |  6 (incl. `__init__`)                                |
+| `brainbow/losses/`                      |  7 (incl. `__init__`, `_common`)                     |
+| `brainbow/datamodules/` + `datasets/`   |  5 + 7 (datasets incl. `lazy.py`, `_patches.py`)     |
+| `brainbow/preprocessors/`               |  6 (incl. `__init__`, `base`)                        |
+| `brainbow/modules/`                     |  2 (top-level) + 3 + 3 (per arch package)            |
+| `brainbow/metrics/`                     |  3                                                   |
+| `brainbow/inference/`                   |  3                                                   |
+| `brainbow/utils/`                       |  5 (incl. `__init__`)                                |
+| `brainbow/callbacks/`                   |  3 (top-level: `__init__`, `memory.py`, plus `tensorboard/` package above) |
+| `brainbow/visualizer/`                  |  4 py + 4 static                                     |
 
 ---
 

@@ -219,7 +219,7 @@ or metric or callback sees the prediction):
 | ----------- | ------------------------------------------------------ | -------------------------------- |
 | `semantic`  | `sigmoid` on every channel                             | `sigmoid` on every channel       |
 | `instance`  | linear (unbounded embedding)                           | linear                           |
-| `geometry`  | `sigmoid` on ch 0 (raw); linear on cov + dir           | linear (loss handles activation) |
+| `geometry`  | `sigmoid` on ch 0 (raw); linear on dir + cov           | linear (loss handles activation) |
 | `boundary`  | `sigmoid` on every channel (all 10 targets ∈ `[0, 1]`) | n/a                              |
 
 See `brainbow/models/cosmos_transfer_2_5/decoder.py` for the canonical
@@ -344,6 +344,26 @@ TensorBoard's Images and Scalars tabs.
 Clusterers live in
 `brainbow/inference/clusterer.py:build_clusterer` (line 723); the
 default for the instance head is :class:`SoftMeanShift`.
+
+### 8.1 Val/test transform pipeline (deterministic)
+
+`brainbow/datamodules/base.py::CircuitDataModule.get_val_transforms`
+intentionally diverges from the train pipeline:
+
+```
+EnsureChannelFirst → [FindBoundaries(prob=1.0)]
+→ [Pad + CenterCrop(patch_size)]   # or Resize(image_size)
+→ instance_transforms (CC relabel, deterministic)
+→ geometry_transforms (Direction, Covariance — deterministic)
+→ EnsureType
+```
+
+No `RandFlip`, no `RandRotate90`, no `RandTransposeXY`, no
+`Rand3DElastic`, no `RandGaussianNoise`, no `RandAdjustContrast`.
+The eval crops are deterministic (center crop) so the same volume
+produces the same patch every epoch and the metrics are comparable
+across runs.  See [`GOTCHAS.md` #26](./GOTCHAS.md) for the historical
+bug (eval used to share the train pipeline's random hooks).
 
 ---
 

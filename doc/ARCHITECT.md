@@ -218,7 +218,7 @@ upsampling internally.
 | Backbone output / head input | **`feature_size` = 64** |
 | `head_semantic`              | `semantic_channels = 1` |
 | `head_instance`              | `instance_channels = 10` |
-| `head_geometry`              | `geometry_channels = 1 + 6 + 3 = 10` |
+| `head_geometry`              | `geometry_channels = 1 + 3 + 6 = 10` (raw / dir / cov-upper-triangle) |
 
 ### 2.3 Pretraining
 

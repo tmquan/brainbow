@@ -194,15 +194,22 @@ def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
 
 
 def build_datamodule(cfg: DictConfig) -> pl.LightningDataModule:
-    """Instantiate the datamodule selected by ``cfg.data.dataset``."""
+    """Instantiate the datamodule selected by ``cfg.data.dataset``.
+
+    Registry is kept inline (not factored into ``brainbow.datamodules``)
+    so a new dataset is a one-line edit here plus the leaf class --
+    avoids an import-time registry pattern.
+    """
     from brainbow.datamodules import (
         MICRONSDataModule,
+        NeuronsDataModule,
         SNEMI3DDataModule,
     )
 
     datamodule_classes = {
         "snemi3d": SNEMI3DDataModule,
         "microns": MICRONSDataModule,
+        "neurons": NeuronsDataModule,
     }
 
     dataset_type = cfg.data.get("dataset", "snemi3d").lower()

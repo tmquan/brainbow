@@ -5,15 +5,15 @@ Vista3D model wrapper for volumetric connectomics segmentation.
 - Semantic: per-voxel class logits (num_classes channels)
 - Instance: per-voxel embedding vectors for discriminative clustering
   (instance_channels channels)
-- Geometry: per-voxel raw-intensity reconstruction, covariance
-  upper-triangle, and direction.  Channel layout (must match
-  :class:`brainbow.losses.GeometryLoss`)::
+- Geometry: per-voxel raw-intensity reconstruction, direction toward
+  instance centroid, and covariance upper-triangle.  Channel layout
+  (must match :class:`brainbow.losses.GeometryLoss`)::
 
-      ch 0                  : raw intensity
-      ch 1 .. S*(S+1)/2     : covariance upper-triangle
-      ch -S ..              : per-voxel direction toward instance centroid
+      ch 0                          : raw intensity
+      ch 1 .. 1 + S                 : direction (S channels)
+      ch 1 + S .. 1 + S + S*(S+1)/2 : covariance upper-triangle
 
-  ``geometry_channels = 1 + S * (S + 1) // 2 + S`` (= ``10`` in 3-D).
+  ``geometry_channels = 1 + S + S * (S + 1) // 2`` (= ``10`` in 3-D).
 """
 
 import logging

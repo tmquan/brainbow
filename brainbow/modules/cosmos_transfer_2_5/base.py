@@ -177,7 +177,13 @@ class BaseCosmosModule(BaseCircuitModule):
     def configure_optimizers(self) -> Any:
         lr = self.optimizer_config.get("lr", 1e-4)
         wd = self.optimizer_config.get("weight_decay", 1e-5)
-        backbone_lr = self.optimizer_config.get("dit_backbone_lr") or lr
+        # Use explicit ``is None`` so a deliberate ``dit_backbone_lr: 0``
+        # (e.g. to keep the unfrozen DiT weights pinned via gradient-
+        # only updates from learned LR schedulers) is honoured rather
+        # than silently falling back to ``lr`` via ``or``-truthiness.
+        backbone_lr = self.optimizer_config.get("dit_backbone_lr")
+        if backbone_lr is None:
+            backbone_lr = lr
 
         backbone_decay, backbone_no_decay = [], []
         head_decay, head_no_decay = [], []

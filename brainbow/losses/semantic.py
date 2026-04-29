@@ -201,6 +201,8 @@ class SemanticLoss(nn.Module):
         self,
         probs: torch.Tensor,
         class_labels: torch.Tensor,
+        target: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Masked binary cross-entropy on per-voxel probabilities.
 
@@ -217,8 +219,19 @@ class SemanticLoss(nn.Module):
         do the log math in fp32 -- the upcast happens on the clamped
         probabilities, so the clamp actually has teeth and the loss
         stays bounded by ``log(eps)`` instead of blowing up.
+
+        Args:
+            probs:        Already-sliced probability tensor.
+            class_labels: Class-id labels (or pre-built dense target).
+            target:       Optional precomputed dense one-hot target
+                from :meth:`build_target` -- pass it through and we
+                skip the rebuild (``forward`` already calls
+                ``build_target`` once for Dice / IoU).
+            valid_mask:   Companion ``valid_mask`` from
+                :meth:`build_target`.  Pass alongside ``target``.
         """
-        target, valid_mask = self._build_target_onehot(probs, class_labels)
+        if target is None:
+            target, valid_mask = self._build_target_onehot(probs, class_labels)
 
         if self._pos_weight is not None:
             shape = [1, probs.shape[1]] + [1] * (probs.dim() - 2)
@@ -271,7 +284,14 @@ class SemanticLoss(nn.Module):
         zero = torch.zeros((), device=probs.device)
         ctx = self.build_target(probs, class_labels)
 
-        ce = self._compute_loss_ce(ctx["probs"], ctx["class_labels"])
+        # ``ctx["target"]`` is the dense one-hot built once here; we
+        # forward it into BCE so the per-voxel target tensor is built
+        # exactly once per step (instead of twice -- once here and
+        # once inside ``_compute_loss_ce``'s old fallback).
+        ce = self._compute_loss_ce(
+            ctx["probs"], ctx["class_labels"],
+            target=ctx["target"], valid_mask=ctx["valid_mask"],
+        )
         dice = (
             self._compute_loss_dice(ctx["probs"], ctx["target"])
             if self.weight_dice > 0 else zero

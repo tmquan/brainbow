@@ -80,6 +80,15 @@ class GeometryLoss(nn.Module):
         loss_cov:    Regression loss name for covariance.
         loss_raw:    Regression loss name for raw.
         smooth_l1_beta: ``beta`` parameter of smooth-L1 when used.
+        dir_target:  Which scalar field the direction head supervises
+            against -- ``"centroid"`` (vector pointing at the per-
+            instance centroid; the only currently implemented target,
+            see :func:`brainbow.transforms.direction.compute_direction_field`)
+            or ``"skeleton"`` (vector toward the medial axis; **not
+            implemented**, raises at construction).  Stored so the TB
+            callback (`callbacks/tensorboard/heads.py::_log_geometry`)
+            can pick the matching ``geometry/pred/dir_<dir_target>``
+            tag.
     """
 
     def __init__(
@@ -92,6 +101,7 @@ class GeometryLoss(nn.Module):
         loss_cov: str = "l1",
         loss_raw: str = "l1",
         smooth_l1_beta: float = 1.0,
+        dir_target: str = "centroid",
         **kwargs,  # ignored; keeps ``CombinedLoss`` kwargs forwarding flexible
     ) -> None:
         super().__init__()
@@ -103,6 +113,15 @@ class GeometryLoss(nn.Module):
         self.loss_cov = canonical_regression_name(loss_cov)
         self.loss_raw = canonical_regression_name(loss_raw)
         self.smooth_l1_beta = smooth_l1_beta
+        if dir_target not in ("centroid",):
+            raise ValueError(
+                f"GeometryLoss: dir_target={dir_target!r} is not supported; "
+                "only 'centroid' is currently implemented in "
+                "brainbow.transforms.direction.compute_direction_field. "
+                "Either drop the key from your config or implement a new "
+                "branch in that helper."
+            )
+        self.dir_target = dir_target
 
         S = spatial_dims
         self._ch_raw = 1
@@ -351,6 +370,7 @@ class GeometryLoss(nn.Module):
             f"{self.__class__.__name__}("
             f"spatial_dims={self.spatial_dims}, "
             f"channels={self.task_channels}, "
+            f"dir_target='{self.dir_target}', "
             f"loss_dir='{self.loss_dir}', "
             f"loss_cov='{self.loss_cov}', "
             f"loss_raw='{self.loss_raw}', "

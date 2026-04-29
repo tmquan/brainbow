@@ -131,7 +131,9 @@ class InstanceLoss(nn.Module):
             :class:`FindBoundariesd` (label ``0``) **do** contribute to
             the affinity target, which removes the checkerboard
             artifact along instance boundaries that ``background=0``
-            otherwise produces.
+            otherwise produces.  Pass ``None`` to opt out of any
+            masking explicitly (semantically equivalent to ``-1`` here,
+            but the typing matches :class:`BoundaryLoss` for symmetry).
     """
 
     def __init__(
@@ -151,7 +153,7 @@ class InstanceLoss(nn.Module):
         anchor_to_centroid: bool = False,
         centroid_scale: float = 5.0,
         aff_eps: float = 1e-5,
-        background: int = -1,
+        background: Optional[int] = -1,
     ) -> None:
         super().__init__()
         if anchor_to_centroid and normalize_embeddings:
@@ -174,7 +176,9 @@ class InstanceLoss(nn.Module):
         self.anchor_to_centroid = anchor_to_centroid
         self.centroid_scale = centroid_scale
         self.aff_eps = float(aff_eps)
-        self.background = int(background)
+        self.background = (
+            int(background) if background is not None else None
+        )
         self._pool = _pool_fn(spatial_dims)
 
         if self.weight_aff_emb > 0 and self.spatial_dims != 3:
@@ -562,7 +566,13 @@ class InstanceLoss(nn.Module):
 
             # Pair mask: both endpoints foreground.  Exact 0/1 floats,
             # no autograd needed -- this is the supervision footprint.
-            fg = (label != self.background).to(dtype=aff_pred.dtype)
+            # ``background=None`` (no masking) yields an all-ones mask
+            # so every face pair contributes; this matches the no-op
+            # masking branch in :func:`_affinity_target_torch`.
+            if self.background is None:
+                fg = torch.ones_like(label, dtype=aff_pred.dtype)
+            else:
+                fg = (label != self.background).to(dtype=aff_pred.dtype)
             pair_mask = torch.stack([
                 fg * _shift_replicate_torch(fg, axis, shift)
                 for _, axis, shift in _DIRECTIONS

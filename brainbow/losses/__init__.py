@@ -15,7 +15,7 @@ Standalone task losses
     * :class:`SemanticLoss`  -- CE + IoU + Dice on a per-voxel class map.
     * :class:`InstanceLoss`  -- pull / push / norm discriminative loss
       on a per-voxel embedding.
-    * :class:`GeometryLoss`  -- raw / cov-upper-tri / dir regression
+    * :class:`GeometryLoss`  -- raw / dir / cov-upper-tri regression
       (10 channels in 3-D, 5 in 2-D).
     * :class:`BoundaryLoss`  -- 10-channel head: raw(1) + avg RGB(3) +
       6-channel face-affinity, plus a derived soft 6-aff computed from

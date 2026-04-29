@@ -174,8 +174,8 @@ class <Task>Loss(nn.Module):
 | ------------- | ------------------------------------------------------------- | --------------- |
 | SemanticLoss  | `loss`, `ce`, `iou`, `dice`                                   | `semantic_channels` |
 | InstanceLoss  | `loss`, `pull`, `push`, `norm`, `aff_emb`                     | embedding `E`   |
-| GeometryLoss  | `loss`, `raw`, `dir`, `cov`                                   | `1 + S + S*(S+1)//2` |
-| BoundaryLoss  | `loss`, `raw`, `avg`, `aff`, `aff_pred`, `aff_avg`, plus per-path `aff_{pred,avg}_{ce,dice,iou}` | `10`            |
+| GeometryLoss  | `loss`, `raw`, `dir`, `cov`  -- channel layout `[raw(1) \| dir(S) \| cov(S*(S+1)/2)]`, source-of-truth in `geometry.py` | `1 + S + S*(S+1)//2` |
+| BoundaryLoss  | `loss`, `raw`, `avg`, `aff`, `aff_pred`, `aff_avg`, plus per-path `aff_{pred,avg}_{ce,dice,iou}` -- channel layout `[raw(1) \| avg(3) \| aff_pred(6)]` | `10`            |
 
 **Why this matters:**
 
@@ -228,15 +228,37 @@ When the same predicted *field* feeds both a visualisation and a loss,
 both live under the same `<field>` subgroup in TB.  Concrete pairs
 (see `image_logger.py` for the full image side):
 
-| image tag                                | scalar tag             |
-| ---------------------------------------- | ---------------------- |
-| `instance/pred/emb/aff/{t,b,u,d,l,r}`    | `instance/loss/emb/aff` |
-| `boundary/pred/aff/{t,b,u,d,l,r}`        | `boundary/loss/aff`    |
-| `boundary/pred/avg/aff/{t,b,u,d,l,r}`    | `boundary/loss/avg/aff` |
+| image tag                                | scalar tag(s)                                                          |
+| ---------------------------------------- | ----------------------------------------------------------------------- |
+| `instance/pred/emb/aff/{t,b,u,d,l,r}`    | `instance/loss/emb/aff`                                                 |
+| `boundary/pred/aff/{t,b,u,d,l,r}`        | `boundary/loss/aff` (path total) + `boundary/loss/aff/{ce,dice,iou}`*   |
+| `boundary/pred/avg/aff/{t,b,u,d,l,r}`    | `boundary/loss/avg/aff` (path total) + `boundary/loss/avg/aff/{ce,dice,iou}`* |
+
+(* the per-sub-component scalars are emitted only when their weight
+is non-zero — same conditional pattern as `semantic/loss/{iou,dice}`.)
 
 This way, when TensorBoard alphabetically sorts tags, each head's
 scalars cluster next to its images — e.g. `instance/loss/emb/aff`
-sits beside `train/automatic/instance/pred/emb/aff/{t,b,...}`.
+sits beside `train/automatic/instance/pred/emb/aff/{t,b,...}`.  The
+per-sub-component scalars let you debug "why is dice high but CE low?"
+without keeping disabled-sub scalars in the TB tree.
+
+**Visualisation-only mask on aff panels.**  All four affinity image
+groups (`instance/pred/emb/aff`, `boundary/pred/aff`,
+`boundary/pred/avg/aff`, `boundary/true/aff`) are multiplied by the
+predicted semantic foreground (`sem_ids > 0`, falling back to GT
+labels when the semantic head is disabled) **before** being written
+to TB.  This mirrors the supervision footprint so background pixels
+black out and the panels look like what the loss actually saw.  The
+loss continues to consume the **unmasked** aff tensors — the mask is
+display-only.  See `_aff_fg_mask_2d` in
+`brainbow/callbacks/tensorboard/heads.py`.
+
+**Convention:** all `<head>/loss/<sub>` scalars hold the
+**un-weighted-by-head** sub-loss value; only `<head>/loss` (the head
+total) and `loss` (the global total) include the head / path weights.
+This is what lets you reason about each component's contribution
+independent of its multiplier in the current run.
 
 Task losses whose weight is `0.0` are **not instantiated** (not just
 zeroed) so training is faster and memory is smaller.
