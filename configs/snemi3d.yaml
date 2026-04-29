@@ -210,7 +210,7 @@ training:
   #   false / null     -> off
   #   true             -> "reduce-overhead"  (~1 min compile, good runtime)
   #   "max-autotune"   -> best runtime, but 5-15 min first-run compile
-  compile: "max-autotune"
+  compile: true
   compile_fullgraph: true
 
   training_modes:
@@ -349,6 +349,12 @@ loss:
     weight_aff_emb: 1.0           # path weight on the dense face-aff loss
     tau: 1.0                      # bandwidth of the soft similarity kernel
 
+    # `background: -1` keeps every voxel (including `FindBoundariesd`-
+    # zeroed boundary voxels) in the affinity target.  Matches the
+    # boundary head's setting so both heads share the same supervision
+    # footprint and avoids the checkerboard artifact at instance edges.
+    background: -1
+
   # -------------------------------------------------------------------
   # Geometry head -- direction field + covariance + raw reconstruction
   # -------------------------------------------------------------------
@@ -397,10 +403,12 @@ loss:
     weight_aff_avg: 1.0           # path weight on aff derived from predicted avgloc
     tau: 1.0                      # bandwidth of the soft similarity kernel
 
-    # `background: 0` masks out the spurious `0 == 0 -> 1` signal at
-    # background voxels and at the boundary voxels zeroed by
-    # `FindBoundariesd`.  Pass `null` to opt out.
-    background: 0
+    # `background: -1` keeps every voxel (including the boundary voxels
+    # that `FindBoundariesd` zeros to label `0`) in the affinity target.
+    # `background: 0` would zero those voxels' aff target, producing a
+    # checkerboard artifact along instance boundaries in the TB panels.
+    # Pass `null` to opt out of any background masking.
+    background: -1
     class_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]  # BCE pos_weight per direction
     weight_ce: 1.0                # BCE sub-loss; applied to both aff paths
     weight_iou: 0.0               # soft-Jaccard sub-loss; applied to both aff paths

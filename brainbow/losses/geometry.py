@@ -7,13 +7,13 @@ Channel layout (deliberately aligned with :class:`BoundaryLoss`, whose
 ``ch 0`` is also ``raw``)::
 
     ch 0                          := raw  (image intensity, dense)
-    ch 1 .. 1 + S*(S+1)//2        := cov  (upper-triangle covariance, FG-only)
-    ch 1 + S*(S+1)//2 .. 1 + S*(S+1)//2 + S
-                                  := dir  (unit direction vectors, FG-only)
+    ch 1 .. 1 + S                 := dir  (unit direction vectors, FG-only)
+    ch 1 + S .. 1 + S + S*(S+1)//2
+                                  := cov  (upper-triangle covariance, FG-only)
 
-Expected geometry head output has ``1 + S*(S+1)//2 + S`` channels:
-  2-D:  1 + 3 + 2 =  6
-  3-D:  1 + 6 + 3 = 10
+Expected geometry head output has ``1 + S + S*(S+1)//2`` channels:
+  2-D:  1 + 2 + 3 =  6
+  3-D:  1 + 3 + 6 = 10
 """
 
 from __future__ import annotations
@@ -309,13 +309,13 @@ class GeometryLoss(nn.Module):
         zero = torch.zeros((), device=geometry.device)
 
         geom_flat = rearrange(geometry, "b c ... -> b c (...)")
-        # Channel layout: [raw(1) | cov(S*(S+1)/2) | dir(S)]
+        # Channel layout: [raw(1) | dir(S) | cov(S*(S+1)/2)]
         c_raw = self._ch_raw
-        c_cov = c_raw + self._ch_cov
-        c_dir = c_cov + self._ch_dir
+        c_dir = c_raw + self._ch_dir
+        c_cov = c_dir + self._ch_cov
         pred_raw = geom_flat[:, :c_raw]
-        pred_cov = geom_flat[:, c_raw:c_cov]
-        pred_dir = geom_flat[:, c_cov:c_dir]
+        pred_dir = geom_flat[:, c_raw:c_dir]
+        pred_cov = geom_flat[:, c_dir:c_cov]
 
         lbl_flat = rearrange(ins_label, "b ... -> b (...)").long()
         fg = lbl_flat > 0

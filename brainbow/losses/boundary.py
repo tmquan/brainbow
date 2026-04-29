@@ -476,9 +476,14 @@ class BoundaryLoss(nn.Module):
         aff_eps: Numerical stabiliser passed as both ``smooth_nr`` and
             ``smooth_dr`` to :class:`monai.losses.DiceLoss`.
         background: Label value treated as background when building the
-            6 affinity targets.  When set (default ``0``), voxels whose
-            label equals this value contribute ``0`` to all 6
-            face-affinity channels.  Pass ``None`` to opt out.
+            6 affinity targets.  When set, voxels whose label equals
+            this value contribute ``0`` to all 6 face-affinity
+            channels.  Default ``-1`` (no masking, since instance ids
+            are non-negative): boundary voxels zeroed by
+            :class:`FindBoundariesd` (label ``0``) **do** contribute to
+            the affinity target, which removes the checkerboard
+            artifact along instance boundaries that ``background=0``
+            otherwise produces.  Pass ``None`` to opt out.
     """
 
     num_channels: int = _BOUNDARY_CHANNELS
@@ -498,7 +503,7 @@ class BoundaryLoss(nn.Module):
         class_weights: Optional[List[float]] = None,
         foreground_only_loc: bool = True,
         aff_eps: float = 1e-5,
-        background: Optional[int] = 0,
+        background: Optional[int] = -1,
     ) -> None:
         super().__init__()
         self.loss_avg = canonical_regression_name(loss_avg)

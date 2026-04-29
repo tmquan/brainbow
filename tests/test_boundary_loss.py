@@ -390,9 +390,14 @@ class TestBoundaryLoss:
         assert out_a["aff_avg"].item() != pytest.approx(
             out_b["aff_avg"].item(), abs=1e-6,
         )
-        # Direct path is disabled, so its sub-loss must be exactly 0.
-        assert out_a["aff_pred"].item() == 0.0
-        assert out_b["aff_pred"].item() == 0.0
+        # Perturbing only the avg channels (ch 1-3) must not affect the
+        # direct aff sub-loss (ch 4-9 untouched).  Note: ``aff_pred`` in
+        # the returned dict is the un-weighted sub-loss of the direct
+        # path (dice on ch 4-9 vs the binary aff target); it does not
+        # depend on ``weight_aff_pred``.
+        assert out_a["aff_pred"].item() == pytest.approx(
+            out_b["aff_pred"].item(), abs=1e-6,
+        )
 
     def test_wrong_prediction_channels_raises(self, batch) -> None:
         _, labels, image = batch

@@ -14,10 +14,10 @@ visualisation consume the outputs)::
                 space -- sigmoid would collapse it into the unit
                 hypercube)
     geometry :  sigmoid on ch 0 (``raw``, [0, 1] target); linear on
-                ``cov`` and ``dir`` (signed values -- sigmoid would
+                ``dir`` and ``cov`` (signed values -- sigmoid would
                 kill the sign).  Channel layout is owned by
                 :class:`brainbow.losses.geometry.GeometryLoss`::
-                    [raw(1) | cov(S*(S+1)/2) | dir(S)]
+                    [raw(1) | dir(S) | cov(S*(S+1)/2)]
     boundary :  sigmoid on every channel (every target lives in
                 [0, 1]: raw intensity, normalised centroid xyz colour,
                 binary face affinities).  Channel layout is owned by
@@ -275,12 +275,12 @@ class _DecoderAdapter3D(nn.Module):
             # trap every voxel in the unit hypercube.
             out["instance"] = self.head_instance(decoded)
         if "geometry" not in self._disabled_heads:
-            # Geometry head layout: [raw(1) | cov(S*(S+1)/2) | dir(S)].
+            # Geometry head layout: [raw(1) | dir(S) | cov(S*(S+1)/2)].
             # - raw (ch 0)    : [0, 1] target -> sigmoid.
-            # - cov (ch 1..)  : trace-normalised covariance with signed
-            #   off-diagonals; leave linear (sigmoid would kill the sign).
-            # - dir (last S)  : signed unit-vector components in [-1, 1];
-            #   leave linear for the same reason.
+            # - dir (ch 1..S) : signed unit-vector components in [-1, 1];
+            #   leave linear (sigmoid would kill the sign).
+            # - cov (last T)  : trace-normalised covariance with signed
+            #   off-diagonals; leave linear for the same reason.
             # Concatenation (not in-place) keeps autograd happy and avoids
             # a view that would break torch.compile.
             geom = self.head_geometry(decoded)

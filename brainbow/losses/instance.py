@@ -126,7 +126,12 @@ class InstanceLoss(nn.Module):
             ``label == background`` get aff target ``0`` across all 6
             directions and are masked out of the loss together with
             their face neighbours -- the bg embedding receives no
-            ``aff_emb`` gradient.
+            ``aff_emb`` gradient.  Default ``-1`` (no masking, since
+            instance ids are non-negative): boundary voxels zeroed by
+            :class:`FindBoundariesd` (label ``0``) **do** contribute to
+            the affinity target, which removes the checkerboard
+            artifact along instance boundaries that ``background=0``
+            otherwise produces.
     """
 
     def __init__(
@@ -146,7 +151,7 @@ class InstanceLoss(nn.Module):
         anchor_to_centroid: bool = False,
         centroid_scale: float = 5.0,
         aff_eps: float = 1e-5,
-        background: int = 0,
+        background: int = -1,
     ) -> None:
         super().__init__()
         if anchor_to_centroid and normalize_embeddings:

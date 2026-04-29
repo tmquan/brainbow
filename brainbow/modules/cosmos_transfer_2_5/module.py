@@ -17,7 +17,7 @@ class CosmosTransfer3DModule(BaseCosmosModule):
 
     * ``semantic`` ``[B, L, D, H, W]``      -- per-voxel class logits.
     * ``instance`` ``[B, E, D, H, W]``      -- discriminative embedding.
-    * ``geometry`` ``[B, G, D, H, W]``      -- raw + cov-upper-tri + dir.
+    * ``geometry`` ``[B, G, D, H, W]``      -- raw + dir + cov-upper-tri.
     * ``boundary`` ``[B, C, D, H, W]``      -- raw + avg RGB + 6 direct face-affinity (10 channels).
 
     Heads with weight ``0`` in the loss config are not constructed; see

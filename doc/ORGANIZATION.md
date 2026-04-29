@@ -174,7 +174,7 @@ class <Task>Loss(nn.Module):
 | ------------- | ------------------------------------------------------------- | --------------- |
 | SemanticLoss  | `loss`, `ce`, `iou`, `dice`                                   | `semantic_channels` |
 | InstanceLoss  | `loss`, `pull`, `push`, `norm`, `aff_emb`                     | embedding `E`   |
-| GeometryLoss  | `loss`, `raw`, `cov`, `dir`                                   | `1 + S*(S+1)//2 + S` |
+| GeometryLoss  | `loss`, `raw`, `dir`, `cov`                                   | `1 + S + S*(S+1)//2` |
 | BoundaryLoss  | `loss`, `raw`, `avg`, `aff`, `aff_pred`, `aff_avg`, plus per-path `aff_{pred,avg}_{ce,dice,iou}` | `10`            |
 
 **Why this matters:**

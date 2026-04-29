@@ -416,7 +416,7 @@ class TestGeometryLoss:
     @pytest.fixture()
     def geometry_inputs(self):
         torch.manual_seed(2)
-        # 2-D geometry head: raw(1) + cov(3) + dir(2) = 6 channels.
+        # 2-D geometry head: raw(1) + dir(2) + cov(3) = 6 channels.
         geom = torch.randn(1, 6, 16, 16, requires_grad=True)
         ins_label = torch.zeros(1, 16, 16, dtype=torch.long)
         ins_label[:, :8, :8] = 1

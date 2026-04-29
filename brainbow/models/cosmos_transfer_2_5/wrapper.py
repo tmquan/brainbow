@@ -50,9 +50,9 @@ class CosmosTransfer3DWrapper(nn.Module):
     - ``semantic``  [B, num_classes, D, H, W]
     - ``instance``  [B, instance_channels, D, H, W]
     - ``geometry``  [B, G, D, H, W]  where
-      ``G = 1 + S * (S + 1) // 2 + S = 1 (raw) + 6 (cov upper-tri) + 3 (dir) = 10``
+      ``G = 1 + S + S * (S + 1) // 2 = 1 (raw) + 3 (dir) + 6 (cov upper-tri) = 10``
       in 3-D.  Layout (must match :class:`brainbow.losses.GeometryLoss`):
-      ch 0 = raw, ch 1..6 = covariance upper-triangle, ch 7..9 = direction.
+      ch 0 = raw, ch 1..3 = direction, ch 4..9 = covariance upper-triangle.
     - ``boundary``  [B, boundary_channels, D, H, W]
       (1 raw + 3 avg RGB + 6 direct face-affinity = 10 by default).
       The boundary loss additionally derives a soft 6-face affinity
@@ -86,7 +86,7 @@ class CosmosTransfer3DWrapper(nn.Module):
         >>> out = model(x)
         >>> out["semantic"].shape   # [1, 1, 32, 64, 64]
         >>> out["instance"].shape   # [1, 10, 32, 64, 64]
-        >>> out["geometry"].shape   # [1, 10, 32, 64, 64]  (raw=1 + cov_tri=6 + dir=3)
+        >>> out["geometry"].shape   # [1, 10, 32, 64, 64]  (raw=1 + dir=3 + cov_tri=6)
         >>> out["boundary"].shape   # [1, 10, 32, 64, 64]  (raw=1 + avg=3 + aff=6)
     """
 
@@ -132,9 +132,9 @@ class CosmosTransfer3DWrapper(nn.Module):
         self.dropout = dropout
 
         S = _SPATIAL_DIMS
-        # Geometry head layout: raw (1) + cov upper-tri (S*(S+1)/2) + dir (S).
+        # Geometry head layout: raw (1) + dir (S) + cov upper-tri (S*(S+1)/2).
         # Matches BoundaryLoss channel convention with raw at ch 0.
-        self.geometry_channels = 1 + S * (S + 1) // 2 + S
+        self.geometry_channels = 1 + S + S * (S + 1) // 2
 
         self._dtype = {
             "bf16": torch.bfloat16,

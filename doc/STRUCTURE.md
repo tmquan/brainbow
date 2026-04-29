@@ -124,7 +124,7 @@ All task losses follow a uniform skeleton (see `ORGANIZATION.md` §5).
 | `_common.py`    | Shared regression-loss name resolution (`l1` / `mse` / `smooth_l1` + aliases). |
 | `semantic.py`   | `SemanticLoss` — CE + IoU + Dice (sigmoid or softmax mode).                    |
 | `instance.py`   | `InstanceLoss` — pull / push / norm discriminative embedding loss.             |
-| `geometry.py`   | `GeometryLoss` — raw(1) + cov upper-tri(S·(S+1)/2) + dir(S) regression.        |
+| `geometry.py`   | `GeometryLoss` — raw(1) + dir(S) + cov upper-tri(S·(S+1)/2) regression.        |
 | `boundary.py`   | `BoundaryLoss` — 10-ch head: raw(1) + avg RGB(3) + direct face-affinity(6); loss also derives a soft 6-aff from predicted avgloc for dual supervision (BCE / soft-Dice / soft-IoU on both paths). |
 | `combined.py`   | `CombinedLoss` — weighted sum with head-oriented output key hierarchy.         |
 

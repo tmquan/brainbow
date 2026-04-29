@@ -46,6 +46,37 @@ from brainbow.callbacks.tensorboard.viz import (
 _AFF_TAG_NAMES: Tuple[str, ...] = tuple(name.lower() for name in _BND_AFF_NAMES)
 
 
+def _aff_fg_mask_2d(
+    sem_ids: Optional[torch.Tensor],
+    labels: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Build a 2-D foreground mask for affinity-panel visualisation.
+
+    Used purely for display: the boundary-head and instance-head
+    affinity panels are multiplied by this mask so background pixels
+    are blacked out and the panels mirror the supervision footprint
+    (which itself ignores bg-bg face pairs).  This is *visualisation
+    only* -- the loss continues to consume the unmasked aff tensors.
+
+    Resolution order:
+      1. ``sem_ids`` (predicted semantic class map, central slice)
+         -- preferred since it reflects what the deployed model sees.
+      2. ``labels`` (GT instance ids, central slice)
+         -- fallback when the semantic head is disabled.
+      3. ``None`` -- caller skips the mask entirely (panels emitted
+         as-is).
+
+    Returns:
+        ``[n, 1, H, W]`` float32 mask in ``{0, 1}``, broadcastable
+        over the affinity channel axis, or ``None`` when neither
+        source is available.
+    """
+    src = sem_ids if sem_ids is not None else labels
+    if src is None:
+        return None
+    return rearrange((src > 0).to(torch.float32), "b ... -> b 1 ...")
+
+
 def _log_semantic(
     tb: Any,
     ctx: TagContext,
@@ -150,15 +181,20 @@ def _log_instance(
     # Derived face-affinity from the embedding (3-D only).  Mirrors
     # boundary/pred/avg/aff/{...}: compute on the 3-D prediction so
     # Z-direction shifts are meaningful, then take the central slice.
+    # Visualisation is masked by the predicted semantic foreground
+    # (falling back to GT labels if the semantic head is disabled) so
+    # background pixels are blacked out and the panel reflects the
+    # supervision footprint, not the model's free-form bg embedding.
     if inst_3d.dim() == 5:
         emb = inst_3d
         if normalize_embeddings:
             emb = torch.nn.functional.normalize(emb, p=2, dim=1, eps=1e-6)
         derived_aff = soft_aff_from_field(emb, tau=tau)
         derived_aff_2d = _to_2d(derived_aff)
+        aff_mask_2d = _aff_fg_mask_2d(sem_ids, labels)
         for k, name in enumerate(_AFF_TAG_NAMES):
             panel = repeat(
-                derived_aff_2d[:, k:k + 1].clamp(0.0, 1.0),
+                (derived_aff_2d[:, k:k + 1] * aff_mask_2d).clamp(0.0, 1.0),
                 "b 1 h w -> b 3 h w",
             )
             tb.add_images(
@@ -227,18 +263,18 @@ def _log_geometry(
     Channel layout matches :class:`brainbow.losses.geometry.GeometryLoss`::
 
         ch 0                          := raw   (1 channel, grayscale)
-        ch 1 .. 1 + S*(S+1)//2        := cov   (upper-triangle covariance)
-        ch 1 + S*(S+1)//2 .. channels := dir   (S channels)
+        ch 1 .. 1 + S                 := dir   (S channels)
+        ch 1 + S .. channels          := cov   (upper-triangle covariance)
     """
     if "geometry" not in preds:
         return
     head = ctx.for_head("geometry")
     S = spatial_dims
     ch_raw = 1
-    ch_cov_tri = S * (S + 1) // 2
     ch_dir = S
-    c_cov_end = ch_raw + ch_cov_tri
-    c_dir_end = c_cov_end + ch_dir
+    ch_cov_tri = S * (S + 1) // 2
+    c_dir_end = ch_raw + ch_dir
+    c_cov_end = c_dir_end + ch_cov_tri
     geom = _to_2d(preds["geometry"][:n])
     if sem_ids is not None:
         fg_mask_pred = (sem_ids > 0).long()
@@ -248,14 +284,14 @@ def _log_geometry(
     g_raw = geom[:, :ch_raw].clamp(0.0, 1.0)
     g_raw_rgb = repeat(g_raw, "b 1 h w -> b 3 h w")
 
-    cov_tri = geom[:, ch_raw:c_cov_end]
-    cov_mat = upper_tri_channels_to_matrix(cov_tri, S)
-    g_cov_rgb = _render_cov_glyphs(cov_mat, img_gray, fg_mask_pred, S)
-
     g_dir_rgb = _render_dir_quiver(
-        geom[:, c_cov_end:c_dir_end], img_gray, fg_mask_pred, S,
+        geom[:, ch_raw:c_dir_end], img_gray, fg_mask_pred, S,
         dir_target=dir_target,
     )
+
+    cov_tri = geom[:, c_dir_end:c_cov_end]
+    cov_mat = upper_tri_channels_to_matrix(cov_tri, S)
+    g_cov_rgb = _render_cov_glyphs(cov_mat, img_gray, fg_mask_pred, S)
 
     tb.add_images(head.tag("pred/raw"), g_raw_rgb, global_step=epoch)
     tb.add_images(
@@ -273,6 +309,8 @@ def _log_boundary(
     *,
     boundary_target: Optional[torch.Tensor] = None,
     tau: float = 1.0,
+    sem_ids: Optional[torch.Tensor] = None,
+    labels: Optional[torch.Tensor] = None,
 ) -> None:
     """Log the boundary panels under ``{stage}/{mode}/boundary/``.
 
@@ -302,24 +340,39 @@ def _log_boundary(
         tau: Bandwidth used for the derived ``aff_avg`` panels; should
             match :class:`brainbow.losses.BoundaryLoss.tau` for the
             visualisation to mirror the supervision signal.
+        sem_ids: Optional 2-D ``[n, H, W]`` predicted semantic class
+            map.  Used purely for visualisation masking: the affinity
+            panels (direct ``pred/aff/...``, derived ``pred/avg/aff/...``,
+            and target ``true/aff/...``) are multiplied by
+            ``(sem_ids > 0)`` so background voxels are blacked out and
+            the displayed aff field mirrors the supervised footprint.
+            ``None`` falls back to the GT ``labels`` if available, then
+            to an all-ones mask.
+        labels: Optional 2-D ``[n, H, W]`` GT instance ids, used as the
+            visualisation-mask fallback when ``sem_ids`` is ``None``.
     """
     if "boundary" not in preds:
         return
     head = ctx.for_head("boundary")
     bnd_pred_3d = preds["boundary"][:n]
     bnd_pred = _to_2d(bnd_pred_3d)
-    _add_boundary_panels(tb, head, "pred", bnd_pred, epoch, is_pred=True)
+    aff_mask_2d = _aff_fg_mask_2d(sem_ids, labels)
+    _add_boundary_panels(
+        tb, head, "pred", bnd_pred, epoch,
+        is_pred=True, aff_mask_2d=aff_mask_2d,
+    )
 
     # Derived aff_avg = soft_aff_from_avg(predicted avg, tau).  Compute
     # on the 3-D prediction so the Z-direction shifts are meaningful,
-    # then _to_2d the 6-channel result.
+    # then _to_2d the 6-channel result.  Masked by predicted semantic
+    # foreground for visualisation parity with the direct-aff panels.
     if bnd_pred_3d.dim() == 5:
         avg_3d = bnd_pred_3d[:, _AVG_START:_AVG_END]
         derived_aff = soft_aff_from_avg(avg_3d, tau=tau)
         derived_aff_2d = _to_2d(derived_aff)
         for k, name in enumerate(_AFF_TAG_NAMES):
             panel = repeat(
-                derived_aff_2d[:, k:k + 1].clamp(0.0, 1.0),
+                (derived_aff_2d[:, k:k + 1] * aff_mask_2d).clamp(0.0, 1.0),
                 "b 1 h w -> b 3 h w",
             )
             tb.add_images(
@@ -328,7 +381,10 @@ def _log_boundary(
 
     if boundary_target is not None:
         bnd_true = _to_2d(boundary_target[:n])
-        _add_boundary_panels(tb, head, "true", bnd_true, epoch, is_pred=False)
+        _add_boundary_panels(
+            tb, head, "true", bnd_true, epoch,
+            is_pred=False, aff_mask_2d=aff_mask_2d,
+        )
 
 
 def _add_boundary_panels(
@@ -339,6 +395,7 @@ def _add_boundary_panels(
     epoch: int,
     *,
     is_pred: bool,
+    aff_mask_2d: Optional[torch.Tensor] = None,
 ) -> None:
     """Split a ``[n, 10, H, W]`` boundary tensor into its sub-panels.
 
@@ -401,6 +458,8 @@ def _add_boundary_panels(
         f"affinity channel / tag count mismatch: tensor has {aff.shape[1]} "
         f"channels, expected {_N_AFF} (tags={_AFF_TAG_NAMES})."
     )
+    if aff_mask_2d is not None:
+        aff = aff * aff_mask_2d
     for k, name in enumerate(_AFF_TAG_NAMES):
         panel = repeat(aff[:, k:k + 1], "b 1 h w -> b 3 h w")
         tb.add_images(
@@ -442,7 +501,8 @@ def _log_predictions(
         {ctx.prefix}/semantic/pred
         {ctx.prefix}/instance/pred/emb/{pca|svd|umap}
         {ctx.prefix}/instance/pred/emb/aff/{t,b,u,d,l,r} (kernel-derived
-            from the predicted embedding via soft_aff_from_field)
+            from the predicted embedding via soft_aff_from_field;
+            masked by predicted semantic foreground for display)
         {ctx.prefix}/instance/pred/label                 (if clusterer)
         {ctx.prefix}/geometry/pred/dir_{centroid|skeleton}
         {ctx.prefix}/geometry/pred/cov
@@ -450,13 +510,16 @@ def _log_predictions(
         {ctx.prefix}/boundary/pred/raw
         {ctx.prefix}/boundary/pred/avg
         {ctx.prefix}/boundary/pred/aff/{t,b,u,d,l,r}     (direct aff;
-            Z-Y-X order)
+            Z-Y-X order; masked by predicted semantic foreground
+            for display)
         {ctx.prefix}/boundary/pred/avg/aff/{t,b,u,d,l,r} (derived from
-            predicted avgloc via soft_aff_from_avg)
+            predicted avgloc via soft_aff_from_avg; masked by
+            predicted semantic foreground for display)
         {ctx.prefix}/boundary/true/avg                   (if target;
             ``true/raw`` is omitted because it duplicates
             ``{ctx.prefix}/true/image``)
-        {ctx.prefix}/boundary/true/aff/{t,b,u,d,l,r}     (if target)
+        {ctx.prefix}/boundary/true/aff/{t,b,u,d,l,r}     (if target;
+            masked by predicted semantic foreground for display)
 
     Args:
         tb: TensorBoard SummaryWriter.
@@ -517,6 +580,7 @@ def _log_predictions(
     _log_boundary(
         tb, ctx, preds, n, epoch,
         boundary_target=boundary_target, tau=boundary_tau,
+        sem_ids=sem_ids, labels=labels,
     )
 
 

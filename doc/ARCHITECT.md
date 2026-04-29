@@ -69,7 +69,7 @@ instance for exact numbers.
 | Decoder output (trilinear up)| **64**   | 1                       |
 | `head_semantic`              | `semantic_channels = 1`   |
 | `head_instance`              | `instance_channels = 10`  |
-| `head_geometry`              | `geometry_channels = 1 + 6 + 3 = 10`  (raw / cov-upper-triangle / dir) |
+| `head_geometry`              | `geometry_channels = 1 + 3 + 6 = 10`  (raw / dir / cov-upper-triangle) |
 | `head_boundary`              | `boundary_channels = 1 + 3 + 6 = 10`  (raw / avg RGB / direct aff). The loss adds a 6-channel aff derived from the predicted avgloc on top of these 10 outputs — it doesn't change the head width. |
 
 ### 1.3 The DiT variant (2B)
@@ -78,16 +78,16 @@ From `brainbow/models/cosmos_transfer_2_5/variants.py` (`_VARIANT_CONFIGS["2B"]`
 
 | Key                    | Value |
 |------------------------|-------|
-| HF repo                | `nvidia/Cosmos-Transfer2.5-2B` |
-| Revision               | `diffusers/general` |
-| `hidden_dim`           | **2048** |
-| `num_layers`           | **28** |
-| `num_heads`            | **16** (head_dim 128) |
-| `mlp_ratio`            | **4** |
-| `latent_channels`      | **16** |
-| `patch_size`           | **2** |
-| `spatial_compression`  | **8** |
-| `temporal_compression` | **4** |
+| HF repo                | `nvidia/Cosmos-Transfer2.5-2B`   |
+| Revision               | `diffusers/general`              |
+| `hidden_dim`           | **2048**                         |
+| `num_layers`           | **28**                           |
+| `num_heads`            | **16** (head_dim 128)            |
+| `latent_channels`      | **16**                           |
+| `spatial_compression`  | **8**                            |
+| `temporal_compression` | **4**                            |
+| `mlp_ratio`            | **4**                            |
+| `patch_size`           | **2**                            |
 | Default `feature_layers` | `{n/4, n/2, 3n/4, n-1}` → `{7, 14, 21, 27}` |
 
 Per-block parameter budget:

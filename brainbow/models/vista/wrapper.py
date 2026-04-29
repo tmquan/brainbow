@@ -69,7 +69,7 @@ class Vista3DWrapper(nn.Module):
         >>> out = model(x)
         >>> out['semantic'].shape   # [1, 16, 64, 64, 64]
         >>> out['instance'].shape   # [1, 10, 64, 64, 64]
-        >>> out['geometry'].shape   # [1, 10, 64, 64, 64]  (raw=1 + cov_tri=6 + dir=3)
+        >>> out['geometry'].shape   # [1, 10, 64, 64, 64]  (raw=1 + dir=3 + cov_tri=6)
     """
 
     def __init__(
@@ -97,9 +97,9 @@ class Vista3DWrapper(nn.Module):
         self._pretrained = pretrained
 
         S = _SPATIAL_DIMS
-        # Geometry head layout: raw (1) + cov upper-tri (S*(S+1)/2) + dir (S).
+        # Geometry head layout: raw (1) + dir (S) + cov upper-tri (S*(S+1)/2).
         # Matches BoundaryLoss channel convention with raw at ch 0.
-        self.geometry_channels = 1 + S * (S + 1) // 2 + S
+        self.geometry_channels = 1 + S + S * (S + 1) // 2
 
         self._build_backbone(encoder_name, **kwargs)
 
