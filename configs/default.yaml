@@ -59,9 +59,7 @@ data:
 model:
   type: cosmostransfer3d  # Options: cosmostransfer3d, vista3d
   in_channels: 1
-  semantic_channels: 1    # Semantic head output channels (1 = binary FG / BG)
-  instance_channels: 10   # Per-voxel embedding dim for the instance head
-  boundary_channels: 10   # Fixed by the loss (raw(1) + avg RGB(3) + direct aff(6))
+  head_channels: 30       # Unified head: raw(1)+sem(1)+dir(3)+cov(6)+avg(3)+emb(16)
   feature_size: 64
   dropout: 0.2
   # If true, the wrapper will auto-pull pretrained weights from HuggingFace
@@ -88,46 +86,44 @@ optimizer:
 # nested mapping without ``weight:`` defaults to ``weight: 1.0``; set
 # ``weight: 0`` (scalar or nested) to disable a head entirely.
 loss:
-  ignore_index: -100              # label value excluded from every loss term
+  ignore_index: -100              # semantic label value excluded from BCE
+  background: -1                  # aff target background mask; -1 = keep every voxel
 
-  # Semantic head (sigmoid; multi-label binary per channel).  The model
-  # wrapper applies sigmoid to the semantic head before the loss sees it.
-  weight_semantic:
+  weight_raw:
     weight: 1.0
-    active_classes: null          # null = all channels; N = only first N
-    weight_ce: 1.0                # binary cross-entropy on sigmoid probs
-    weight_iou: 1.0               # soft-Jaccard
-    weight_dice: 1.0              # soft-Dice
-
-  # Instance head (discriminative embedding; pull / push / norm + an
-  # optional dense face-affinity term `aff_emb` derived from the
-  # embedding via `exp(-tau * ||emb[v] - emb[v+dir]||_1)`, supervised
-  # against the label-derived binary aff target with masked soft-Dice).
-  weight_instance:
+    loss: l1
+  weight_sem:
     weight: 1.0
-    weight_pull: 1.0              # intra-cluster pull, hinge at delta_v
-    weight_push: 1.0              # inter-cluster push, hinge at delta_d
-    weight_norm: 0.001            # mild centroid-norm regulariser
-    weight_aff_emb: 0.0           # 0 disables the dense face-aff path; recipes opt in
-    tau: 1.0                      # bandwidth of the soft similarity kernel
+    weight_ce: 1.0
+    weight_dice: 1.0
+  weight_dir:
+    weight: 0.0
+    loss: l1
+  weight_cov:
+    weight: 0.0
+    loss: l1
+  weight_avg:
+    weight: 0.0
+    loss: l1
+  weight_emb:
+    weight: 1.0
+    weight_pull: 1.0
+    weight_push: 1.0
+    weight_norm: 0.001
     delta_v: 0.5
     delta_d: 1.5
-
-  # Geometry head (direction + covariance + raw).
-  weight_geometry:
-    weight: 0.0                   # disabled by default; enable per-recipe
-    weight_dir: 1.0
-    weight_cov: 0.0
-    weight_raw: 1.0
-    loss_dir: smooth_l1           # smooth_l1 / mse / l1
-    loss_cov: mse                 # mse / l1 / smooth_l1
-    loss_raw: l1                  # l1 / mse / smooth_l1
-
-  # Boundary head (10-channel head; raw + avg + direct aff, plus a
-  # derived soft-aff from the predicted avgloc for dual supervision).
-  # Off by default; recipes (e.g. ``snemi3d``) enable it.
-  weight_boundary:
+    normalize_embeddings: false
+    max_hard_pairs: 0
+  weight_aff_emb:
     weight: 0.0
+    weight_ce: 0.0
+    weight_dice: 1.0
+    tau: 1.0
+  weight_aff_avg:
+    weight: 0.0
+    weight_ce: 0.0
+    weight_dice: 1.0
+    tau: 1.0
 
 # Training configuration
 training:

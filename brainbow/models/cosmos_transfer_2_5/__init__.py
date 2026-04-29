@@ -2,19 +2,12 @@
 Cosmos-Transfer2.5 **3D** model wrapper for volumetric connectomics segmentation.
 
 Adapts the Cosmos-Transfer2.5 DiT backbone (2B or 14B) as a feature
-extractor for the four-head volumetric segmentation task:
+extractor for the unified 30-channel volumetric segmentation head:
 
-- **Semantic**: per-voxel class logits  (``semantic_channels`` channels)
-- **Instance**: per-voxel embedding vectors  (``instance_channels`` channels)
-- **Geometry**: per-voxel raw intensity, direction, and covariance.
-  Channel layout mirrors BoundaryLoss with ``ch 0`` = raw: ``[raw(1) |
-  dir(S) | cov(S*(S+1)/2)]`` -- 10 channels in 3-D. Source of truth is
-  :class:`brainbow.losses.GeometryLoss`.
-- **Boundary**: per-voxel raw-intensity + per-instance centroid colour +
-  direct face-affinity (``boundary_channels`` = 10: 1 raw, 3 avg RGB,
-  6 face-affinity neighbours in Z-Y-X order T/B/U/D/L/R).  The loss
-  also derives a soft 6-aff from the predicted avgloc for dual
-  supervision; see :class:`brainbow.losses.BoundaryLoss`.
+``raw(1) | sem(1) | dir(3) | cov(6) | avg(3) | emb(16)``
+
+See :mod:`brainbow.losses._common` for the canonical slice constants and
+12-direction second-order affinity convention.
 
 Cosmos-Transfer2.5 is natively a video model with temporal + spatial
 dimensions.  For volumetric EM data the depth axis maps directly to the
@@ -33,7 +26,7 @@ Module layout::
     hf_loader.py      -- rank-aware HuggingFace snapshot download
     standalone_dit.py -- _DiTBlock / _StandaloneDiT3D (random-init fallback)
     decoder.py        -- _FeatureProjector3D, _ProgressiveUpsampler3D,
-                         _DecoderAdapter3D (VAE decoder + task heads)
+                         _DecoderAdapter3D (VAE decoder + unified head)
     wrapper.py        -- CosmosTransfer3DWrapper (public API)
 
 References:

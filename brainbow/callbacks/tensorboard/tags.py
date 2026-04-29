@@ -1,25 +1,21 @@
 """Hierarchical TensorBoard tag builder.
 
-Every image and scalar tag in the :mod:`brainbow.callbacks.tensorboard`
-subpackage is produced through :class:`TagContext` so that the layout
-``{stage}/{mode}/[{head}/]{panel}`` is enforced in one place.
+Every image tag in :mod:`brainbow.callbacks.tensorboard` is produced
+through :class:`TagContext` so the layout ``{stage}/{mode}/{panel}`` is
+enforced in one place.
 """
 
 from dataclasses import dataclass, replace
-from typing import Optional, Tuple
-
-#: Heads that produce their own sub-group inside ``{stage}/{mode}/``.
-#: Ordering is purely cosmetic (controls the order of calls in
-#: ``_log_predictions``; TB itself sorts tags alphabetically).
-HEADS: Tuple[str, ...] = ("semantic", "instance", "geometry", "boundary")
+from typing import Optional
 
 
 @dataclass(frozen=True)
 class TagContext:
     """Hierarchical TB tag builder: ``{stage}/{mode}/[{head}/]{panel}``.
 
-    Instances are immutable; use :meth:`for_head` to descend into a
-    per-head namespace without mutating the parent context.
+    ``head`` is retained only as a lightweight compatibility shim for
+    older call sites; the unified-head logger passes ``head=None`` and
+    encodes field names directly in ``panel`` (e.g. ``pred/emb/pca``).
     """
 
     stage: str                        # "train" | "val"

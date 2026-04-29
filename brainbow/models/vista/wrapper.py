@@ -1,20 +1,4 @@
-"""
-Vista3D model wrapper for volumetric connectomics segmentation.
-
-3D version of the Vista architecture with three parallel task heads:
-- Semantic: per-voxel class logits (num_classes channels)
-- Instance: per-voxel embedding vectors for discriminative clustering
-  (instance_channels channels)
-- Geometry: per-voxel raw-intensity reconstruction, direction toward
-  instance centroid, and covariance upper-triangle.  Channel layout
-  (must match :class:`brainbow.losses.GeometryLoss`)::
-
-      ch 0                          : raw intensity
-      ch 1 .. 1 + S                 : direction (S channels)
-      ch 1 + S .. 1 + S + S*(S+1)/2 : covariance upper-triangle
-
-  ``geometry_channels = 1 + S + S * (S + 1) // 2`` (= ``10`` in 3-D).
-"""
+"""Vista3D wrapper with one unified 30-channel dense-prediction head."""
 
 import logging
 from typing import Any, Dict, Optional
@@ -28,6 +12,7 @@ from brainbow.models.vista.hf_loader import (
     DEFAULT_VISTA3D_REVISION,
     load_pretrained_vista3d_encoder,
 )
+from brainbow.losses import HEAD_CHANNELS, SEM_SLICE
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +28,7 @@ class Vista3DWrapper(nn.Module):
 
     Args:
         in_channels: Number of input channels (default: 1 for EM).
-        num_classes: Number of semantic classes (default: 16).
-            Set higher than currently needed to leave headroom for
-            future class additions without retraining the backbone.
-        instance_channels: Per-voxel instance embedding dimensionality
-            (default: 10).
+        head_channels: Unified dense head width (default 30).
         feature_size: Base feature dimension from backbone (default: 64).
             Set to 48 to load the pretrained MONAI VISTA3D encoder
             cleanly (upstream uses ``init_filters=48``).
@@ -61,21 +42,16 @@ class Vista3DWrapper(nn.Module):
             overrides for the HuggingFace download.
 
     Example:
-        >>> model = Vista3DWrapper(
-        ...     in_channels=1, num_classes=16, instance_channels=10,
-        ... )
+        >>> model = Vista3DWrapper(in_channels=1)
         >>> x = torch.randn(1, 1, 64, 64, 64)
         >>> out = model(x)
-        >>> out['semantic'].shape   # [1, 16, 64, 64, 64]
-        >>> out['instance'].shape   # [1, 10, 64, 64, 64]
-        >>> out['geometry'].shape   # [1, 10, 64, 64, 64]  (raw=1 + dir=3 + cov_tri=6)
+        >>> out.shape   # [1, 30, 64, 64, 64]
     """
 
     def __init__(
         self,
         in_channels: int = 1,
-        num_classes: int = 16,
-        instance_channels: int = 10,
+        head_channels: int = HEAD_CHANNELS,
         feature_size: int = 64,
         encoder_name: str = "vista3d",
         dropout: float = 0.0,
@@ -88,17 +64,11 @@ class Vista3DWrapper(nn.Module):
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
-        self.num_classes = num_classes
-        self.instance_channels = instance_channels
+        self.head_channels = int(head_channels)
         self.feature_size = feature_size
         self.spatial_dims = _SPATIAL_DIMS
         self.dropout = dropout
         self._pretrained = pretrained
-
-        S = _SPATIAL_DIMS
-        # Geometry head layout: raw (1) + dir (S) + cov upper-tri (S*(S+1)/2).
-        # Matches BoundaryLoss channel convention with raw at ch 0.
-        self.geometry_channels = 1 + S + S * (S + 1) // 2
 
         self._build_backbone(encoder_name, **kwargs)
 
@@ -110,29 +80,17 @@ class Vista3DWrapper(nn.Module):
                 hf_token=hf_token,
             )
 
-        # VISTA3D-style task heads.  Each head mirrors MONAI's real
+        # VISTA3D-style unified task head.  It mirrors MONAI's real
         # ``ClassMappingClassify.image_post_mapping`` (2× residual
         # UnetrBasicBlock with instance norm) and replaces the class
         # embedding mask-attention with a per-voxel 1×1 projection so
-        # we can emit continuous targets (instance embeddings, geometry
-        # regressions) as well as class logits.  Refinement runs at
-        # ``feature_size`` — the same width the SegResNetDS2 encoder
-        # emits — matching the reference VISTA3D network exactly.
-        self.head_semantic = VistaTaskHead3D(
+        # we can emit the 30-channel dense field consumed by
+        # ``CombinedLoss``.  Refinement runs at ``feature_size`` — the
+        # same width the SegResNetDS2 encoder emits — matching the
+        # reference VISTA3D network exactly.
+        self.head = VistaTaskHead3D(
             in_channels=feature_size,
-            out_channels=num_classes,
-            refine_channels=feature_size,
-            dropout=dropout,
-        )
-        self.head_instance = VistaTaskHead3D(
-            in_channels=feature_size,
-            out_channels=instance_channels,
-            refine_channels=feature_size,
-            dropout=dropout,
-        )
-        self.head_geometry = VistaTaskHead3D(
-            in_channels=feature_size,
-            out_channels=self.geometry_channels,
+            out_channels=self.head_channels,
             refine_channels=feature_size,
             dropout=dropout,
         )
@@ -218,22 +176,17 @@ class Vista3DWrapper(nn.Module):
                 "back to random initialisation.", exc,
             )
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Forward pass through backbone + three parallel heads.
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the unified ``[B, 30, D, H, W]`` head tensor.
 
-        Activation policy mirrors the Cosmos
-        :class:`brainbow.models.cosmos_transfer_2_5.decoder._DecoderAdapter3D`
-        contract: **sigmoid only where the loss is classification-supervised**
-        (BCE / Dice / IoU).  That's just the semantic head here -- instance
-        embeddings are linear (unbounded space) and the geometry head is
-        fully linear (raw / dir / cov are all regression-supervised).
-        Vista has no boundary head.
+        Activation policy: sigmoid only on the semantic channel
+        (``SEM_SLICE``); raw / dir / cov / avg / emb stay linear.
         """
         feat = self.backbone(x)
         if isinstance(feat, (tuple, list)):
             feat = feat[0]
-        return {
-            "semantic": self.head_semantic(feat).sigmoid(),
-            "instance": self.head_instance(feat),
-            "geometry": self.head_geometry(feat),
-        }
+        out = self.head(feat)
+        return torch.cat(
+            [out[:, :SEM_SLICE.start], out[:, SEM_SLICE].sigmoid(), out[:, SEM_SLICE.stop:]],
+            dim=1,
+        )

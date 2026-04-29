@@ -1,42 +1,35 @@
 """
 TensorBoard image logger package.
 
-All tags emitted by this subpackage follow a single, head-oriented
-hierarchy so that images and scalars cluster together in the
-TensorBoard UI::
+All tags emitted by this subpackage follow a single hierarchy so that
+images and scalars cluster together in the TensorBoard UI::
 
-    {stage}/{mode}/[{head}/]{panel}
+    {stage}/{mode}/{panel}
 
 where
 
 * ``stage``  -- ``"train"`` | ``"val"``
 * ``mode``   -- ``"automatic"`` (single mode today; structured so
   additional modes such as ``"prompted"`` can slot in later)
-* ``head``   -- ``"semantic"`` | ``"instance"`` | ``"geometry"`` |
-  ``"boundary"``, omitted for mode-level panels (``true/image``,
-  ``true/label``)
-* ``panel``  -- head-specific sub-tag (e.g. ``pred``, ``pred/pca``,
-  ``pred/dir_centroid``, ``pred/raw``, ``true/t``)
+* ``panel``  -- e.g. ``true/image``, ``pred/raw``, ``pred/sem``,
+  ``pred/avg/aff/t1``, ``pred/emb/pca``.
 
 The scalar logs emitted by
 :class:`brainbow.modules.base.BaseCircuitModule` use the same
-``{stage}/{mode}/{head}/...`` root for both training and validation,
-so the per-head groups collapse identically in the Images and
-Scalars tabs.
+``{stage}/{mode}/loss/...`` root for both training and validation, so
+each predicted field's images sit near its loss scalars.
 
 Module layout::
 
-    tags.py           -- TagContext, HEADS (tag assembly; single source
-                         of truth for the ``{stage}/{mode}/[{head}/]``
-                         hierarchy)
+    tags.py           -- TagContext (tag assembly; single source of
+                         truth for the ``{stage}/{mode}/`` hierarchy)
     viz.py            -- low-level image utilities (central-slice,
                          per-image min-max normalise, HSV palette,
                          manifold projection of embeddings)
     geometry.py       -- matplotlib glyph (covariance) + quiver (dir)
                          renderers; isolated so the rest of the package
                          stays NumPy / PyTorch-only
-    heads.py          -- per-head panel loggers and the
-                         ``_log_predictions`` orchestrator
+    heads.py          -- unified-head panel logger
     image_logger.py   -- Lightning callback ``ImageLogger`` (cache first
                          batch of each epoch, forward under eval +
                          autocast, dispatch)
@@ -58,15 +51,9 @@ End-to-end flow (rank-0 only, once per ``every_n_epochs``)::
         │ ._run_visualization    │   autocast, cast preds back to fp32
         └──────────┬─────────────┘
                    ▼
-        ┌────────────────────────┐   (optional) rebuild the 10-channel
-        │ build_boundary_target  │   boundary target for the ``true/*``
-        │ (losses.boundary)      │   panels
-        └──────────┬─────────────┘
-                   ▼
-        ┌────────────────────────┐   mode-level panels + four per-head
-        │ heads._log_predictions │   loggers.  Tags are produced via
-        │                        │   a single TagContext so the hier-
-        │                        │   archy is enforced in one place
+        ┌────────────────────────┐   unified 30-channel head panels
+        │ heads._log_predictions │   (raw, sem, dir, cov, avg, emb,
+        │                        │   derived 12-aff panels)
         └──────────┬─────────────┘
                    ▼
         ┌────────────────────────┐
@@ -80,10 +67,9 @@ through ``brainbow.callbacks.tensorboard.viz._to_2d``).
 
 from brainbow.callbacks.tensorboard.heads import _log_predictions
 from brainbow.callbacks.tensorboard.image_logger import ImageLogger
-from brainbow.callbacks.tensorboard.tags import HEADS, TagContext
+from brainbow.callbacks.tensorboard.tags import TagContext
 
 __all__ = [
-    "HEADS",
     "ImageLogger",
     "TagContext",
     "_log_predictions",

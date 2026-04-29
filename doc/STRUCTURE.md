@@ -57,8 +57,7 @@ applicable or directly: `python scripts/<name>.py`.
 
 | File                               | Covers                                                     |
 | ---------------------------------- | ---------------------------------------------------------- |
-| `tests/test_losses.py`             | `CombinedLoss` 2-D and 3-D end-to-end + `SemanticLoss` / `InstanceLoss` / `GeometryLoss` in isolation (shape, gradients, `aff_emb`, shared-target cache). |
-| `tests/test_boundary_loss.py`      | `BoundaryLoss` + `build_boundary_target` + `soft_aff_from_avg` (CPU / CUDA agree, channel layout, dual-aff path, edge cases). |
+| `tests/test_losses.py`             | Unified 30-channel `CombinedLoss` (field slicing, 12-aff targets/kernels, scalar keys, backward). |
 | `tests/test_datasets.py`           | `CircuitDataset` abstract contract (resolution, anisotropy, length virtualisation). |
 | `tests/test_datamodules.py`        | `CircuitDataModule` augmentation pipeline (via a synthetic in-memory dataset). |
 | `tests/test_preprocessors.py`      | HDF5 / NRRD / TIFF / NfTy converters.                      |
@@ -114,18 +113,12 @@ and the loss targets.  No learnable state.
 | `microns.py`    | MICrONS datamodule leaf.                                            |
 | `neurons.py`    | Internal neurons datamodule leaf.                                   |
 
-### `brainbow/losses/` — task losses + combiner
-
-All task losses follow a uniform skeleton (see `ORGANIZATION.md` §5).
+### `brainbow/losses/` — unified 30-channel loss
 
 | File            | Purpose                                                                        |
 | --------------- | ------------------------------------------------------------------------------ |
-| `_common.py`    | Shared regression-loss name resolution (`l1` / `mse` / `smooth_l1` + aliases). |
-| `semantic.py`   | `SemanticLoss` — CE + IoU + Dice (sigmoid or softmax mode).                    |
-| `instance.py`   | `InstanceLoss` — pull / push / norm discriminative embedding loss.             |
-| `geometry.py`   | `GeometryLoss` — raw(1) + dir(S) + cov upper-tri(S·(S+1)/2) regression.        |
-| `boundary.py`   | `BoundaryLoss` — 10-ch head: raw(1) + avg RGB(3) + direct face-affinity(6); loss also derives a soft 6-aff from predicted avgloc for dual supervision (BCE / soft-Dice / soft-IoU on both paths). |
-| `combined.py`   | `CombinedLoss` — weighted sum with head-oriented output key hierarchy.         |
+| `_common.py`    | Single source of truth for the unified head layout (`raw|sem|dir|cov|avg|emb`), 12-direction affinity geometry, slicing helpers, regression/BCE utilities. |
+| `combined.py`   | `CombinedLoss` — one monolithic loss over the 30-channel head: raw, sem, dir, cov, avg, emb, derived `aff_avg`, derived `aff_emb`. |
 
 ### `brainbow/metrics/` — per-head eval metrics
 

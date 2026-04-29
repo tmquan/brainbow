@@ -67,9 +67,6 @@ class BaseCosmosModule(BaseCircuitModule):
             **kwargs,
         )
 
-        if self._disabled_heads:
-            logger.info("Heads disabled (weight=0): %s", sorted(self._disabled_heads))
-
         if self.model._backbone_loaded and self.model.vae_encoder is not None:
             self.model._fallback_down.requires_grad_(False)
 
@@ -90,12 +87,7 @@ class BaseCosmosModule(BaseCircuitModule):
     def _build_model(self, model_config: Dict[str, Any]) -> torch.nn.Module:
         return self._model_cls(
             in_channels=model_config.get("in_channels", 1),
-            num_classes=model_config.get(
-                "semantic_channels",
-                model_config.get("num_classes", 1),
-            ),
-            instance_channels=model_config.get("instance_channels", 10),
-            boundary_channels=model_config.get("boundary_channels", 10),
+            head_channels=model_config.get("head_channels", 30),
             feature_size=model_config.get("feature_size", 64),
             variant=model_config.get("variant", "2B"),
             dtype=model_config.get("dtype", "bf16"),
@@ -108,7 +100,6 @@ class BaseCosmosModule(BaseCircuitModule):
             cache_dir=model_config.get("cache_dir"),
             hf_token=model_config.get("hf_token"),
             dropout=model_config.get("dropout", 0.0),
-            disabled_heads=self._disabled_heads or None,
         )
 
     # ------------------------------------------------------------------

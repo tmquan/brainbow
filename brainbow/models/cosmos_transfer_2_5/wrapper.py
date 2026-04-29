@@ -45,19 +45,9 @@ logger = logging.getLogger(__name__)
 class CosmosTransfer3DWrapper(nn.Module):
     """Cosmos-Transfer2.5 adapted for **volumetric** connectomics segmentation.
 
-    Four parallel output heads produce:
-
-    - ``semantic``  [B, num_classes, D, H, W]
-    - ``instance``  [B, instance_channels, D, H, W]
-    - ``geometry``  [B, G, D, H, W]  where
-      ``G = 1 + S + S * (S + 1) // 2 = 1 (raw) + 3 (dir) + 6 (cov upper-tri) = 10``
-      in 3-D.  Layout (must match :class:`brainbow.losses.GeometryLoss`):
-      ch 0 = raw, ch 1..3 = direction, ch 4..9 = covariance upper-triangle.
-    - ``boundary``  [B, boundary_channels, D, H, W]
-      (1 raw + 3 avg RGB + 6 direct face-affinity = 10 by default).
-      The boundary loss additionally derives a soft 6-face affinity
-      from the predicted avgloc for dual supervision; see
-      :class:`brainbow.losses.BoundaryLoss`.
+    A single unified task head produces ``[B, 30, D, H, W]``.  Channel
+    layout is owned by :mod:`brainbow.losses._common`: raw(1), sem(1),
+    dir(3), cov(6), avg(3), emb(16).
 
     Because Cosmos-Transfer2.5 is natively a video model, the depth axis
     of the EM volume is mapped to the temporal axis of the backbone,
@@ -65,8 +55,7 @@ class CosmosTransfer3DWrapper(nn.Module):
 
     Args:
         in_channels: Number of input channels (1 for EM volumes).
-        num_classes: Semantic segmentation classes.
-        instance_channels: Per-voxel instance embedding dimensionality.
+        head_channels: Unified head width (default 30).
         feature_size: Internal feature map channel count after projection.
         variant: ``"2B"`` or ``"14B"`` model variant.
         checkpoint_variant: HuggingFace revision string.
@@ -79,23 +68,16 @@ class CosmosTransfer3DWrapper(nn.Module):
 
     Example::
 
-        >>> model = CosmosTransfer3DWrapper(
-        ...     in_channels=1, num_classes=1, variant="2B",
-        ... )
+        >>> model = CosmosTransfer3DWrapper(in_channels=1, variant="2B")
         >>> x = torch.randn(1, 1, 32, 64, 64)
         >>> out = model(x)
-        >>> out["semantic"].shape   # [1, 1, 32, 64, 64]
-        >>> out["instance"].shape   # [1, 10, 32, 64, 64]
-        >>> out["geometry"].shape   # [1, 10, 32, 64, 64]  (raw=1 + dir=3 + cov_tri=6)
-        >>> out["boundary"].shape   # [1, 10, 32, 64, 64]  (raw=1 + avg=3 + aff=6)
+        >>> out.shape   # [1, 30, 32, 64, 64]
     """
 
     def __init__(
         self,
         in_channels: int = 1,
-        num_classes: int = 1,
-        instance_channels: int = 10,
-        boundary_channels: int = 10,
+        head_channels: int = 30,
         feature_size: int = 64,
         variant: str = "2B",
         checkpoint_variant: str = "post-trained",
@@ -109,7 +91,6 @@ class CosmosTransfer3DWrapper(nn.Module):
         cache_dir: Optional[str] = None,
         hf_token: Optional[str] = None,
         dropout: float = 0.0,
-        disabled_heads: Optional[frozenset] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -124,17 +105,10 @@ class CosmosTransfer3DWrapper(nn.Module):
         self.variant = variant
         self.cfg: _VariantConfig = _VARIANT_CONFIGS[variant]
         self.in_channels = in_channels
-        self.num_classes = num_classes
-        self.instance_channels = instance_channels
-        self.boundary_channels = boundary_channels
+        self.head_channels = int(head_channels)
         self.feature_size = feature_size
         self.spatial_dims = _SPATIAL_DIMS
         self.dropout = dropout
-
-        S = _SPATIAL_DIMS
-        # Geometry head layout: raw (1) + dir (S) + cov upper-tri (S*(S+1)/2).
-        # Matches BoundaryLoss channel convention with raw at ch 0.
-        self.geometry_channels = 1 + S + S * (S + 1) // 2
 
         self._dtype = {
             "bf16": torch.bfloat16,
@@ -177,26 +151,19 @@ class CosmosTransfer3DWrapper(nn.Module):
         if self._backend in ("diffusers", "cosmos_transfer2"):
             self._register_persistent_hooks()
 
-        self._disabled_heads: frozenset = disabled_heads or frozenset()
         self.decoder_adapter = _DecoderAdapter3D(
             vae_decoder=self.vae_decoder,
             latent_channels=self.cfg.latent_channels,
             feature_size=feature_size,
-            num_classes=num_classes,
-            instance_channels=instance_channels,
-            geometry_channels=self.geometry_channels,
-            boundary_channels=boundary_channels,
             spatial_compression=self.cfg.spatial_compression,
             temporal_compression=self.cfg.temporal_compression,
             dropout=dropout,
             freeze_vae_decoder=freeze_vae_decoder,
-            disabled_heads=self._disabled_heads,
+            head_channels=self.head_channels,
         )
         if self.decoder_adapter.to_latent is not None:
             self.decoder_adapter.to_latent.float()
-        for head_name in ("semantic", "instance", "geometry", "boundary"):
-            if head_name not in self._disabled_heads:
-                getattr(self.decoder_adapter, f"head_{head_name}").float()
+        self.decoder_adapter.head.float()
 
         if self.vae_encoder is not None and freeze_vae_encoder:
             self.vae_encoder.requires_grad_(False)
@@ -599,15 +566,14 @@ class CosmosTransfer3DWrapper(nn.Module):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Full forward pass: encode -> DiT features -> 3-D heads.
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Full forward pass: encode -> DiT features -> unified 30-ch head.
 
         Args:
             x: Input volume ``[B, C, D, H, W]``.
 
         Returns:
-            Dict with ``"semantic"``, ``"instance"``, ``"geometry"``,
-            and ``"boundary"`` keys (per the four task heads).
+            Unified head tensor ``[B, 30, D, H, W]``.
         """
         original_dtype = x.dtype
         D_in, H_in, W_in = x.shape[-3], x.shape[-2], x.shape[-1]
@@ -776,7 +742,7 @@ class CosmosTransfer3DWrapper(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
     def get_output_channels(self) -> int:
-        return self.num_classes
+        return self.head_channels
 
 
 __all__ = ["CosmosTransfer3DWrapper"]

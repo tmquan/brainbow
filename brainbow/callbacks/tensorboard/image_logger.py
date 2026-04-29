@@ -31,32 +31,23 @@ class ImageLogger(pl.Callback):
 
         on_{train,validation}_epoch_end
             -> eval mode + autocast + no_grad
-            -> forward(images)
-            -> optional build_boundary_target(labels, images)
+            -> forward(images) -> [B, 30, ...] unified head
             -> _log_predictions(tb, ctx, ...)   # heads.py orchestrator
-                   -> _log_semantic / _log_instance
-                      _log_geometry / _log_boundary
 
     All tags live under ``{stage}/{mode}/...`` where
     ``stage`` ∈ {``train``, ``val``} and ``mode`` = ``"automatic"``::
 
         {stage}/automatic/true/image
         {stage}/automatic/true/label
-        {stage}/automatic/semantic/pred
-        {stage}/automatic/instance/pred/emb/{pca|svd|umap}
-        {stage}/automatic/instance/pred/emb/aff/{t,b,u,d,l,r}
-        {stage}/automatic/instance/pred/label
-        {stage}/automatic/geometry/pred/{dir_centroid|cov|raw}
-        {stage}/automatic/boundary/pred/raw
-        {stage}/automatic/boundary/true/avg
-        {stage}/automatic/boundary/pred/avg
-        {stage}/automatic/boundary/pred/avg/aff/{t,b,u,d,l,r}
-        {stage}/automatic/boundary/true/aff/{t,b,u,d,l,r}
-        {stage}/automatic/boundary/pred/aff/{t,b,u,d,l,r}
-
-    ``boundary/true/raw`` is intentionally **not** emitted: it would
-    duplicate ``{stage}/automatic/true/image`` pixel-for-pixel (the
-    boundary ``raw`` channel is literally the input image).
+        {stage}/automatic/pred/raw
+        {stage}/automatic/pred/sem
+        {stage}/automatic/pred/dir
+        {stage}/automatic/pred/cov
+        {stage}/automatic/pred/avg
+        {stage}/automatic/pred/avg/aff/{t1,b1,u1,d1,l1,r1,t2,b2,u2,d2,l2,r2}
+        {stage}/automatic/pred/emb/{pca|svd|umap}
+        {stage}/automatic/pred/emb/aff/{...}
+        {stage}/automatic/pred/label
 
     This matches the scalar hierarchy emitted by
     :class:`brainbow.modules.base.BaseCircuitModule`
@@ -208,45 +199,6 @@ class ImageLogger(pl.Callback):
     # Internal: forward + dispatch
     # ------------------------------------------------------------------
 
-    def _maybe_build_boundary_target(
-        self,
-        preds: Dict[str, torch.Tensor],
-        criterion: Any,
-        images: torch.Tensor,
-        labels: torch.Tensor,
-        n: int,
-    ) -> Optional[torch.Tensor]:
-        """Return the 10-channel boundary GT target if it should be logged.
-
-        Gated by:
-          * ``weight_boundary > 0`` on the criterion, AND
-          * ``spatial_dims == 3`` (target construction uses z/y/x coords), AND
-          * a ``"boundary"`` key present in the model predictions.
-
-        Returns ``None`` otherwise (the GT panel is then skipped while
-        the prediction panel is still emitted by :func:`_log_boundary`).
-        """
-        weight_boundary = float(getattr(criterion, "weight_boundary", 0.0) or 0.0)
-        if weight_boundary <= 0.0 or self.spatial_dims != 3:
-            return None
-        if "boundary" not in preds:
-            return None
-
-        from brainbow.losses.boundary import build_boundary_target
-
-        img_bcdhw = images[:n]
-        img_for_target = (
-            rearrange(img_bcdhw, "b 1 ... -> b ...")
-            if img_bcdhw.dim() == self.spatial_dims + 2
-            else img_bcdhw
-        )
-        lbl_for_target = (
-            rearrange(labels[:n], "b 1 ... -> b ...")
-            if labels[:n].dim() == self.spatial_dims + 2
-            else labels[:n]
-        )
-        return build_boundary_target(lbl_for_target, img_for_target).float()
-
     def _run_visualization(
         self, tb, pl_module, batch, *, stage: str,
     ):
@@ -269,37 +221,24 @@ class ImageLogger(pl.Callback):
                 labels = rearrange(labels, "b 1 ... -> b ...")
 
             n = min(images.shape[0], self.max_images)
-            preds_auto = pl_module.model(images[:n])
+            head_pred = pl_module.model(images[:n])
 
         # Autocast-returned tensors may be bf16/fp16.  Cast back to fp32
         # so every downstream op in this callback (colour LUTs,
         # matplotlib renderers, TB image encoders) operates in a single,
         # display-friendly dtype.
-        preds_auto = {
-            k: v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v
-            for k, v in preds_auto.items()
-        }
+        head_pred = head_pred.float()
         clusterer = (
             getattr(pl_module, "clusterer", None)
             or getattr(pl_module, "_clusterer", None)
         )
 
         criterion = getattr(pl_module, "criterion", None)
-        geom_loss = getattr(criterion, "geometry_loss", None) if criterion else None
-        dir_target = getattr(geom_loss, "dir_target", "centroid") if geom_loss else "centroid"
-        sem_loss = getattr(criterion, "semantic_loss", None) if criterion else None
-        active_classes = getattr(sem_loss, "active_classes", None) if sem_loss else None
-        bnd_loss = getattr(criterion, "boundary_loss", None) if criterion else None
-        boundary_tau = float(getattr(bnd_loss, "tau", 1.0)) if bnd_loss else 1.0
-        ins_loss = getattr(criterion, "instance_loss", None) if criterion else None
-        instance_tau = float(getattr(ins_loss, "tau", 1.0)) if ins_loss else 1.0
-        instance_normalize_embeddings = bool(
-            getattr(ins_loss, "normalize_embeddings", False)
-        ) if ins_loss else False
-
-        boundary_target = self._maybe_build_boundary_target(
-            preds_auto, criterion, images, labels, n,
-        )
+        aff_emb_tau = float(getattr(criterion, "aff_emb_tau", 1.0)) if criterion else 1.0
+        aff_avg_tau = float(getattr(criterion, "aff_avg_tau", 1.0)) if criterion else 1.0
+        normalize_embeddings = bool(
+            getattr(criterion, "normalize_embeddings", False)
+        ) if criterion else False
 
         images_2d = _to_2d(images[:n])
         labels_2d = rearrange(
@@ -310,17 +249,16 @@ class ImageLogger(pl.Callback):
         ctx = TagContext(stage=stage, mode=self.mode)
         _log_predictions(
             tb, ctx, images_2d, labels_2d,
-            preds_auto, self.spatial_dims, n, epoch,
-            clusterer=clusterer, dir_target=dir_target,
-            active_classes=active_classes,
+            head_pred, self.spatial_dims, n, epoch,
+            clusterer=clusterer,
+            labels_3d=labels[:n] if self.spatial_dims == 3 else None,
             projection_algorithm=self.projection_algorithm,
             projection_backend=self.projection_backend,
-            boundary_target=boundary_target,
-            boundary_tau=boundary_tau,
-            instance_tau=instance_tau,
-            instance_normalize_embeddings=instance_normalize_embeddings,
+            aff_emb_tau=aff_emb_tau,
+            aff_avg_tau=aff_avg_tau,
+            normalize_embeddings=normalize_embeddings,
         )
-        del preds_auto, boundary_target
+        del head_pred
 
 
 __all__ = ["ImageLogger"]

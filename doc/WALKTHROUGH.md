@@ -195,62 +195,56 @@ sequenceDiagram
     Note over Mod: brainbow/modules/base.py:272
     Mod->>Wrap: self.model(images)
     Note over Wrap: cosmos / vista wrapper.forward
-    Wrap-->>Mod: {"semantic", "instance", "geometry", "boundary"}
-    Mod->>Loss: self.loss_fn(predictions, labels, images, ...)
+    Wrap-->>Mod: head tensor [B, 30, ...]
+    Mod->>Loss: self.loss_fn(head, targets)
     Note over Loss: brainbow/losses/combined.py
-    Loss-->>Mod: {"loss", "<head>/loss/<comp>", ...}
+    Loss-->>Mod: {"loss", "loss/<field>", ...}
     Mod->>TB: self.log_dict("train/automatic/...", scalars, sync_dist=True)
     Mod-->>DL: total_loss (scalar)
 ```
 
-### 5.1 Where the four heads come from
+### 5.1 Where the unified head comes from
 
-| Head        | Cosmos `wrapper.forward`                              | Vista `wrapper.forward`             |
-| ----------- | ----------------------------------------------------- | ----------------------------------- |
-| `semantic`  | `head_semantic(decoder_features)` -> `[B, C, ...]`    | `head_semantic(backbone_features)`  |
-| `instance`  | `head_instance(decoder_features)` -> `[B, E, ...]`    | `head_instance(...)`                |
-| `geometry`  | `head_geometry(decoder_features)` -> `[B, G, ...]`    | `head_geometry(...)`                |
-| `boundary`  | `head_boundary(decoder_features)` -> `[B, 10, ...]`   | **not present** (Vista is 3-head)   |
+Both wrappers return one tensor, not a dict of four heads:
 
-Activation policy (applied **once**, in the wrapper, before any loss
-or metric or callback sees the prediction).  The rule is **sigmoid
-where the loss is BCE / Dice / IoU (classification), linear where
-the loss is L1 / MSE / Smooth-L1 (regression)**:
+| Wrapper | Source | Output |
+| ------- | ------ | ------ |
+| Cosmos  | `decoder_adapter.head(decoder_features)` | `[B, 30, D, H, W]` |
+| Vista   | `head(backbone_features)`                | `[B, 30, D, H, W]` |
 
-| Head        | Cosmos                                                                    | Vista                              |
-| ----------- | ------------------------------------------------------------------------- | ---------------------------------- |
-| `semantic`  | `sigmoid` on every channel                                                | `sigmoid` on every channel         |
-| `instance`  | linear (unbounded embedding)                                              | linear                             |
-| `geometry`  | linear on every channel (raw / dir / cov are all regression-supervised)   | linear                             |
-| `boundary`  | linear on ch 0-3 (raw + avg, regression); `sigmoid` on ch 4-9 (aff, BCE/Dice/IoU) | n/a                        |
+Channel layout is owned by `brainbow.losses._common`:
 
-See `brainbow/models/cosmos_transfer_2_5/decoder.py` for the canonical
-docstring on the policy.  Earlier policy (sigmoid on geometry ch 0
-and on every boundary channel) is documented as "regression-on-
-sigmoid saturated boundary voxels" -- see [`GOTCHAS.md` #39](./GOTCHAS.md)
-for the migration entry.
+| Field | Slice | Channels | Activation |
+| ----- | ----- | -------- | ---------- |
+| raw | `[0, 1)` | 1 | linear |
+| sem | `[1, 2)` | 1 | sigmoid |
+| dir | `[2, 5)` | 3 | linear |
+| cov | `[5, 11)` | 6 | linear |
+| avg | `[11, 14)` | 3 | linear |
+| emb | `[14, 30)` | 16 | linear |
 
 ### 5.2 What `CombinedLoss` returns
 
-`brainbow/losses/combined.py:CombinedLoss.forward` returns a single
-flat dict whose keys mirror the image-tag layout used by the
-`ImageLogger` (image: `{head}/pred/<field>[/<panel>]` / scalar:
-`{head}/loss/<field>[/<component>]`):
+`brainbow/losses/combined.py:CombinedLoss.forward` returns a flat dict
+whose keys mirror the image-tag layout used by the `ImageLogger`
+(image: `pred/<field>[/<panel>]` / scalar: `loss/<field>[/<component>]`):
 
 ```
 loss                                       # scalar total (we backprop this)
-{head}/loss                                # per-head total, weighted
-{head}/loss/{component}                    # flat per-head breakdown
-{head}/loss/<field>[/<component>]          # per-field breakdown,
-                                           # parallels {head}/pred/<field>
-eff_w/{head}                               # effective task weight
-                                           # (learned-task-weight mode)
+loss/raw
+loss/sem[/ce|/dice]
+loss/dir
+loss/cov
+loss/avg
+loss/emb[/pull|/push|/norm]
+loss/aff_emb[/ce|/dice]
+loss/aff_avg[/ce|/dice]
 ```
 
-So e.g. `instance/loss/emb/aff` accompanies the image tag
-`instance/pred/emb/aff/{t,b,u,d,l,r}`, both produced from the
-embedding via `soft_aff_from_field`; `boundary/loss/avg/aff` pairs
-with `boundary/pred/avg/aff/{...}`, etc.
+So e.g. `loss/aff_emb/dice` accompanies
+`pred/emb/aff/{t1,b1,u1,d1,l1,r1,t2,b2,u2,d2,l2,r2}`, both produced
+from the embedding via `soft_aff_from_field`; `loss/aff_avg/dice`
+pairs with `pred/avg/aff/{...}`.
 
 `BaseCircuitModule.training_step`
 (`brainbow/modules/base.py:272-324`) prefixes every key with
@@ -310,20 +304,11 @@ Once per `every_n_epochs` (default 1), on rank 0 only:
 2. At epoch end, `_run_visualization` moves the cached batch back to
    the device, runs a single eval-mode forward under autocast, casts
    predictions back to fp32.
-3. (Optional) `build_boundary_target(...)` rebuilds the 10-channel
-   ground-truth target for the `true/...` panels.
-4. `_log_predictions(...)` dispatches per head to:
-   * `_log_semantic` (CE-style overlay panel)
-   * `_log_instance` (PCA-projected embedding under `pred/emb/{pca|svd|umap}`,
-     kernel-derived 6-aff under `pred/emb/aff/{t,b,u,d,l,r}` from
-     `soft_aff_from_field`, plus the clusterer-output overlay under
-     `pred/label`)
-   * `_log_geometry` (matplotlib quiver / covariance ellipse glyphs)
-   * `_log_boundary` (raw / avg RGB panel + per-axis direct affinity
-     under `aff/{t,b,u,d,l,r}`, plus a derived `pred/avg/aff/{...}`
-     panel computed from the predicted avgloc via `soft_aff_from_avg`)
-5. Every tag is built through `TagContext.tag(panel)` so the resulting
-   path is exactly `{stage}/{mode}/[{head}/]{panel}`.
+3. `_log_predictions(...)` renders the unified fields: raw, sem, dir,
+   cov, avg, emb projection, derived 12-affinity panels for avg/emb,
+   true 12-affinity panels, and the clusterer-output label overlay.
+4. Every tag is built through `TagContext.tag(panel)` so the resulting
+   path is exactly `{stage}/{mode}/{panel}`.
 
 This is why scalars and images for the same head cluster together in
 TensorBoard's Images and Scalars tabs.

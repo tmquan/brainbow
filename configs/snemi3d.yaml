@@ -164,11 +164,9 @@ model:
   dtype: "bf16"
   pretrained: true                # auto-pulls nvidia/Cosmos-Transfer2.5-2B from HF
 
-  # Output heads (channel counts must match the loss config below):
-  in_channels: 1                  #   raw EM   -> 1 channel
-  semantic_channels: 1            #   FG / BG  -> 1 channel
-  instance_channels: 10           #   embedding dimensionality
-  boundary_channels: 10           #   raw(1) + avg RGB(3) + direct aff(6)
+  # Unified output head (must match brainbow.losses._common.HEAD_CHANNELS):
+  in_channels: 1                  # raw EM input -> 1 channel
+  head_channels: 30               # raw(1)+sem(1)+dir(3)+cov(6)+avg(3)+emb(16)
   feature_size: 64
 
   # What to freeze.  Backbone is pretrained, so we adapt only the heads
@@ -299,126 +297,57 @@ optimizer:
 # ---------------------------------------------------------------------
 # Loss
 # ---------------------------------------------------------------------
-# CombinedLoss = sum over heads of (head.weight * sub_loss(head)).
+# CombinedLoss = one 30-channel head scored by per-field losses.
 #
-# Each head below is a mapping where:
-#   - `weight`        is the scalar that multiplies the head's loss.
-#                     Setting `weight: 0` disables the head entirely
-#                     (the sub-module is not even instantiated).
-#   - all other keys  are forwarded as kwargs to the corresponding
-#                     sub-loss module: SemanticLoss / InstanceLoss /
-#                     GeometryLoss / BoundaryLoss.
+# Unified channel layout:
+#   raw: ch  0       -> L1 raw reconstruction
+#   sem: ch  1       -> sigmoid BCE + Dice foreground
+#   dir: ch  2- 4    -> L1 centroid direction
+#   cov: ch  5-10    -> L1 upper-triangle covariance
+#   avg: ch 11-13    -> L1 normalised centroid + derived 12-aff
+#   emb: ch 14-29    -> discriminative embedding + derived 12-aff
+#
+# Each weight_<field> mapping has:
+#   - weight: scalar multiplier (0 disables that field/path)
+#   - all other keys: sub-loss knobs for that field.
 # ---------------------------------------------------------------------
 loss:
-  ignore_index: -100              # label value excluded from every loss term
+  ignore_index: -100
+  background: -1
 
-  # -------------------------------------------------------------------
-  # Semantic head -- binary foreground / background (sigmoid, 1 class)
-  # -------------------------------------------------------------------
-  # NOTE: SemanticLoss is sigmoid-only; the model wrapper applies sigmoid
-  #       to the semantic head before the loss / TB callbacks see it.
-  weight_semantic:
-    weight: 1.0                   # 0 -> head disabled (instance head carries FG info)
-    active_classes: 1             # only foreground is learnt for SNEMI3D
-    class_weights: [0.1]          # per-class CE weighting (down-weights FG vs BG imbalance)
-    weight_ce: 1.0                # cross-entropy sub-loss
-    weight_iou: 0.0               # IoU sub-loss (0 -> skipped)
-    weight_dice: 1.0              # Dice sub-loss (helps on heavy FG imbalance)
-
-  # -------------------------------------------------------------------
-  # Instance head -- discriminative embedding (pull / push / norm)
-  # -------------------------------------------------------------------
-  weight_instance:
+  weight_raw:
     weight: 1.0
-    weight_pull: 1.0              # intra-cluster: voxel -> centroid, hinge at delta_v
-    weight_push: 1.0              # inter-cluster: centroid <-> centroid, hinge at delta_d
-    weight_norm: 0.001            # mild centroid-norm regulariser (prevents blowup)
-    delta_v: 0.5                  # pull margin: allowed intra-cluster radius
-    delta_d: 1.5                  # push margin: half the minimum centroid separation
-    normalize_embeddings: false   # L2-normalise embeddings before loss (cosine-like)
-
-    # Hard-pair mining for the push term.
-    #   0   -> use all upper-triangle pairs.  Backward memory grows
-    #          ~K(K-1)/2 with crops that contain hundreds of instances,
-    #          pushing the allocator high-water mark up and feeding
-    #          steady-state OOM drift.  (Forward materialises the K×K×E
-    #          difference tensor before topk regardless of this knob;
-    #          see GOTCHAS.md for the rationale.)
-    #   >0  -> top-k hardest pairs only.  Bounded backward memory and
-    #          concentrates gradient on pairs that actually need
-    #          separating.
+    loss: l1
+  weight_sem:
+    weight: 1.0
+    class_weights: [0.1]
+    weight_ce: 1.0
+    weight_dice: 1.0
+  weight_dir:
+    weight: 1.0
+    loss: l1
+  weight_cov:
+    weight: 1.0
+    loss: l1
+  weight_avg:
+    weight: 1.0
+    loss: l1
+  weight_emb:
+    weight: 1.0
+    weight_pull: 1.0
+    weight_push: 1.0
+    weight_norm: 0.001
+    delta_v: 0.5
+    delta_d: 1.5
+    normalize_embeddings: false
     max_hard_pairs: 4096
-
-    # Dense face-affinity supervision on the embedding (mirrors the
-    # boundary head's `aff_avg` path).  At every fg-fg face-pair, a
-    # soft kernel `exp(-tau * ||emb[v] - emb[v + dir]||_1)` is supervised
-    # against the label-derived binary aff target via masked soft-Dice.
-    # Adds a per-voxel-face complement to centroid-based pull / push.
-    # Set to 0 to disable; the kernel is skipped entirely in that case.
-    weight_aff_emb: 1.0           # path weight on the dense face-aff loss
-    tau: 1.0                      # bandwidth of the soft similarity kernel
-
-    # `background: -1` keeps every voxel (including `FindBoundariesd`-
-    # zeroed boundary voxels) in the affinity target.  Matches the
-    # boundary head's setting so both heads share the same supervision
-    # footprint and avoids the checkerboard artifact at instance edges.
-    background: -1
-
-  # -------------------------------------------------------------------
-  # Geometry head -- direction field + covariance + raw reconstruction
-  # -------------------------------------------------------------------
-  weight_geometry:
+  weight_aff_emb:
     weight: 1.0
-    weight_dir: 1.0               # direction sub-loss
-    weight_cov: 1.0               # covariance sub-loss (shape / anisotropy)
-    weight_raw: 1.0               # raw-image reconstruction sub-loss (autoencoder-ish)
-    loss_dir: l1                  # direction regression: mse | l1 | smooth_l1
-    loss_cov: l1                  # covariance regression: mse | l1 | smooth_l1
-    loss_raw: l1                  # raw-intensity regression: mse | l1 | smooth_l1
-
-  # -------------------------------------------------------------------
-  # Boundary head -- 10-channel head with dual-aff supervision.
-  # -------------------------------------------------------------------
-  # Model output (10 channels, all in [0, 1] via sigmoid):
-  #   ch 0     := raw       (raw image intensity reconstruction)
-  #   ch 1- 3  := avg       (normalised (z, y, x) instance centroid)
-  #   ch 4- 9  := aff_pred  (direct face-affinity; T/B/U/D/L/R in
-  #                          Z-Y-X order, SAME-pad)
-  #
-  # The loss also derives a soft 6-face affinity from the predicted
-  # avgloc and supervises it against the same binary aff target::
-  #
-  #   aff_avg[c] = exp(-tau * sum_i |avg[i] - shift_replicate(avg[i], dir_c)|)
-  #
-  # Voxels inside an instance share their predicted centroid (kernel
-  # ≈ 1, target = 1); voxels across a boundary disagree (kernel
-  # decays, target = 0).  The two paths share the CE / Dice / IoU
-  # sub-loss weights below; ``weight_aff_pred`` and ``weight_aff_avg``
-  # scale them per-path.  See brainbow/losses/boundary.py for details.
-  # -------------------------------------------------------------------
-  weight_boundary:
+    weight_ce: 0.0
+    weight_dice: 1.0
+    tau: 1.0
+  weight_aff_avg:
     weight: 1.0
-    # Regression sub-losses (raw + avgloc).
-    loss_avg: l1                  # avgloc regression: l1 / mse / smooth_l1
-    loss_raw: l1                  # raw   regression: l1 / mse / smooth_l1
-    weight_avg: 1.0               # sub-weight for avg channels (ch 1-3)
-    weight_raw: 1.0               # sub-weight for raw channel  (ch 0)
-    foreground_only_loc: true     # avg loss on FG voxels only (BG has no instance)
-
-    # Two parallel aff supervision paths share the binary aff target
-    # (ch 4-9 of the 10-channel target).
-    weight_aff_pred: 1.0          # path weight on direct-prediction aff (model ch 4-9)
-    weight_aff_avg: 1.0           # path weight on aff derived from predicted avgloc
-    tau: 1.0                      # bandwidth of the soft similarity kernel
-
-    # `background: -1` keeps every voxel (including the boundary voxels
-    # that `FindBoundariesd` zeros to label `0`) in the affinity target.
-    # `background: 0` would zero those voxels' aff target, producing a
-    # checkerboard artifact along instance boundaries in the TB panels.
-    # Pass `null` to opt out of any background masking.
-    background: -1
-    class_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]  # BCE pos_weight per direction
-    weight_ce: 1.0                # BCE sub-loss; applied to both aff paths
-    weight_iou: 0.0               # soft-Jaccard sub-loss; applied to both aff paths
-    weight_dice: 1.0              # soft-Dice sub-loss;    applied to both aff paths
-    aff_eps: 1.0e-5               # MONAI DiceLoss smoothing (smooth_nr = smooth_dr)
+    weight_ce: 0.0
+    weight_dice: 1.0
+    tau: 1.0

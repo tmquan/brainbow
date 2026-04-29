@@ -1,58 +1,48 @@
-"""
-Loss functions for connectomics segmentation.
+"""Loss package for the unified 30-channel Brainbow head.
 
-Why this package exists
------------------------
-A "head" in brainbow is a per-voxel prediction tensor; a "loss" is the
-function that scores one head against a deterministic supervision
-target built directly from the labels.  Every loss here follows the
-same skeleton (see :mod:`brainbow.losses._common`) so they are
-pluggable into :class:`CombinedLoss` without bespoke glue.
+The public loss surface is intentionally small:
 
-Public surface
---------------
-Standalone task losses
-    * :class:`SemanticLoss`  -- CE + IoU + Dice on a per-voxel class map.
-    * :class:`InstanceLoss`  -- pull / push / norm discriminative loss
-      on a per-voxel embedding.
-    * :class:`GeometryLoss`  -- raw / dir / cov-upper-tri regression
-      (10 channels in 3-D, 5 in 2-D).
-    * :class:`BoundaryLoss`  -- 10-channel head: raw(1) + avg RGB(3) +
-      6-channel face-affinity, plus a derived soft 6-aff computed from
-      the predicted avgloc for dual supervision.  (Formerly
-      ``BrainbowLoss``.)
-    * :func:`build_boundary_target` -- standalone target builder for
-      :class:`BoundaryLoss`, used by :class:`ImageLogger` for previews.
-
-Combined loss
-    * :class:`CombinedLoss` -- weighted sum used by every Lightning
-      module.  Heads with weight ``0.0`` are not instantiated.
-
-Extending this package
-----------------------
-See ``doc/CONTRIBUTING.md`` "How to add a new task loss" for the recipe.
-The loss skeleton + naming convention is documented in
-:mod:`brainbow.losses._common`.
+* :class:`CombinedLoss` consumes the model's single ``[B, 30, *spatial]``
+  head tensor and supervises raw, semantic foreground, direction,
+  covariance, average-centroid, embedding, and the two derived
+  12-channel affinity paths.
+* :mod:`brainbow.losses._common` owns the canonical channel layout,
+  12-direction affinity convention, field-slicing helpers, and shared
+  numerical utilities.
 """
 
-from brainbow.losses.semantic import SemanticLoss
-from brainbow.losses.instance import InstanceLoss
-from brainbow.losses.geometry import GeometryLoss
-from brainbow.losses.boundary import (
-    BoundaryLoss,
-    build_boundary_target,
-    soft_aff_from_avg,
-    soft_aff_from_field,
-)
 from brainbow.losses.combined import CombinedLoss
+from brainbow.losses._common import (
+    AFF_CHANNELS,
+    AFF_NAMES,
+    AVG_SLICE,
+    COV_SLICE,
+    DIR_SLICE,
+    EMB_SLICE,
+    HEAD_CHANNELS,
+    HEAD_LAYOUT,
+    RAW_SLICE,
+    SEM_SLICE,
+    affinity_target,
+    slice_head,
+    soft_aff_from_field,
+    upper_tri_to_matrix,
+)
 
 __all__ = [
-    "SemanticLoss",
-    "InstanceLoss",
-    "GeometryLoss",
-    "BoundaryLoss",
-    "build_boundary_target",
-    "soft_aff_from_avg",
-    "soft_aff_from_field",
     "CombinedLoss",
+    "HEAD_CHANNELS",
+    "HEAD_LAYOUT",
+    "RAW_SLICE",
+    "SEM_SLICE",
+    "DIR_SLICE",
+    "COV_SLICE",
+    "AVG_SLICE",
+    "EMB_SLICE",
+    "AFF_CHANNELS",
+    "AFF_NAMES",
+    "slice_head",
+    "affinity_target",
+    "soft_aff_from_field",
+    "upper_tri_to_matrix",
 ]

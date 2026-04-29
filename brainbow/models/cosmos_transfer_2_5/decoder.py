@@ -1,56 +1,14 @@
 """Decoder-side modules for the Cosmos-Transfer 3D wrapper.
 
-Contains the multi-layer feature projector, a random-init progressive
-upsampler, and the pretrained-VAE-aware :class:`_DecoderAdapter3D`
-that hosts the four task heads (semantic, instance, geometry,
-boundary).
-
-Head activations (applied exactly once, here, before loss / metric /
-visualisation consume the outputs).  The rule is **sigmoid for
-classification heads, linear for regression heads** -- regression on
-a sigmoid output saturates the gradient at boundary voxels (the
-prediction asymptotes the target instead of reaching it), so we
-keep the sigmoid only where the loss is BCE / Dice / IoU::
-
-    semantic :  sigmoid on every channel (per-channel multi-label
-                binary probabilities; SemanticLoss does BCE + Dice +
-                IoU on probabilities).
-    instance :  linear (discriminative embedding; unbounded Euclidean
-                space -- sigmoid would collapse it into the unit
-                hypercube).
-    geometry :  fully linear.  Channel layout is owned by
-                :class:`brainbow.losses.geometry.GeometryLoss`::
-                    [raw(1) | dir(S) | cov(S*(S+1)/2)]
-                ``raw`` is supervised with L1 / MSE / Smooth-L1
-                regression against the (normalised) input image, so a
-                sigmoid would only saturate the gradient at the
-                ``0`` / ``1`` extremes.  ``dir`` and ``cov`` are
-                signed regression targets and were never sigmoided.
-    boundary :  sigmoid on **ch 4-9 only** (the 6 binary face
-                affinities; classification-supervised via BCE + Dice
-                + IoU).  Linear on ch 0 (raw intensity, regression)
-                and ch 1-3 (normalised centroid xyz, regression).
-                Channel layout is owned by
-                :mod:`brainbow.losses.boundary`::
-                    [raw(1) | avg(3) | aff_pred(6)]  -> 10 channels
-
-Keeping the activation policy in a single place (this file) means the
-loss modules consume the right input directly and the TensorBoard
-image logger never has to re-apply any activation.  ``raw`` / ``avg``
-panels in the visualizer already ``clamp(0, 1)`` for display, so the
-linear-prediction policy is display-safe.
-
-Migration from the previous policy (sigmoid on raw + avg + aff for
-boundary, and sigmoid on geometry ch 0): existing checkpoints' head
-weights for ``head_geometry[0]`` and ``head_boundary[0..3]`` were
-trained to produce *pre*-sigmoid logits.  Loading them under the new
-linear policy gives garbage on those rows -- re-init or fine-tune.
-See ``doc/GOTCHAS.md`` for the migration entry.
+The decoder hosts one unified Vista-style task head that emits the
+canonical ``[B, 30, D, H, W]`` tensor consumed by
+``brainbow.losses.CombinedLoss``.  Activation policy is applied exactly
+once here: sigmoid on the semantic channel only, linear everywhere else.
 """
 
 import logging
 import math
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -62,6 +20,7 @@ from brainbow.models.cosmos_transfer_2_5.layers import (
     _PointwiseLinear,
 )
 from brainbow.models.vista import VistaTaskHead3D
+from brainbow.losses import HEAD_CHANNELS, SEM_SLICE
 
 logger = logging.getLogger(__name__)
 
@@ -152,19 +111,15 @@ class _DecoderAdapter3D(nn.Module):
         vae_decoder: Optional[nn.Module],
         latent_channels: int,
         feature_size: int,
-        num_classes: int,
-        instance_channels: int,
-        geometry_channels: int,
-        boundary_channels: int,
         spatial_compression: int,
         temporal_compression: int,
         dropout: float = 0.0,
         freeze_vae_decoder: bool = False,
-        disabled_heads: Optional[frozenset] = None,
+        head_channels: int = HEAD_CHANNELS,
     ) -> None:
         super().__init__()
         self._has_pretrained = vae_decoder is not None
-        self._disabled_heads: frozenset = disabled_heads or frozenset()
+        self.head_channels = int(head_channels)
 
         if vae_decoder is not None:
             self.to_latent = _PointwiseLinear(feature_size, latent_channels)
@@ -183,44 +138,20 @@ class _DecoderAdapter3D(nn.Module):
             )
             self._hidden_ch = feature_size
 
-        # VISTA3D-style task heads.  Each one mirrors MONAI's
+        # VISTA3D-style unified task head.  It mirrors MONAI's
         # ``ClassMappingClassify.image_post_mapping`` (2× residual
         # UnetrBasicBlock at a shared refinement width with instance
         # norm) and replaces the class-embedding mask-attention with a
-        # 1×1 conv so we can emit continuous targets (instance
-        # embeddings, geometry regressions) as well as class logits.
-        # Refinement runs at ``feature_size`` so parameter cost stays
+        # 1×1 conv so we can emit the 30-channel dense field.  Refinement
+        # runs at ``feature_size`` so parameter cost stays
         # independent of the VAE decoder's output width (``_hidden_ch``
         # can be much larger on the 14B variant).
-        self.head_semantic = VistaTaskHead3D(
+        self.head = VistaTaskHead3D(
             in_channels=self._hidden_ch,
-            out_channels=num_classes,
+            out_channels=self.head_channels,
             refine_channels=feature_size,
             dropout=dropout,
         )
-        self.head_instance = VistaTaskHead3D(
-            in_channels=self._hidden_ch,
-            out_channels=instance_channels,
-            refine_channels=feature_size,
-            dropout=dropout,
-        )
-        self.head_geometry = VistaTaskHead3D(
-            in_channels=self._hidden_ch,
-            out_channels=geometry_channels,
-            refine_channels=feature_size,
-            dropout=dropout,
-        )
-        self.head_boundary = VistaTaskHead3D(
-            in_channels=self._hidden_ch,
-            out_channels=boundary_channels,
-            refine_channels=feature_size,
-            dropout=dropout,
-        )
-
-        for name in self._disabled_heads:
-            head = getattr(self, f"head_{name}", None)
-            if head is not None:
-                head.requires_grad_(False)
 
     def _replace_conv_out(self) -> int:
         for attr in ("conv_out", "output_conv", "proj_out", "final_conv"):
@@ -264,7 +195,7 @@ class _DecoderAdapter3D(nn.Module):
 
     def forward(
         self, features: torch.Tensor, target_size: tuple,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> torch.Tensor:
         if self._has_pretrained:
             latent = self.to_latent(features)
             body_dtype = next(self.decoder_body.parameters()).dtype
@@ -280,47 +211,15 @@ class _DecoderAdapter3D(nn.Module):
             decoded = F.interpolate(
                 decoded, size=target_size, mode="trilinear", align_corners=False,
             )
-        out: Dict[str, torch.Tensor] = {}
-        if "semantic" not in self._disabled_heads:
-            # Semantic head is sigmoid-only (multi-label per-channel
-            # binary).  Apply the activation here so loss / metrics /
-            # tensorboard all consume probabilities directly -- there is
-            # exactly one sigmoid in the pipeline, and it lives here.
-            out["semantic"] = self.head_semantic(decoded).sigmoid()
-        if "instance" not in self._disabled_heads:
-            # Instance head stays linear: the discriminative embedding
-            # loss uses unbounded Euclidean space (delta_v / delta_d
-            # margins + centroid-norm regulariser) and a sigmoid would
-            # trap every voxel in the unit hypercube.
-            out["instance"] = self.head_instance(decoded)
-        if "geometry" not in self._disabled_heads:
-            # Geometry head [raw(1) | dir(S) | cov(S*(S+1)/2)] is
-            # fully linear: raw is L1/MSE-regressed, dir / cov are
-            # signed regression targets, none of them want a sigmoid.
-            # Visualization clamps raw to [0, 1] for display; the
-            # loss penalises drift outside that range via the
-            # regression loss directly.
-            out["geometry"] = self.head_geometry(decoded)
-        if "boundary" not in self._disabled_heads:
-            # Boundary head [raw(1) | avg(3) | aff_pred(6)]: only the
-            # 6 affinity channels are classification-supervised
-            # (BCE + Dice + IoU), so only those get a sigmoid.  Raw
-            # and avg are regression-supervised (L1 / MSE), so we
-            # keep them linear -- a sigmoid there would saturate the
-            # gradient at boundary voxels (very dark / very bright
-            # pixels for raw, voxels near a patch corner for avg).
-            # The loss also derives a second 6-face affinity from
-            # the predicted ch 1-3 (see
-            # :func:`brainbow.losses.boundary.soft_aff_from_avg`);
-            # that kernel is ``exp(-tau * L1)`` and is therefore
-            # already in ``(0, 1]`` regardless of the avg activation.
-            # Concatenation (not in-place) keeps autograd happy and
-            # avoids a view that would break torch.compile.
-            bnd = self.head_boundary(decoded)
-            out["boundary"] = torch.cat(
-                [bnd[:, :4], bnd[:, 4:].sigmoid()], dim=1,
-            )
-        return out
+        out = self.head(decoded)
+        return torch.cat(
+            [
+                out[:, :SEM_SLICE.start],
+                out[:, SEM_SLICE].sigmoid(),
+                out[:, SEM_SLICE.stop:],
+            ],
+            dim=1,
+        )
 
 
 __all__ = [

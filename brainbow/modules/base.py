@@ -52,32 +52,19 @@ from brainbow.metrics import (
     compute_per_batch_voi,
     compute_per_batch_ted,
 )
+from brainbow.losses import EMB_SLICE, SEM_SLICE
 
 _SPATIAL_AXES = {2: "h w", 3: "d h w"}
-
-
-def _head_weight(
-    loss_config: Dict[str, Any], head: str, default: float = 1.0,
-) -> float:
-    """Extract the scalar head weight from a (nested or flat) loss config."""
-    v = loss_config.get(f"weight_{head}", default)
-    if isinstance(v, Mapping):
-        return float(v.get("weight", default))
-    return float(v)
 
 
 def _head_field(
     loss_config: Dict[str, Any], head: str, field: str, default: Any = None,
 ) -> Any:
-    """Read a sub-loss field from either the nested head dict or the flat form.
-
-    Checks ``loss_config["weight_<head>"][field]`` first (new nested
-    form), then falls back to ``loss_config[field]`` (legacy flat form).
-    """
+    """Read a sub-loss field from a nested ``weight_<field>`` mapping."""
     v = loss_config.get(f"weight_{head}")
     if isinstance(v, Mapping) and field in v:
         return v[field]
-    return loss_config.get(field, default)
+    return default
 
 
 class BaseCircuitModule(pl.LightningModule):
@@ -152,27 +139,18 @@ class BaseCircuitModule(pl.LightningModule):
         self.training_config = dict(training_config or {})
         loss_config = dict(loss_config or {})
 
-        disabled_heads = frozenset(
-            name
-            for name in ("semantic", "instance", "geometry", "boundary")
-            if _head_weight(loss_config, name, default=1.0) == 0
-        )
-        self._disabled_heads = disabled_heads
-
         self.model = self._build_model(dict(model_config or {}))
-        self.criterion = self._loss_cls(
-            spatial_dims=self._SPATIAL_DIMS, **loss_config,
-        )
+        self.criterion = self._loss_cls(**loss_config)
 
         clusterer_config = dict(self.training_config.get("clusterer", {}) or {})
         clusterer_name = clusterer_config.pop("name", "soft_meanshift")
         clusterer_config.setdefault(
             "bandwidth",
-            _head_field(loss_config, "instance", "delta_v", default=0.5),
+            _head_field(loss_config, "emb", "delta_v", default=0.5),
         )
         clusterer_config.setdefault(
             "normalize_embeddings",
-            _head_field(loss_config, "instance", "normalize_embeddings", default=False),
+            _head_field(loss_config, "emb", "normalize_embeddings", default=False),
         )
         self.clusterer = build_clusterer(clusterer_name, **clusterer_config)
 
@@ -224,12 +202,9 @@ class BaseCircuitModule(pl.LightningModule):
     ) -> Dict[str, torch.Tensor]:
         """Build the targets dict consumed by ``self.criterion``.
 
-        Also pre-builds ``targets["_cached_weights"]`` (instance pixel
-        weights + geometry targets) **inside this no-grad scope** so the
-        autograd tape doesn't track those ops on the way to the model
-        forward.  Boundary/membrane voxels are applied upstream by the
-        data pipeline (``data.find_boundaries`` → ``FindBoundariesd``),
-        not here.
+        Also pre-builds ``targets["_cached_targets"]`` inside this
+        no-grad scope so avg / affinity / geometry target ops don't pay
+        autograd-tape overhead on every step.
         """
         ndim_with_channel = self._SPATIAL_DIMS + 2
         squeeze = self._SQUEEZE_PATTERN
@@ -241,24 +216,16 @@ class BaseCircuitModule(pl.LightningModule):
         # Binary FG/BG semantic target: foreground is anything with a
         # positive instance id.  No multi-class semantic supervision is
         # populated by any current datamodule.
-        targets: Dict[str, Any] = {
-            "semantic_labels": (labels > 0).long(),
-            "labels": labels,
-        }
+        targets: Dict[str, Any] = {"labels": labels}
         needs_raw = (
-            self.criterion.weight_geometry > 0
-            or self.criterion.weight_boundary > 0
+            getattr(self.criterion, "weight_raw", 0.0) > 0
         )
         if "image" in batch and needs_raw:
             targets["raw_image"] = batch["image"]
         for key in ("label_direction", "label_covariance"):
             if key in batch:
                 targets[key] = batch[key]
-        # Build the per-step shared targets (geometry per-batch dirs/covs,
-        # full 10-channel boundary target, 6-aff target shared with
-        # InstanceLoss) once here, inside the @no_grad context, so the
-        # ops don't pay autograd-tape overhead on every step.
-        targets["_cached_targets"] = self.criterion._build_targets(
+        targets["_cached_targets"] = self.criterion.build_targets(
             targets["labels"], targets,
         )
         return targets
@@ -279,13 +246,13 @@ class BaseCircuitModule(pl.LightningModule):
         batch = self._strip_meta_tensor(batch)
         images = self._expand_image_channel(batch["image"])
 
-        # ``_prepare_targets`` is @no_grad and now also builds
-        # ``_cached_weights`` so the geometry / instance precompute ops
-        # don't pay autograd-tape overhead on every step.
+        # ``_prepare_targets`` is @no_grad and builds ``_cached_targets``
+        # so avg / aff / geometry target precompute ops don't pay
+        # autograd-tape overhead on every step.
         targets = self._prepare_targets(batch)
 
-        predictions = self.model(images)
-        losses = self.criterion(predictions, targets)
+        head = self.model(images)
+        losses = self.criterion(head, targets)
         total_loss = losses["loss"]
 
         # Finite-loss guard.  ``total_loss.isnan().any() or .isinf().any()``
@@ -317,10 +284,8 @@ class BaseCircuitModule(pl.LightningModule):
         for name, value in losses.items():
             # ``loss`` (the global total) is the only scalar we surface on
             # the progress bar / per-step; the rest are epoch-averaged.
-            # Disabled-head entries are already absent from ``losses`` —
-            # ``CombinedLoss.forward`` only adds e.g. ``semantic/...``
-            # keys when ``self.semantic_loss is not None`` — so we don't
-            # need an extra disabled-head filter here.
+            # Field entries whose weight is zero are absent from
+            # ``losses``; no extra filter is needed here.
             is_total = name == "loss"
             self.log(
                 f"{prefix}/{name}", value,
@@ -350,83 +315,62 @@ class BaseCircuitModule(pl.LightningModule):
         images = self._expand_image_channel(batch["image"])
 
         targets = self._prepare_targets(batch)
-        predictions = self.model(images)
-        losses = self.criterion(predictions, targets)
+        head = self.model(images)
+        losses = self.criterion(head, targets)
 
         prefix = self._scalar_prefix(stage)
         bs = float(images.shape[0])
         for name, val in losses.items():
             self._accum(f"{prefix}/{name}", val, bs)
 
-        self._accumulate_metrics(predictions, targets, prefix, bs)
+        self._accumulate_metrics(head, targets, prefix, bs)
 
-        del predictions, losses
+        del head, losses
 
     def _accumulate_metrics(
         self,
-        predictions: Dict[str, torch.Tensor],
+        head: torch.Tensor,
         targets: Dict[str, torch.Tensor],
         prefix: str,
         bs: float,
     ) -> None:
         """Compute per-head classification / segmentation metrics.
 
-        Heads that are absent from ``predictions`` (because
-        ``weight_<head>=0``) are silently skipped — the numbers that show
-        up in TensorBoard always reflect heads the deployed model will
-        actually produce.
+        Metrics are computed from fixed slices of the unified head:
+        semantic from ``SEM_SLICE`` and instance IDs from clustering the
+        embedding slice ``EMB_SLICE``.
         """
-        if "semantic" in predictions:
-            self._accumulate_semantic_metrics(predictions, targets, prefix, bs)
-        if "instance" in predictions:
-            self._accumulate_instance_metrics(predictions, targets, prefix, bs)
+        self._accumulate_semantic_metrics(head, targets, prefix, bs)
+        self._accumulate_instance_metrics(head, targets, prefix, bs)
 
     def _accumulate_semantic_metrics(
         self,
-        predictions: Dict[str, torch.Tensor],
+        head_pred: torch.Tensor,
         targets: Dict[str, torch.Tensor],
         prefix: str,
         bs: float,
     ) -> None:
-        # ``predictions["semantic"]`` is *already* a tensor of per-channel
-        # sigmoid probabilities -- the model wrapper applies sigmoid to
-        # the semantic head before anything downstream (loss, metrics,
-        # tensorboard) sees it.
-        sem_probs = predictions["semantic"]
-        sem_loss = getattr(self.criterion, "semantic_loss", None)
-        active = getattr(sem_loss, "active_classes", None) if sem_loss else None
-        if active is not None and active < sem_probs.shape[1]:
-            sem_probs = sem_probs[:, :active]
-
-        if sem_probs.shape[1] == 1:
-            sem_pred = (sem_probs[:, 0] > 0.5).long()
-            n_cls = 2
-        else:
-            # Multi-channel sigmoid (multi-label).  ``argmax`` is monotone
-            # under sigmoid so the class ranking matches what the old
-            # logits path produced.
-            sem_pred = sem_probs.argmax(dim=1)
-            n_cls = sem_probs.shape[1]
-
-        sem_gt = targets["semantic_labels"]
-        head = f"{prefix}/semantic/metric"
+        sem_probs = head_pred[:, SEM_SLICE]
+        sem_pred = (sem_probs[:, 0] > 0.5).long()
+        sem_gt = (targets["labels"] > 0).long()
+        metric = f"{prefix}/sem/metric"
         self._accum(
-            f"{head}/acc",
+            f"{metric}/acc",
             reduce((sem_pred == sem_gt).float(), "b ... -> ", "mean"),
             bs,
         )
         self._accum(
-            f"{head}/iou",
-            compute_per_batch_iou(sem_pred, sem_gt, num_classes=n_cls), bs,
+            f"{metric}/iou",
+            compute_per_batch_iou(sem_pred, sem_gt, num_classes=2), bs,
         )
         self._accum(
-            f"{head}/dice",
-            compute_per_batch_dice(sem_pred, sem_gt, num_classes=n_cls), bs,
+            f"{metric}/dice",
+            compute_per_batch_dice(sem_pred, sem_gt, num_classes=2), bs,
         )
 
     def _accumulate_instance_metrics(
         self,
-        predictions: Dict[str, torch.Tensor],
+        head_pred: torch.Tensor,
         targets: Dict[str, torch.Tensor],
         prefix: str,
         bs: float,
@@ -434,18 +378,16 @@ class BaseCircuitModule(pl.LightningModule):
         fg_mask = targets["labels"] > 0
         if not fg_mask.any():
             return
-        ins_pred, _, _ = self.clusterer(
-            predictions["instance"].float(), fg_mask,
-        )
+        ins_pred, _, _ = self.clusterer(head_pred[:, EMB_SLICE].float(), fg_mask)
         ins_gt = targets["labels"]
-        head = f"{prefix}/instance/metric"
-        self._accum(f"{head}/ari", compute_per_batch_ari(ins_pred, ins_gt), bs)
-        self._accum(f"{head}/ami", compute_per_batch_ami(ins_pred, ins_gt), bs)
+        metric = f"{prefix}/emb/metric"
+        self._accum(f"{metric}/ari", compute_per_batch_ari(ins_pred, ins_gt), bs)
+        self._accum(f"{metric}/ami", compute_per_batch_ami(ins_pred, ins_gt), bs)
         voi = compute_per_batch_voi(ins_pred, ins_gt)
-        self._accum(f"{head}/voi", voi.total, bs)
-        self._accum(f"{head}/voi_split", voi.split, bs)
-        self._accum(f"{head}/voi_merge", voi.merge, bs)
-        self._accum(f"{head}/ted", compute_per_batch_ted(ins_pred, ins_gt), bs)
+        self._accum(f"{metric}/voi", voi.total, bs)
+        self._accum(f"{metric}/voi_split", voi.split, bs)
+        self._accum(f"{metric}/voi_merge", voi.merge, bs)
+        self._accum(f"{metric}/ted", compute_per_batch_ted(ins_pred, ins_gt), bs)
         del ins_pred
 
     def _reduce_and_log_accum(self, stage: str) -> None:

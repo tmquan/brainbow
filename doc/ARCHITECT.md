@@ -2,8 +2,8 @@
 
 Two end-to-end wrappers live under `brainbow/models/`:
 
-1. [`CosmosTransfer3DWrapper`](#1-cosmostransfer3dwrapper) — EM → pretrained Wan VAE → Cosmos-Transfer 2.5 DiT → VISTA task heads. **Four heads** (semantic, instance, geometry, boundary).
-2. [`Vista3DWrapper`](#2-vista3dwrapper) — EM → SegResNetDS2 → VISTA task heads. **Three heads** (semantic, instance, geometry; no boundary head).
+1. [`CosmosTransfer3DWrapper`](#1-cosmostransfer3dwrapper) — EM → pretrained Wan VAE → Cosmos-Transfer 2.5 DiT → one VISTA-style **30-channel unified head**.
+2. [`Vista3DWrapper`](#2-vista3dwrapper) — EM → SegResNetDS2 → the same **30-channel unified head**.
 
 Every channel count below mirrors `configs/default.yaml`. Parameter counts are
 approximate; use `model.get_num_parameters(trainable_only=…)` on a loaded
@@ -49,10 +49,7 @@ instance for exact numbers.
    ▼
 [B, 64, D, H, W]   decoded feature map
    │
-   ├─ head_semantic  (VistaTaskHead3D, 64 → 1)                 ≈ 0.7 M params
-   ├─ head_instance  (VistaTaskHead3D, 64 → 10)                ≈ 0.7 M params
-   ├─ head_geometry  (VistaTaskHead3D, 64 → 10)                ≈ 0.7 M params
-   └─ head_boundary  (VistaTaskHead3D, 64 → 10)                ≈ 0.7 M params
+   └─ head  (VistaTaskHead3D, 64 → 30)                         ≈ 0.7 M params
 ```
 
 ### 1.2 Channel map
@@ -67,10 +64,7 @@ instance for exact numbers.
 | `feature_projector` output   | **64**   | 1 / (4, 8, 8)           |
 | `to_latent` back to VAE      | **16**   | 1 / (4, 8, 8)           |
 | Decoder output (trilinear up)| **64**   | 1                       |
-| `head_semantic`              | `semantic_channels = 1` (sigmoid)   |
-| `head_instance`              | `instance_channels = 10` (linear)  |
-| `head_geometry`              | `geometry_channels = 1 + 3 + 6 = 10` (raw / dir / cov-upper-triangle, all linear) |
-| `head_boundary`              | `boundary_channels = 1 + 3 + 6 = 10` (raw / avg RGB / direct aff). Activation is mixed: **linear on ch 0-3** (regression), **sigmoid on ch 4-9** (BCE/Dice/IoU). The loss adds a 6-channel aff derived from the predicted avgloc on top of these 10 outputs — it doesn't change the head width. |
+| `head`                       | `head_channels = 30` = raw(1) + sem(1) + dir(3) + cov(6) + avg(3) + emb(16). Sigmoid only on sem; all other channels linear. |
 
 ### 1.3 The DiT variant (2B)
 
@@ -112,7 +106,7 @@ totals.
 The adapter adds, on top of the shared decoder:
 
 - `to_latent` — 1×1×1 conv, `feature_size → latent_channels` (~1 K params).
-- Four `VistaTaskHead3D` heads (~0.7 M each).
+- One `VistaTaskHead3D` unified 30-channel head (~0.7 M).
 - Optional trilinear upsample to input resolution (0 params).
 
 ### 1.5 `VistaTaskHead3D`
@@ -163,7 +157,7 @@ pretrained HF Cosmos-Transfer 2B loaded):
 | `to_latent`                  | ~1 K     | ~1 K                 | ~1 K               |
 | VAE decoder body (frozen)    | ~70 M    | 0                    | 0                  |
 | VAE decoder shim (last up-block + norm) | ~3 M | ~3 M             | ~3 M               |
-| 4 × `VistaTaskHead3D`        | ~3 M     | ~3 M                 | ~3 M               |
+| `VistaTaskHead3D` unified head | ~0.7 M | ~0.7 M               | ~0.7 M             |
 | **Total**                    | **~2.43 B** | **~7 M**          | **~2.31 B**        |
 
 The `_fallback_down` module (`brainbow/modules/cosmos_transfer_2_5/base.py`:
@@ -199,9 +193,7 @@ frozen and contributes zero trainable params.
    ▼
 [B, 64, D, H, W]  full-resolution feature map
    │
-   ├─ head_semantic  (VistaTaskHead3D, 64 → 1)              ≈ 0.7 M params
-   ├─ head_instance  (VistaTaskHead3D, 64 → 10)             ≈ 0.7 M params
-   └─ head_geometry  (VistaTaskHead3D, 64 → 10)             ≈ 0.7 M params
+   └─ head  (VistaTaskHead3D, 64 → 30)                     ≈ 0.7 M params
 ```
 
 No VAE and no DiT — the SegResNetDS2 backbone does both downsampling and
@@ -214,9 +206,7 @@ upsampling internally.
 | Input (EM)                   | **1**    |
 | `init_filters`               | **64** (default; MONAI pretrained weights require **48**) |
 | Backbone output / head input | **`feature_size` = 64** |
-| `head_semantic`              | `semantic_channels = 1` (sigmoid) |
-| `head_instance`              | `instance_channels = 10` (linear) |
-| `head_geometry`              | `geometry_channels = 1 + 3 + 6 = 10` (raw / dir / cov-upper-triangle, all linear) |
+| `head`                       | `head_channels = 30` = raw(1) + sem(1) + dir(3) + cov(6) + avg(3) + emb(16). |
 
 ### 2.3 Pretraining
 
@@ -233,18 +223,18 @@ feature channel throughout.
 Vista, the entire model is always trainable; freeze individually if needed via
 `backbone.requires_grad_(False)` etc.
 
-### 2.5 No boundary head
+### 2.5 Same head as Cosmos
 
-The boundary head (formerly ``brainbow``) is an experimental task that
-only ships with the Cosmos wrapper.  `Vista3DWrapper` exposes
-`semantic`, `instance`, `geometry` only.
+Vista and Cosmos now expose the same unified 30-channel head.  The only
+difference is the backbone / decoder that produces the feature map before
+the head.
 
 ### 2.6 Rough parameter budget
 
 | Component         | Params    |
 |-------------------|----------:|
 | SegResNetDS2 (64) | ~30-45 M  |
-| 3 × task heads    | ~2 M      |
+| Unified task head | ~0.7 M    |
 | **Total**         | **~35 M** |
 
 Running Vista is roughly **70× cheaper per step** than full-unfrozen
