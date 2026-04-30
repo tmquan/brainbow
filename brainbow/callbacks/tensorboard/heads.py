@@ -26,12 +26,29 @@ from brainbow.losses import (
     RAW_SLICE,
     SEM_SLICE,
     affinity_target,
+    build_avg_target,
     slice_head,
     soft_aff_from_field,
     upper_tri_to_matrix,
 )
 
-_AFF_TAG_NAMES = tuple(name.lower() for name in AFF_NAMES)
+# Index each direction so the alphabetical TB sort respects the
+# physical pairing in :data:`brainbow.losses.DIRECTIONS` -- each
+# axis-aligned pair (T/B, U/D, L/R) for stride 1 then stride 2 lands at
+# consecutive (even, odd) panel positions::
+#
+#     01_t1, 02_b1   # z stride 1
+#     03_u1, 04_d1   # y stride 1
+#     05_l1, 06_r1   # x stride 1
+#     07_t2, 08_b2   # z stride 2
+#     09_u2, 10_d2   # y stride 2
+#     11_l2, 12_r2   # x stride 2
+#
+# Zero-padding to two digits keeps lexicographic order numeric (so
+# "10_d2" sorts after "09_u2", not between "01_t1" and "02_b1").
+_AFF_TAG_NAMES: tuple[str, ...] = tuple(
+    f"{i + 1:02d}_{name.lower()}" for i, name in enumerate(AFF_NAMES)
+)
 
 
 def _aff_fg_mask_2d(sem_ids: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -77,15 +94,21 @@ def _log_predictions(
 ) -> None:
     """Log true panels plus the unified-head prediction panels.
 
-    Tags intentionally mirror the loss scalar paths:
+    Tags intentionally mirror the loss scalar paths.  Each affinity
+    direction is prefixed with its position in
+    :data:`brainbow.losses.DIRECTIONS` (``01_t1`` ... ``12_r2``) so the
+    alphabetical TB sort places each axis-aligned pair on consecutive
+    panels (T/B, U/D, L/R for stride 1 then stride 2).
 
     * ``pred/raw``
     * ``pred/sem``
     * ``pred/dir``
     * ``pred/cov``
-    * ``pred/avg`` and ``pred/avg/aff/{t1,...,r2}``
-    * ``pred/emb/{pca|svd|umap}``, ``pred/emb/aff/{...}``, ``pred/label``
-    * ``true/aff/{...}``
+    * ``pred/avg/val`` and ``pred/avg/aff/{01_t1,02_b1,...,12_r2}``
+    * ``pred/emb/{pca|svd|umap}``, ``pred/emb/aff/{01_t1,...,12_r2}``,
+      ``pred/label``
+    * ``true/image``, ``true/label``
+    * ``true/avg/val`` and ``true/aff/{01_t1,...,12_r2}`` (3-D only)
     """
     if head_pred.shape[1] != HEAD_CHANNELS:
         raise ValueError(
@@ -97,6 +120,16 @@ def _log_predictions(
     fields = slice_head(head_pred[:n])
 
     # ----- true panels -----
+    if spatial_dims == 3 and labels_3d is not None:
+        aff_true = affinity_target(labels_3d[:n].long(), background=-1)
+        _add_aff_panels(
+            tb, head, aff_true,
+            labels_2d=labels[:n], sem_ids=labels[:n],
+            epoch=epoch, tag_prefix="true/aff",
+        )
+        avg_true = _to_2d(build_avg_target(labels_3d[:n].long())).clamp(0.0, 1.0)
+        tb.add_images(head.tag("true/avg/val"), avg_true, global_step=epoch)
+
     true_img = _normalise(images[:n])
     if true_img.shape[1] == 1:
         true_img = repeat(true_img, "b 1 h w -> b 3 h w")
@@ -106,13 +139,6 @@ def _log_predictions(
         _label_to_rgb(labels[:n]),
         global_step=epoch,
     )
-    if spatial_dims == 3 and labels_3d is not None:
-        aff_true = affinity_target(labels_3d[:n].long(), background=-1)
-        _add_aff_panels(
-            tb, head, aff_true,
-            labels_2d=labels[:n], sem_ids=labels[:n],
-            epoch=epoch, tag_prefix="true/aff",
-        )
 
     # ----- raw / sem -----
     raw = repeat(
@@ -143,7 +169,7 @@ def _log_predictions(
 
     # ----- avg + avg-aff -----
     avg_rgb = _to_2d(fields["avg"]).clamp(0.0, 1.0)
-    tb.add_images(head.tag("pred/avg"), avg_rgb, global_step=epoch)
+    tb.add_images(head.tag("pred/avg/val"), avg_rgb, global_step=epoch)
 
     if spatial_dims == 3:
         aff_avg = soft_aff_from_field(fields["avg"], tau=aff_avg_tau)

@@ -58,7 +58,7 @@ and ``{sub}`` ∈ ``{ce, dice, pull, push, norm}`` where applicable.
 
 The Lightning module prefixes everything with ``{stage}/{mode}/`` so a
 TB tag like ``train/automatic/loss/aff_emb/dice`` sits next to its
-image counterpart ``train/automatic/pred/emb/aff/T1`` etc.
+image counterpart ``train/automatic/pred/emb/aff/01_t1`` etc.
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ def _split_field(cfg: HeadConfig) -> Tuple[float, Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def _build_avg_target(labels: torch.Tensor) -> torch.Tensor:
+def build_avg_target(labels: torch.Tensor) -> torch.Tensor:
     """Build the ``avg`` target ``[B, 3, D, H, W]`` from instance labels.
 
     For every foreground voxel the target is the instance's centroid
@@ -339,7 +339,7 @@ class CombinedLoss(nn.Module):
         out: Dict[str, torch.Tensor] = {}
 
         if self.weight_avg > 0:
-            out["avg"] = _build_avg_target(labels.long())
+            out["avg"] = build_avg_target(labels.long())
 
         if self.weight_aff_emb > 0 or self.weight_aff_avg > 0:
             out["aff"] = affinity_target(labels.long(), background=self.background)
@@ -694,7 +694,7 @@ class CombinedLoss(nn.Module):
             avg_pred = head[:, AVG_SLICE]
             avg_target = cached.get("avg")
             if avg_target is None:
-                avg_target = _build_avg_target(labels.long())
+                avg_target = build_avg_target(labels.long())
             l_avg = self._loss_fg_regression(
                 avg_pred, avg_target, fg, self._avg_fn,
             )

@@ -35,18 +35,26 @@ class ImageLogger(pl.Callback):
             -> _log_predictions(tb, ctx, ...)   # heads.py orchestrator
 
     All tags live under ``{stage}/{mode}/...`` where
-    ``stage`` ∈ {``train``, ``val``} and ``mode`` = ``"automatic"``::
+    ``stage`` ∈ {``train``, ``val``} and ``mode`` = ``"automatic"``.
+    Each affinity direction is prefixed with its 1-based index in
+    :data:`brainbow.losses.DIRECTIONS` (``01_t1`` ... ``12_r2``) so the
+    alphabetical TB sort places each axis-aligned pair on consecutive
+    panels::
 
+        {stage}/automatic/true/aff/{01_t1,...,12_r2}            (3-D only)
+        {stage}/automatic/true/avg/val                          (3-D only)
         {stage}/automatic/true/image
         {stage}/automatic/true/label
         {stage}/automatic/pred/raw
         {stage}/automatic/pred/sem
         {stage}/automatic/pred/dir
         {stage}/automatic/pred/cov
-        {stage}/automatic/pred/avg
-        {stage}/automatic/pred/avg/aff/{t1,b1,u1,d1,l1,r1,t2,b2,u2,d2,l2,r2}
+        {stage}/automatic/pred/avg/val
+        {stage}/automatic/pred/avg/aff/{01_t1,02_b1,03_u1,04_d1,
+                                       05_l1,06_r1,07_t2,08_b2,
+                                       09_u2,10_d2,11_l2,12_r2}
         {stage}/automatic/pred/emb/{pca|svd|umap}
-        {stage}/automatic/pred/emb/aff/{...}
+        {stage}/automatic/pred/emb/aff/{01_t1,...,12_r2}
         {stage}/automatic/pred/label
 
     This matches the scalar hierarchy emitted by

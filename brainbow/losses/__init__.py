@@ -11,7 +11,7 @@ The public loss surface is intentionally small:
   numerical utilities.
 """
 
-from brainbow.losses.combined import CombinedLoss
+from brainbow.losses.combined import CombinedLoss, build_avg_target
 from brainbow.losses._common import (
     AFF_CHANNELS,
     AFF_NAMES,
@@ -43,6 +43,7 @@ __all__ = [
     "AFF_NAMES",
     "slice_head",
     "affinity_target",
+    "build_avg_target",
     "soft_aff_from_field",
     "upper_tri_to_matrix",
 ]

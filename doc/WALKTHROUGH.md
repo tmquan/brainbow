@@ -242,9 +242,12 @@ loss/aff_avg[/ce|/dice]
 ```
 
 So e.g. `loss/aff_emb/dice` accompanies
-`pred/emb/aff/{t1,b1,u1,d1,l1,r1,t2,b2,u2,d2,l2,r2}`, both produced
-from the embedding via `soft_aff_from_field`; `loss/aff_avg/dice`
-pairs with `pred/avg/aff/{...}`.
+`pred/emb/aff/{01_t1,02_b1,03_u1,04_d1,05_l1,06_r1,07_t2,08_b2,09_u2,10_d2,11_l2,12_r2}`,
+both produced from the embedding via `soft_aff_from_field`;
+`loss/aff_avg/dice` pairs with `pred/avg/aff/{...}`.  The 1-based
+index prefix matches the order of `brainbow.losses.DIRECTIONS` and
+keeps each axis-aligned pair (T/B, U/D, L/R) on consecutive
+panels under TensorBoard's alphabetical tag sort.
 
 `BaseCircuitModule.training_step`
 (`brainbow/modules/base.py:272-324`) prefixes every key with

@@ -200,17 +200,32 @@ When the same predicted *field* feeds both a visualisation and a loss,
 both live under the same `<field>` subgroup in TB.  Concrete pairs
 (see `image_logger.py` for the full image side):
 
-| image tag                                | scalar tag(s)                                                          |
-| ---------------------------------------- | ----------------------------------------------------------------------- |
-| `pred/emb/aff/{t1,...,r2}`               | `loss/aff_emb`, `loss/aff_emb/{ce,dice}`                                |
-| `pred/avg/aff/{t1,...,r2}`               | `loss/aff_avg`, `loss/aff_avg/{ce,dice}`                                |
-| `pred/dir`, `pred/cov`, `pred/raw`       | `loss/dir`, `loss/cov`, `loss/raw`                                      |
+| image tag                                          | scalar tag(s)                                                          |
+| -------------------------------------------------- | ----------------------------------------------------------------------- |
+| `pred/emb/aff/{01_t1,...,12_r2}`                   | `loss/aff_emb`, `loss/aff_emb/{ce,dice}`                                |
+| `pred/avg/aff/{01_t1,...,12_r2}`                   | `loss/aff_avg`, `loss/aff_avg/{ce,dice}`                                |
+| `pred/dir`, `pred/cov`, `pred/raw`, `pred/avg/val` | `loss/dir`, `loss/cov`, `loss/raw`, `loss/avg`                          |
+| `true/avg/val`, `true/aff/{01_t1,...,12_r2}` (3-D only)| (target side of `loss/avg`, `loss/aff_*`)                           |
 
 This way, when TensorBoard alphabetically sorts tags, each head's
 scalars cluster next to its images — e.g. `instance/loss/emb/aff`
-sits beside `train/automatic/instance/pred/emb/aff/{t,b,...}`.  The
+sits beside `train/automatic/instance/pred/emb/aff/{01_t1,...}`.  The
 per-sub-component scalars let you debug "why is dice high but CE low?"
 without keeping disabled-sub scalars in the TB tree.
+
+**Affinity tag ordering.**  Each affinity panel is prefixed with its
+1-based position in `brainbow.losses.DIRECTIONS`, zero-padded to two
+digits.  This forces TensorBoard's alphabetical sort to keep each
+axis-aligned pair on consecutive (even / odd) panel positions:
+
+```
+01_t1, 02_b1   # z stride 1   (top    / bottom)
+03_u1, 04_d1   # y stride 1   (up     / down)
+05_l1, 06_r1   # x stride 1   (left   / right)
+07_t2, 08_b2   # z stride 2
+09_u2, 10_d2   # y stride 2
+11_l2, 12_r2   # x stride 2
+```
 
 **Visualisation-only mask on aff panels.**  The `pred/emb/aff`,
 `pred/avg/aff`, and `true/aff` panels are multiplied by the predicted
