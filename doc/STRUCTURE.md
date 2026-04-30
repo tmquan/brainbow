@@ -179,7 +179,7 @@ concrete `module.py`.
 | `callbacks/tensorboard/`          | `ImageLogger` — hierarchical TB visualisation (package).                |
 | `callbacks/tensorboard/image_logger.py` | `ImageLogger` callback (the public class).                        |
 | `callbacks/tensorboard/tags.py`   | `TagContext` — single source of `{stage}/{mode}/[{head}/]{panel}`.      |
-| `callbacks/tensorboard/heads.py`  | `_log_semantic` / `_log_instance` / `_log_geometry` / `_log_boundary`.  |
+| `callbacks/tensorboard/heads.py`  | `_log_predictions` (unified-head orchestrator) + `_add_aff_panels` / `_aff_fg_mask_2d` helpers. |
 | `callbacks/tensorboard/geometry.py` | Direction-quiver + covariance-glyph rendering helpers.                |
 | `callbacks/tensorboard/viz.py`    | Colour-map, overlay, tile builders.                                     |
 
@@ -232,14 +232,14 @@ concrete `module.py`.
 | `brainbow/models/cosmos_transfer_2_5/`  |  7 (incl. `__init__`)                                |
 | `brainbow/models/vista/`                |  4 (incl. `__init__`)                                |
 | `brainbow/callbacks/tensorboard/`       |  6 (incl. `__init__`)                                |
-| `brainbow/losses/`                      |  7 (incl. `__init__`, `_common`)                     |
+| `brainbow/losses/`                      |  3 (`__init__`, `_common`, `combined`)               |
 | `brainbow/datamodules/` + `datasets/`   |  5 + 7 (datasets incl. `lazy.py`, `_patches.py`)     |
 | `brainbow/preprocessors/`               |  6 (incl. `__init__`, `base`)                        |
 | `brainbow/modules/`                     |  2 (top-level) + 3 + 3 (per arch package)            |
 | `brainbow/metrics/`                     |  3                                                   |
 | `brainbow/inference/`                   |  3                                                   |
 | `brainbow/utils/`                       |  4 (incl. `__init__`)                                |
-| `brainbow/callbacks/`                   |  3 (top-level: `__init__`, `memory.py`, plus `tensorboard/` package above) |
+| `brainbow/callbacks/`                   |  2 (top-level: `__init__`, `memory.py`) + `tensorboard/` package above |
 | `brainbow/visualizer/`                  |  4 py + 4 static                                     |
 
 ---
@@ -249,5 +249,6 @@ concrete `module.py`.
 - [`ORGANIZATION.md`](./ORGANIZATION.md) — design patterns, conventions, and
   "how to add a new …" checklists.
 - `configs/*.yaml` — every knob is documented inline.
-- `brainbow/losses/combined.py` — the canonical consumer of every
-  task-loss's head-oriented output dict.
+- `brainbow/losses/combined.py` — `CombinedLoss` consumes the model's
+  single 30-channel head tensor plus a target dict and returns
+  per-field scalar losses.

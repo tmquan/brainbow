@@ -105,8 +105,9 @@ def _log_predictions(
     * ``pred/dir``
     * ``pred/cov``
     * ``pred/avg/val`` and ``pred/avg/aff/{01_t1,02_b1,...,12_r2}``
-    * ``pred/emb/{pca|svd|umap}``, ``pred/emb/aff/{01_t1,...,12_r2}``,
-      ``pred/label``
+    * ``pred/emb/_{pca|svd|umap}``, ``pred/emb/aff/{01_t1,...,12_r2}``,
+      ``pred/label/{pre,mul}`` (``pre`` = raw clustering output;
+      ``mul`` = same panel multiplied by the predicted sem mask)
     * ``true/image``, ``true/label``
     * ``true/avg/val`` and ``true/aff/{01_t1,...,12_r2}`` (3-D only)
     """
@@ -186,7 +187,7 @@ def _log_predictions(
         algorithm=projection_algorithm, backend=projection_backend,
     )
     tb.add_images(
-        head.tag(f"pred/emb/{projection_algorithm}"),
+        head.tag(f"pred/emb/_{projection_algorithm}"),
         emb_rgb,
         global_step=epoch,
     )
@@ -206,9 +207,12 @@ def _log_predictions(
         fg_mask_pred = sem_ids > 0
         labels_pred, _, _ = clusterer(emb_2d.float(), fg_mask_pred)
         label_rgb = _label_to_rgb(labels_pred)
-        # Mask by semantic probability for readability.
-        label_rgb = label_rgb * repeat(sem, "b 1 h w -> b 3 h w")
-        tb.add_images(head.tag("pred/label"), label_rgb, global_step=epoch)
+        tb.add_images(head.tag("pred/label/pre"), label_rgb, global_step=epoch)
+        # Multiply by predicted semantic probability so masked-out
+        # voxels fade to black -- easier to read in TB next to the GT
+        # label panel.
+        label_rgb_mul = label_rgb * repeat(sem, "b 1 h w -> b 3 h w")
+        tb.add_images(head.tag("pred/label/mul"), label_rgb_mul, global_step=epoch)
 
 
 __all__ = ["_log_predictions"]

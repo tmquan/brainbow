@@ -6,8 +6,9 @@ the Cosmos-Transfer2.5 backbone.  The base class owns training,
 evaluation and logging; this module adds:
 
 * HuggingFace token handling (kept out of ``save_hyperparameters``)
-* phased freeze / unfreeze of the VAE encoder, DiT backbone and VAE
-  decoder via :meth:`on_train_epoch_start`
+* static freeze of the VAE encoder, DiT backbone and VAE decoder
+  applied once at construction via the model wrapper's
+  ``freeze_*`` kwargs
 * NaN/Inf gradient zeroing + backbone-specific AdamW learning rate
 * param-group split (backbone vs heads) in :meth:`configure_optimizers`
 
@@ -75,15 +76,6 @@ class BaseCosmosModule(BaseCircuitModule):
             type(self.clusterer).__name__,
         )
 
-        # Phased freeze schedule: value is either a bool ("permanently
-        # frozen / permanently trainable") or an int ("frozen for the
-        # first N epochs, then unfreeze").
-        self._freeze_schedule = {
-            "vae_encoder": model_config.get("freeze_vae_encoder", True),
-            "dit_backbone": model_config.get("freeze_dit_backbone", False),
-            "vae_decoder": model_config.get("freeze_vae_decoder", False),
-        }
-
     def _build_model(self, model_config: Dict[str, Any]) -> torch.nn.Module:
         return self._model_cls(
             in_channels=model_config.get("in_channels", 1),
@@ -101,44 +93,6 @@ class BaseCosmosModule(BaseCircuitModule):
             hf_token=model_config.get("hf_token"),
             dropout=model_config.get("dropout", 0.0),
         )
-
-    # ------------------------------------------------------------------
-    # Phased freeze / unfreeze
-    # ------------------------------------------------------------------
-
-    def on_train_epoch_start(self) -> None:
-        methods = {
-            "vae_encoder": (
-                self.model.freeze_vae_encoder,
-                self.model.unfreeze_vae_encoder,
-            ),
-            "dit_backbone": (
-                self.model.freeze_dit_backbone,
-                self.model.unfreeze_dit_backbone,
-            ),
-            "vae_decoder": (
-                self.model.freeze_vae_decoder,
-                self.model.unfreeze_vae_decoder,
-            ),
-        }
-        flags = {
-            "vae_encoder": "_freeze_vae_encoder",
-            "dit_backbone": "_freeze_dit_backbone",
-            "vae_decoder": "_freeze_vae_decoder",
-        }
-        needs_rebuild = False
-        for name, schedule in self._freeze_schedule.items():
-            if isinstance(schedule, bool):
-                continue  # permanently frozen / permanently trainable
-            want_frozen = self.current_epoch < int(schedule)
-            is_frozen = getattr(self.model, flags[name])
-            if want_frozen and not is_frozen:
-                methods[name][0]()
-            elif not want_frozen and is_frozen:
-                methods[name][1]()
-                needs_rebuild = True
-        if needs_rebuild and self.trainer is not None:
-            self.trainer.strategy.setup_optimizers(self.trainer)
 
     # ------------------------------------------------------------------
     # Optimizer (backbone vs heads split + NaN/Inf gradient zeroing)

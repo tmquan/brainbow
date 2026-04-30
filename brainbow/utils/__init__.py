@@ -28,19 +28,12 @@ subpackage should live next to its consumer.
 """
 
 from brainbow.utils.io import find_folder, load_volume, save_volume
-from brainbow.utils.clustering import (
-    cluster_embeddings,
-    cluster_embeddings_hdbscan,
-    cluster_embeddings_soft,
-    cluster_spatial_cc,
-)
+from brainbow.utils.clustering import cluster_embeddings, cluster_spatial_cc
 
 __all__ = [
     "find_folder",
     "load_volume",
     "save_volume",
     "cluster_embeddings",
-    "cluster_embeddings_hdbscan",
-    "cluster_embeddings_soft",
     "cluster_spatial_cc",
 ]

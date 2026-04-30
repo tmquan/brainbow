@@ -181,7 +181,7 @@ model:
   # ``brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start``;
   # see ``doc/ARCHITECT.md`` § 1.6 for the parameter-budget table.
   freeze_vae_encoder: true
-  freeze_dit_backbone: 2
+  freeze_dit_backbone: false
   freeze_vae_decoder: true
 
   gradient_checkpointing: false
@@ -211,7 +211,7 @@ training:
   limit_val_batches: 100
   num_sanity_val_steps: 2
   log_every_n_steps: 100
-  check_val_every_n_epoch: 20     # validate every 10 epochs (default 1)
+  check_val_every_n_epoch: 20     # validate every 20 epochs (default 1)
   benchmark: true
 
   # torch.compile on the DiT backbone:
@@ -220,9 +220,6 @@ training:
   #   "max-autotune"   -> best runtime, but 5-15 min first-run compile
   compile: true
   compile_fullgraph: true
-
-  training_modes:
-    - automatic
 
   # -------------------------------------------------------------------
   # Validation-time clusterer
@@ -280,10 +277,9 @@ training:
 
 
 # ---------------------------------------------------------------------
-# Optimizer
+# Optimizer (algorithm hard-coded to AdamW; see modules/cosmos_transfer_2_5/base.py)
 # ---------------------------------------------------------------------
 optimizer:
-  type: adamw
   lr: 2e-4                        # head / new-parameter LR
   dit_backbone_lr: 2e-5           # 10x lower for the pretrained DiT backbone
   weight_decay: 1.0e-4

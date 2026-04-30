@@ -13,7 +13,7 @@ where
   additional modes such as ``"prompted"`` can slot in later)
 * ``panel``  -- e.g. ``true/image``, ``true/avg/val``, ``pred/raw``,
   ``pred/sem``, ``pred/avg/val``, ``pred/avg/aff/01_t1``,
-  ``pred/emb/pca``.  Affinity panels are prefixed with their 1-based
+  ``pred/emb/_pca``, ``pred/label/{pre,mul}``.  Affinity panels are prefixed with their 1-based
   position in :data:`brainbow.losses.DIRECTIONS` so the alphabetical
   TB sort pairs each axis (T/B, U/D, L/R) on consecutive panels.
 
@@ -68,12 +68,6 @@ Works for both 2-D slices and 3-D volumes (takes a central slice
 through ``brainbow.callbacks.tensorboard.viz._to_2d``).
 """
 
-from brainbow.callbacks.tensorboard.heads import _log_predictions
 from brainbow.callbacks.tensorboard.image_logger import ImageLogger
-from brainbow.callbacks.tensorboard.tags import TagContext
 
-__all__ = [
-    "ImageLogger",
-    "TagContext",
-    "_log_predictions",
-]
+__all__ = ["ImageLogger"]

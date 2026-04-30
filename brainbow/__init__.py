@@ -24,6 +24,7 @@ __version__ = "0.1.0"
 
 from brainbow.datasets import (
     CircuitDataset,
+    LazyVolDataset,
     SNEMI3DDataset,
     MICRONSDataset,
     NeuronsDataset,
@@ -58,6 +59,7 @@ from brainbow.modules import (
 __all__ = [
     # Data
     "CircuitDataset",
+    "LazyVolDataset",
     "SNEMI3DDataset",
     "MICRONSDataset",
     "NeuronsDataset",

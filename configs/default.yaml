@@ -23,7 +23,6 @@ seed: 42
 
 # Logging configuration
 logger: tensorboard  # Options: tensorboard, wandb
-log_dir: logs
 
 # Optional: weights-only warm start (loaded *before* trainer.fit).
 # Pass via the CLI (e.g. ``+ckpt_path=outputs/<run>/checkpoints/last.ckpt``)
@@ -69,8 +68,10 @@ model:
   pretrained: true
 
 # Optimizer configuration
+# Algorithm is hard-coded to AdamW in `BaseCosmosModule.configure_optimizers` /
+# `BaseVistaModule.configure_optimizers`; this block tunes its hyperparameters
+# and the LR scheduler wrapper (`_maybe_wrap_scheduler` in modules/base.py).
 optimizer:
-  type: adamw
   lr: 1.0e-3
   weight_decay: 1.0e-4
   scheduler:
@@ -127,8 +128,6 @@ loss:
 
 # Training configuration
 training:
-  training_modes:
-    - automatic
   # Validation-time clusterer.  `bandwidth` defaults to loss.delta_v,
   # `normalize_embeddings` defaults to loss.normalize_embeddings.
   # Names: soft_meanshift | hdbscan | meanshift | spatial_cc

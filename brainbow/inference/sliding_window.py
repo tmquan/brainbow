@@ -146,4 +146,4 @@ def sliding_window_inference(
     return output
 
 
-__all__ = ["sliding_window_inference", "create_gaussian_weight"]
+__all__ = ["sliding_window_inference"]

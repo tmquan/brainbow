@@ -53,9 +53,10 @@ class ImageLogger(pl.Callback):
         {stage}/automatic/pred/avg/aff/{01_t1,02_b1,03_u1,04_d1,
                                        05_l1,06_r1,07_t2,08_b2,
                                        09_u2,10_d2,11_l2,12_r2}
-        {stage}/automatic/pred/emb/{pca|svd|umap}
+        {stage}/automatic/pred/emb/_{pca|svd|umap}
         {stage}/automatic/pred/emb/aff/{01_t1,...,12_r2}
-        {stage}/automatic/pred/label
+        {stage}/automatic/pred/label/pre                        (only with clusterer)
+        {stage}/automatic/pred/label/mul                        (only with clusterer)
 
     This matches the scalar hierarchy emitted by
     :class:`brainbow.modules.base.BaseCircuitModule`

@@ -27,17 +27,17 @@ this doc and the source code without losing your place.
 ```mermaid
 flowchart LR
     YAML["configs/<name>.yaml"]:::cfg --> CLI["scripts/train.py"]:::cli
-    CLI -->|"get_datamodule"| DM["CircuitDataModule"]:::dm
-    CLI -->|"get_module"| MOD["BaseCircuitModule\n(Vista3D / Cosmos3D)"]:::mod
+    CLI -->|"build_datamodule"| DM["CircuitDataModule"]:::dm
+    CLI -->|"build_module"| MOD["BaseCircuitModule\n(Vista3D / Cosmos3D)"]:::mod
     CLI -->|"setup_callbacks"| CB["ImageLogger,\nMemoryLogger,\nCheckpoint, ..."]:::cb
     CLI -->|"pl.Trainer.fit"| LOOP["Lightning Trainer Loop"]:::loop
 
     DM -.batch.-> LOOP
     LOOP -.training_step.-> MOD
     MOD --> WRAP["model wrapper\n(forward)"]:::wrap
-    WRAP --> HEADS["semantic / instance /\ngeometry / boundary"]:::heads
-    HEADS --> LOSS["CombinedLoss"]:::loss
-    LOSS --> METRICS["per-head\nscalars / metrics"]:::metric
+    WRAP --> HEAD["unified 30-channel head\nraw|sem|dir|cov|avg|emb"]:::heads
+    HEAD --> LOSS["CombinedLoss"]:::loss
+    LOSS --> METRICS["per-field\nscalars / metrics"]:::metric
     METRICS --> TB[("TensorBoard /\nW&B logs")]:::tb
     CB -.|on_batch_end\non_epoch_end|.-> TB
 
@@ -60,49 +60,49 @@ Everything below zooms into one piece of this diagram.
 
 ## 1. CLI entry point
 
-`scripts/train.py:main` (`@hydra.main` wrapper at line 398) is the only
+`scripts/train.py:main` (`@hydra.main` wrapper at line 537) is the only
 entry point; everything else is called from it.
 
 What happens, in order:
 
 | Step | Lines      | Effect                                                                     |
 | ---- | ---------- | -------------------------------------------------------------------------- |
-| 1    | `400-404`  | Print resolved YAML to stdout (good first-look sanity check).              |
-| 2    | `407-411`  | Make a unique `outputs/<timestamp>_<name>/` run directory.                 |
-| 3    | `413-415`  | `pl.seed_everything(seed, workers=True)`.                                  |
-| 4    | `417-422`  | Build the **DataModule** — see §2.                                         |
-| 5    | `423-432`  | Build the **Lightning Module** — see §3.                                   |
-| 6    | `446-456`  | Optional `torch.compile` on the **DiT backbone only** (avoids inference-mode tensors leaking into `backward` under DDP). |
-| 7    | `458-464`  | Build callbacks, logger, profiler — see §4.                                |
-| 8    | `467-488`  | Construct `pl.Trainer`.                                                    |
-| 9    | `500`      | `_resolve_checkpoint(cfg, module)` -- pick **resume** or **weights-only** load. |
-| 10   | `503-518`  | `trainer.fit(...)` inside a `try/except` that writes a `crash_recovery.ckpt` if anything throws and re-raises. |
-| 11   | `520-527`  | Save `final_model.ckpt` on rank 0.                                          |
+| 1    | `538`      | `_install_runtime_patches()` — install `torch.load` allow-list + warning filters (see below). |
+| 2    | `540-542`  | Print resolved YAML to stdout (good first-look sanity check).              |
+| 3    | `544-548`  | Make a unique `outputs/<timestamp>_<name>/` run directory.                 |
+| 4    | `550-552`  | `pl.seed_everything(seed, workers=True)`.                                  |
+| 5    | `554-558`  | Build the **DataModule** via `build_datamodule(cfg)` — see §2.             |
+| 6    | `560-569`  | Build the **Lightning Module** via `build_module(cfg)` — see §3.           |
+| 7    | `571`      | Optional `torch.compile` on the **DiT backbone only** (avoids inference-mode tensors leaking into `backward` under DDP). |
+| 8    | `573-579`  | Build callbacks, logger, profiler — see §4.                                |
+| 9    | `581-588`  | Construct `pl.Trainer` via `build_trainer(...)`.                           |
+| 10   | `592`      | `_resolve_checkpoint(cfg, module)` — pick **resume** or **weights-only** load. |
+| 11   | `593-599`  | `run_fit_with_recovery(...)` wraps `trainer.fit(...)` and writes a `crash_recovery.ckpt` if anything throws. |
+| 12   | `601-610`  | Save `final_model.ckpt` on rank 0.                                          |
 
-Two import-time side effects to remember:
+`_install_runtime_patches()` (line `75`) is called explicitly from
+`main` (no longer at import time) so `import scripts.train` from a
+notebook or test does not silently mutate the global `torch` module
+or warning filters.  Inside it:
 
-* `scripts/train.py:43-47` -- **silenced warnings** (deprecation noise
-  from `torch.compile` + Lightning).
-* `scripts/train.py:58-86` -- **monkey-patches `torch.load`** to use
-  `weights_only=False`.  This is required because Lightning checkpoints
-  pickle `defaultdict` / `OmegaConf` containers that the
-  `weights_only=True` unpickler refuses, and the `add_safe_globals`
-  allow-list covers the *types* but not the `SETITEM` opcode for
-  custom containers.  See [`GOTCHAS.md`](./GOTCHAS.md) #1.
-
-These should one day move into a function called from `main`; tracked
-in Phase 3a of the audit overhaul.
+* **`torch.load` allow-list / `weights_only=False` shim** — Lightning
+  checkpoints pickle `defaultdict` / `OmegaConf` containers that the
+  weights-only unpickler refuses even with `add_safe_globals`, so we
+  force `weights_only=False`.  See [`GOTCHAS.md`](./GOTCHAS.md) #1.
+* **Warning filters** — silence the noisier deprecation warnings from
+  `torch.compile`, Lightning, MONAI.
+* `torch.set_float32_matmul_precision("high")` to enable TF32 matmuls.
 
 ---
 
 ## 2. DataModule construction
 
-`scripts/train.py:get_datamodule` (line 169):
+`scripts/train.py:build_datamodule` (line 189):
 
 ```mermaid
 flowchart LR
     cfg["cfg.data.dataset"]:::cfg --> SEL{{snemi3d? microns?}}:::sel
-    SEL --> DM["SNEMI3DDataModule /\nMICRONSDataModule"]:::dm
+    SEL --> DM["SNEMI3DDataModule /\nMICRONSDataModule /\nNeuronsDataModule"]:::dm
     KW["_build_datamodule_kwargs(cfg)"]:::kw --> FILT["inspect signature,\nfilter to accepted kwargs"]:::filt
     FILT --> DM
     classDef cfg fill:#fff7d6,stroke:#dca;
@@ -114,13 +114,14 @@ flowchart LR
 
 Key decisions made here:
 
-* `_head_weight_scalar(loss, "geometry") > 0` (line `145`) decides
-  whether the datamodule precomputes direction + covariance fields.
-  This is one of the few code-only fallbacks; the rest of the loss
-  config is opaque to the data path.  See
-  [`brainbow/datamodules/base.py:217-260`](../brainbow/datamodules/base.py)
-  for the actual MONAI pipeline assembly.
-* `inspect.signature(cls).parameters` (line `193`) filters kwargs so
+* `compute_geometry` (lines `166-169`) is set to `True` if either
+  `loss.weight_dir` or `loss.weight_cov` is `> 0`.  This decides
+  whether the datamodule precomputes direction + covariance fields
+  via the `Directiond` / `Covarianced` MONAI transforms.  The rest of
+  the loss config is opaque to the data path.  See
+  [brainbow/datamodules/base.py](../brainbow/datamodules/base.py) for
+  the MONAI pipeline assembly.
+* `inspect.signature(cls).parameters` (line `217`) filters kwargs so
   older datamodule signatures don't `TypeError` on a new YAML knob.
 
 The returned `CircuitDataModule` exposes `setup()` / `train_dataloader()` /
@@ -131,7 +132,7 @@ lazily.
 
 ## 3. Lightning module construction
 
-`scripts/train.py:get_module` (line 198) maps `cfg.model.type` to
+`scripts/train.py:build_module` (line 222) maps `cfg.model.type` to
 `Vista3DModule` / `CosmosTransfer3DModule` and forwards four config
 sub-dicts:
 
@@ -140,30 +141,30 @@ return cls(
     model_config=model_cfg,        # network shape + freeze flags
     optimizer_config=...,           # AdamW lr, weight_decay, schedule
     loss_config=...,                # head weights + sub-weights
-    training_config=...,            # disable_train_eval, etc.
+    training_config=...,            # clusterer, gradient_clip_val, etc.
 )
 ```
 
 What `BaseCircuitModule.__init__` does
-(`brainbow/modules/base.py:131-225`):
+([brainbow/modules/base.py:122-157](../brainbow/modules/base.py)):
 
-1. Pops out **disabled heads** (head weight `0` -> head not constructed,
-   not just zeroed) at line `151-156`.  Memory + speed win.
+1. Stores `optimizer_config` / `training_config`; copies `loss_config`.
 2. Calls `_build_model(model_config)` which by default forwards every
    key as a kwarg to `_model_cls`.  Cosmos overrides this in
-   `modules/cosmos_transfer_2_5/base.py` to surface the freeze knobs
-   and the `dit_backbone_lr` parameter group.
-3. Constructs `_loss_cls(**loss_config, disabled_heads=...)`; for
-   :class:`CombinedLoss` this is where weight-`0` heads are skipped.
-4. Builds metric accumulators (`per_batch_*`).
-5. Builds a clusterer (`build_clusterer(...)`) for the instance head's
-   eval-time clustering.
+   [modules/cosmos_transfer_2_5/base.py](../brainbow/modules/cosmos_transfer_2_5/base.py)
+   to surface the freeze knobs and the `dit_backbone_lr` parameter group.
+3. Constructs `self.criterion = self._loss_cls(**loss_config)`; for
+   :class:`CombinedLoss`, fields with `weight: 0` are not instantiated
+   at all (memory + speed win).
+4. Builds the validation-time clusterer via `build_clusterer(...)`.
+5. Initialises the per-epoch metric accumulator
+   (`self._eval_accum`).
 
 ---
 
 ## 4. Callbacks
 
-`scripts/train.py:setup_callbacks` (line 230) is a flat list of
+`scripts/train.py:setup_callbacks` (line 291) is a flat list of
 "if `callbacks.<name>.enabled` then add it" guards.  The default set is:
 
 | Callback                    | Source                                                            | Why                                                                  |
@@ -192,7 +193,7 @@ sequenceDiagram
     participant TB as TensorBoard
 
     DL->>Mod: training_step(batch, idx)
-    Note over Mod: brainbow/modules/base.py:272
+    Note over Mod: brainbow/modules/base.py:243
     Mod->>Wrap: self.model(images)
     Note over Wrap: cosmos / vista wrapper.forward
     Wrap-->>Mod: head tensor [B, 30, ...]
@@ -250,49 +251,41 @@ keeps each axis-aligned pair (T/B, U/D, L/R) on consecutive
 panels under TensorBoard's alphabetical tag sort.
 
 `BaseCircuitModule.training_step`
-(`brainbow/modules/base.py:272-324`) prefixes every key with
-`train/automatic/` and calls `self.log_dict(..., sync_dist=True)`,
-which is what TensorBoard eventually sees.
+([brainbow/modules/base.py:243](../brainbow/modules/base.py)) prefixes
+every key with `train/automatic/` and calls
+`self.log_dict(..., sync_dist=True)`, which is what TensorBoard
+eventually sees.
 
 ### 5.3 Optimiser parameter groups
 
-`brainbow/modules/base.py:configure_optimizers` (line 501) splits
+`brainbow/modules/base.py:configure_optimizers` (line 463) splits
 parameters into `weight_decay` / `no_weight_decay` (norms + biases).
 The Cosmos module overrides this in
-`brainbow/modules/cosmos_transfer_2_5/base.py` to add a third group
-with `lr = optimizer.dit_backbone_lr` for the DiT backbone params; that
-LR is **only honoured when the DiT is unfrozen**, see §6.
+[brainbow/modules/cosmos_transfer_2_5/base.py](../brainbow/modules/cosmos_transfer_2_5/base.py)
+to add a third group with `lr = optimizer.dit_backbone_lr` for the DiT
+backbone params (taking effect only when the DiT is unfrozen — see §6).
 
 ---
 
-## 6. Freeze schedule (Cosmos only)
+## 6. Freeze flags (Cosmos only)
 
-`brainbow/modules/cosmos_transfer_2_5/base.py:on_train_epoch_start`:
+The Cosmos backbone exposes three independent freeze knobs:
+`freeze_vae_encoder`, `freeze_dit_backbone`, `freeze_vae_decoder`.
+They are **bools**, applied **once at construction** by
+[brainbow/models/cosmos_transfer_2_5/wrapper.py](../brainbow/models/cosmos_transfer_2_5/wrapper.py)
+when the wrapper is built; there is no per-epoch thaw schedule.
 
-```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> CheckType
-    CheckType --> Bool: bool freeze flag
-    CheckType --> Int: int freeze flag
-    Bool --> NoOp: nothing per-epoch
-    Int --> Compare: epoch < N?
-    Compare --> Frozen: yes -> requires_grad_(False) + .eval()
-    Compare --> Unfreeze: no  -> requires_grad_(True), rebuild optimiser
-    Frozen --> [*]
-    Unfreeze --> [*]
-    NoOp --> [*]
-```
+* `freeze_*: true`  → that submodule is frozen (`requires_grad_(False)`)
+  for the whole run; its parameters are excluded from the AdamW param
+  groups in `configure_optimizers`.
+* `freeze_*: false` → that submodule trains for the whole run;
+  if it's the DiT backbone, it is placed in its own param group with
+  `lr = optimizer.dit_backbone_lr` (default `lr` if unset).
 
-* `freeze_dit_backbone: true`  -> permanently frozen.
-* `freeze_dit_backbone: false` -> permanently trainable.
-* `freeze_dit_backbone: 2`     -> frozen during epochs 0 and 1,
-  unfrozen at the start of epoch 2 (optimizer rebuilt at that hop so
-  the new param group picks up `dit_backbone_lr`).
-
-The integer form is the production default in `configs/snemi3d.yaml`.
-See also [`ARCHITECT.md` §1.6](./ARCHITECT.md#16-freeze-flags--what-actually-moves)
-for the parameter-budget consequences.
+Defaults in `configs/snemi3d.yaml`: VAE encoder frozen, DiT and VAE
+decoder trainable.  See
+[`ARCHITECT.md` §1.6](./ARCHITECT.md#16-freeze-flags--what-actually-moves)
+for parameter-budget consequences.
 
 ---
 
@@ -320,8 +313,8 @@ TensorBoard's Images and Scalars tabs.
 
 ## 8. Validation step + clustering
 
-`BaseCircuitModule.validation_step` (line 474) calls
-`_eval_step_and_accumulate` (line 326).  That function:
+`BaseCircuitModule.validation_step` (line 436) calls
+`_eval_step_and_accumulate` (line 311).  That function:
 
 1. Forward the batch.
 2. Apply `CombinedLoss` (validation loss).
@@ -334,8 +327,10 @@ TensorBoard's Images and Scalars tabs.
    under `val/automatic/{head}/metric/{name}`.
 
 Clusterers live in
-`brainbow/inference/clusterer.py:build_clusterer` (line 723); the
-default for the instance head is :class:`SoftMeanShift`.
+`brainbow/inference/clusterer.py:build_clusterer` (line 525); the
+default is :class:`SoftMeanShift` (line 60).  The other registered
+strategies are :class:`HDBSCANClusterer` (line 334) and
+:class:`SpatialCCClusterer` (line 408).
 
 ### 8.1 Val/test transform pipeline (deterministic)
 
@@ -366,11 +361,13 @@ When the test set has volumes too big to fit on the GPU,
 entry point.  It:
 
 1. Iterates patch starts on a regular grid with a configurable overlap.
-2. Forwards each patch through the wrapped model.
-3. Blends per-patch outputs via gaussian / average / max weights.
-4. Returns the full-volume prediction for the (currently aggregated)
-   heads -- see [`GOTCHAS.md` #4](./GOTCHAS.md) for the
-   geometry/boundary head limitation.
+2. Forwards each patch through the wrapped model — input
+   `[B, C_in, D, H, W]`, output `[B, 30, D, H, W]` (the unified head).
+3. Accumulates patch outputs in a full-volume buffer with gaussian /
+   average / max blending weights.
+4. Normalises by the accumulated weight map and returns the final
+   `[1, 30, D_full, H_full, W_full]` tensor; downstream code slices
+   it via `slice_head(...)` to recover the named fields.
 
 `scripts/train.py` does **not** call this path; it's invoked from
 `trainer.test(...)` and from notebook code that wants an offline
@@ -383,9 +380,10 @@ prediction map.
 | Curious about ...                 | Read first ...                                                                  |
 | --------------------------------- | ------------------------------------------------------------------------------- |
 | Augmentation order                | `brainbow/datamodules/base.py::CircuitDataModule.get_train_transforms`          |
-| Loss target construction          | `brainbow/losses/<name>.py::*build_target*` methods                             |
-| TensorBoard tag layout            | `brainbow/callbacks/tensorboard/tags.py::TagContext`                            |
-| Freeze schedule                   | `brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start`            |
+| Loss target construction          | `brainbow/losses/combined.py::CombinedLoss.build_targets` + `build_avg_target`, `affinity_target` in `_common.py` |
+| Channel layout (raw…emb slices)   | `brainbow/losses/_common.py::HEAD_LAYOUT`                                       |
+| TensorBoard tag layout            | `brainbow/callbacks/tensorboard/tags.py::TagContext` + `heads.py::_log_predictions` |
+| Freeze flags                      | `brainbow/models/cosmos_transfer_2_5/wrapper.py::CosmosTransfer3DWrapper.__init__` |
 | Param-group split                 | `brainbow/modules/cosmos_transfer_2_5/base.py::configure_optimizers`            |
 | Clustering algorithms             | `brainbow/inference/clusterer.py::build_clusterer`                              |
 | Adding a new dataset/head/...     | [`CONTRIBUTING.md`](./CONTRIBUTING.md)                                          |

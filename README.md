@@ -110,11 +110,11 @@ python scripts/train.py --config-name combine loss.weight_aff_avg.weight=0.0
 
 ### GPU memory: avoiding slow OOM drift on long runs
 
-On long DDP runs (especially with `freeze_dit_backbone: <N>` phased
-unfreeze, `compile: max-autotune`, or `max_hard_pairs: 0`) the PyTorch
-caching allocator's reserved pool tends to creep upward over hours
-even though live tensors are stable.  Two settings make the
-difference between "stable at 90 %" and "OOM at epoch 30":
+On long DDP runs (especially with `compile: max-autotune` or
+`max_hard_pairs: 0`) the PyTorch caching allocator's reserved pool
+tends to creep upward over hours even though live tensors are stable.
+Two settings make the difference between "stable at 90 %" and "OOM at
+epoch 30":
 
 ```bash
 # 1.  Enable expandable allocator segments BEFORE launching python.
@@ -139,7 +139,6 @@ Watch the trajectory in TensorBoard under the `cuda_memory/*` tags
 | `allocated_gb` flat, `reserved_gb` rising              | fragmentation — set `PYTORCH_CUDA_ALLOC_CONF` as above.       |
 | `allocated_gb` and `reserved_gb` both rising           | tensor leak — inspect callbacks (image_logger, custom hooks). |
 | sawtooth coupled to val epochs                         | val peak polluting train pool — enable the callback above.    |
-| sudden step at the epoch boundary set by `freeze_dit_backbone` | DiT unfreeze added grads + AdamW state; expected. Enable `model.gradient_checkpointing: true` for headroom. |
 
 ## Loss
 

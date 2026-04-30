@@ -53,7 +53,7 @@ brainbow/
     ├── modules/          # Lightning modules (BaseCircuitModule + per-arch).
     ├── preprocessors/    # format converters (base + per-format).
     ├── transforms/       # deterministic ops (direction, covariance, EDT, ...).
-    ├── utils/            # io, parallel, clustering, manifold.
+    ├── utils/            # io, clustering, manifold.
     └── visualizer/       # web volume renderer.
 ```
 
@@ -122,8 +122,8 @@ hf_loader.py             # MONAI/VISTA3D-HF encoder download + partial-load
 ```
 __init__.py      # re-exports ImageLogger
 tags.py          # TagContext: {stage}/{mode}/{panel}
-geometry.py      # geometry-head visual helpers
-heads.py         # unified-head panel logger
+geometry.py      # direction-quiver + covariance-glyph rendering helpers
+heads.py         # unified-head panel logger (`_log_predictions`)
 viz.py           # colour-map, overlay, tile builders
 image_logger.py  # ImageLogger callback (the public class)
 ```
@@ -207,9 +207,9 @@ both live under the same `<field>` subgroup in TB.  Concrete pairs
 | `pred/dir`, `pred/cov`, `pred/raw`, `pred/avg/val` | `loss/dir`, `loss/cov`, `loss/raw`, `loss/avg`                          |
 | `true/avg/val`, `true/aff/{01_t1,...,12_r2}` (3-D only)| (target side of `loss/avg`, `loss/aff_*`)                           |
 
-This way, when TensorBoard alphabetically sorts tags, each head's
-scalars cluster next to its images — e.g. `instance/loss/emb/aff`
-sits beside `train/automatic/instance/pred/emb/aff/{01_t1,...}`.  The
+This way, when TensorBoard alphabetically sorts tags, each field's
+scalars cluster next to its images — e.g. `train/automatic/loss/aff_emb/dice`
+sits beside `train/automatic/pred/emb/aff/{01_t1,...}`.  The
 per-sub-component scalars let you debug "why is dice high but CE low?"
 without keeping disabled-sub scalars in the TB tree.
 

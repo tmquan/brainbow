@@ -3,6 +3,18 @@
 > Audience: anyone debugging an unexpected result, looking for a
 > "this can't be right" moment, or onboarding a new contributor.
 
+> **Phase 1 audit note (April 2026).**  This file is being rewritten
+> in Phase 3 of the audit overhaul.  Phase 1 has only:
+> 1. Marked entries that referenced **deleted modules** or
+>    **removed APIs** as `(REMOVED in Phase 1 cleanup)` so they no
+>    longer mislead readers.
+> 2. Refreshed the wording of a few entries whose source-line anchors
+>    drifted.
+>
+> The full rewrite will dedupe overlap with `ORGANIZATION.md` /
+> `WALKTHROUGH.md` and reorder by symptom-frequency.  Treat any entry
+> dated "April 2026 cleanup" as historical context, not active risk.
+
 This file collects the **non-obvious** behaviours that make brainbow
 look like it's running correctly when it isn't.  Every entry follows
 the same shape:
@@ -22,8 +34,11 @@ Companion docs: [`WALKTHROUGH.md`](./WALKTHROUGH.md),
 **Symptom.** "How is Lightning loading my checkpoint without a
 `safe_globals` warning when I have new objects in callback state?"
 
-**Where.** `scripts/train.py:65-86`.  At import time, `torch.load` is
-rebound to a wrapper that forces `weights_only=False`.
+**Where.** `scripts/train.py::_install_runtime_patches` (line 75).
+This helper rebinds `torch.load` to a wrapper that forces
+`weights_only=False`.  It is **called from `main()` (line 538)**, not
+at import time, so `import scripts.train` from a notebook or test no
+longer mutates the global `torch` module silently.
 
 **Why.** PyTorch >= 2.6 made `weights_only=True` the default.  Lightning
 checkpoints pickle non-tensor objects (`collections.defaultdict` for
@@ -34,10 +49,10 @@ weights-only `SETITEM` opcode is hardcoded to accept only `dict` /
 fails with `defaultdict` state.  Our checkpoints are local, so the
 script trusts them.
 
-**Remediation.** Don't `torch.load(<untrusted file>)` from a process
-that imports `scripts/train.py` (in a notebook, import the
-function-level helper rather than the script module).  Phase 3a moves
-this patch out of import time so the side effect is opt-in.
+**Remediation.** Don't call `_install_runtime_patches()` in a process
+that subsequently `torch.load`s untrusted files.  In notebooks, import
+function-level helpers (e.g. `build_module`, `build_datamodule`) rather
+than calling `main()`.
 
 ---
 
@@ -87,46 +102,31 @@ checks the prediction dict for the key first.
 
 ---
 
-## 4. `sliding_window_inference` head set is auto-detected from the dummy pass
+## 4. (Removed in Phase 1 cleanup -- `sliding_window_inference` head auto-detect)
 
-**Symptom.** You enable a fourth head mid-run and the inference output
-silently grows / shrinks accordingly.
-
-**Where.** `brainbow/inference/sliding_window.py::_detect_heads`.
-
-**Why.** The function takes one dummy forward to learn which of
-``semantic`` / ``instance`` / ``geometry`` / ``boundary`` the model
-returns and allocates accumulators for exactly that set.  An unknown
-key (i.e. one not in ``_KNOWN_HEADS``) is ignored, not aggregated.
-
-**Remediation.** If you add a new head, add its name to ``_KNOWN_HEADS``
-in `sliding_window.py` so it is aggregated.  If a model returns a dict
-with no recognised heads, the function raises ``ValueError`` rather
-than silently returning a near-empty result.
+`sliding_window_inference` no longer detects head sets from a dummy
+pass.  The unified 30-channel head means the model wrapper returns a
+single tensor `[B, 30, ...]`; the sliding-window code aggregates it as
+one tensor and slices into named fields downstream via
+`brainbow.losses.slice_head`.  See
+[brainbow/inference/sliding_window.py](../brainbow/inference/sliding_window.py).
 
 ---
 
-## 5. `freeze_dit_backbone` integer vs boolean is *not* a typo
+## 5. (Removed in Phase 1 cleanup -- `freeze_dit_backbone` integer schedule)
 
-**Symptom.** `freeze_dit_backbone: 1` in YAML behaves *differently*
-from `freeze_dit_backbone: true` and you can't tell why.
+The integer-epoch thaw branch in `on_train_epoch_start` was deleted.
+`freeze_*` flags are now plain bools applied **once at construction**
+by the model wrapper:
 
-**Where.** `brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start`.
-* `bool(True)` -> permanently frozen.
-* `bool(False)` -> permanently trainable.
-* `int(N)` -> frozen during epochs `0 .. N-1`, unfrozen at epoch `N`
-  (optimizer rebuilt at that hop so the new param group picks up
-  `dit_backbone_lr`).
+* `freeze_dit_backbone: true`  -> permanently frozen.
+* `freeze_dit_backbone: false` -> permanently trainable.
 
-**Why.** A two-stage warm-up schedule: epoch 0 trains heads + adapter
-only (~7 M params, fast convergence), then the DiT joins.  Encoding
-"epochs frozen" as an int is the simplest knob that survives YAML
-round-trips.
-
-**Remediation.** **Intentional.**  See
-[`ARCHITECT.md` §1.6](./ARCHITECT.md#16-freeze-flags--what-actually-moves)
-for the parameter-budget consequences and remember to bump the
-default `dit_backbone_lr` if you change `N`.
+Integer values are silently truthy (so `freeze_*: 0` means trainable
+and any non-zero int means frozen), but the per-epoch state machine
+that used to thaw at epoch `N` is gone.  See
+[brainbow/models/cosmos_transfer_2_5/wrapper.py](../brainbow/models/cosmos_transfer_2_5/wrapper.py)
+and [`ARCHITECT.md` §1.6](./ARCHITECT.md#16-freeze-flags--what-actually-moves).
 
 ---
 
@@ -281,7 +281,7 @@ with "tensor with version != 0 used in inference_mode".
 
 **Where.** Same code path as #13, but with
 `fullgraph=True`.  `default.yaml` says it's safe-to-leave-off; some
-recipes (`snemi3d.yaml:208`) had it on.
+recipes (`snemi3d.yaml:222`) had it on.
 
 **Why.** Same DDP + inference_mode interaction; `fullgraph` magnifies
 it because graph breaks are no longer tolerated.
@@ -352,37 +352,20 @@ in `try/except NotImplementedError`.
 
 ---
 
-## 19. Geometry channel layout was swapped in April 2026
+## 19. (Removed in Phase 1 cleanup -- separate `GeometryLoss` head)
 
-**Symptom.** Loading an older `head_geometry` checkpoint produces
-nonsense direction / covariance predictions while ``raw`` (ch 0) looks
-fine.  The total geometry loss starts ~10× higher than the same model
-trained from a fresh init.
+The standalone four-head structure (`semantic`, `instance`, `geometry`,
+`boundary`) was replaced by a unified 30-channel head whose layout is
+owned by `brainbow.losses._common.HEAD_LAYOUT`:
 
-**Where.**
-[`brainbow/losses/geometry.py`](../brainbow/losses/geometry.py) (forward slice),
-[`brainbow/models/cosmos_transfer_2_5/decoder.py`](../brainbow/models/cosmos_transfer_2_5/decoder.py)
-(activation policy), and
-[`brainbow/callbacks/tensorboard/heads.py`](../brainbow/callbacks/tensorboard/heads.py)
-(`_log_geometry`).
+```
+raw[0,1) | sem[1,2) | dir[2,5) | cov[5,11) | avg[11,14) | emb[14,30)
+```
 
-**Why.** Before April 2026 the geometry head was laid out as
-``[raw(1) | cov(S*(S+1)/2) | dir(S)]``.  It was swapped to
-``[raw(1) | dir(S) | cov(S*(S+1)/2)]`` so the (cheaper, more
-visualisable) direction channels sit immediately after raw and the
-larger covariance block lives at the tail.  The total channel count
-(`10` in 3-D) is unchanged, and the activation policy still applies
-sigmoid only to ch 0 — both `dir` and `cov` carry signed values, so
-sigmoid would clip them.  But the saved weights for `head_geometry`
-permute their output rows under the new layout.
-
-**Remediation.** Either (a) re-train fresh under the new layout, or
-(b) write a tiny `state_dict` shim that permutes
-`model.head_geometry.weight` and `.bias` rows
-``[0, 7, 8, 9, 1, 2, 3, 4, 5, 6]`` -> ``[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]``
-before `load_state_dict(strict=False)`.  Channel layout is owned by
-:class:`brainbow.losses.GeometryLoss` — that's the single source of
-truth, every other doc / wrapper / callback now mirrors it.
+The previous geometry-head layout swap (`raw|cov|dir` → `raw|dir|cov`)
+is a non-issue under the unified head — `dir` and `cov` are now fixed
+slices of the single output tensor.  Old `head_geometry` checkpoints
+are not loadable; train fresh under the unified head.
 
 ---
 
@@ -390,16 +373,14 @@ truth, every other doc / wrapper / callback now mirrors it.
 
 **Symptom.** A run trained with the old `background=0` mask suddenly
 shows a denser supervised aff target after pulling main; the
-TensorBoard `boundary/true/aff/{...}` panels are visibly less
+TensorBoard `true/aff/{01_t1,...}` panels are visibly less
 "checkerboard-y" along instance edges.
 
 **Where.**
-[`brainbow/losses/boundary.py`](../brainbow/losses/boundary.py)
-(`BoundaryLoss(__init__)` default `background: Optional[int] = -1`),
-[`brainbow/losses/instance.py`](../brainbow/losses/instance.py)
-(`InstanceLoss(__init__)` default `background: Optional[int] = -1`),
-and the explicit `background: -1` for both heads in
-[`configs/snemi3d.yaml`](../configs/snemi3d.yaml).
+[`brainbow/losses/combined.py`](../brainbow/losses/combined.py)
+(`CombinedLoss(__init__)` default `background: int = -1`) and
+the explicit `background: -1` for the unified loss in
+[`configs/default.yaml`](../configs/default.yaml).
 
 **Why.** The `FindBoundariesd` transform sets boundary voxels (the
 ones between adjacent instances) to label `0`.  With `background=0`,
@@ -415,8 +396,7 @@ trained with `background=0`, the supervised signal changes.  Loss
 values will jump by a few percent for a few hundred steps while the
 model adapts.  No state-dict fixup is needed; only the target
 construction is affected.  Pass `null` (YAML `~`) to opt out of any
-masking explicitly — semantically identical to `-1` here, but kept
-in the public API for symmetry with `BoundaryLoss`.
+masking explicitly — semantically identical to `-1` here.
 
 ---
 
@@ -424,11 +404,12 @@ in the public API for symmetry with `BoundaryLoss`.
 
 **Symptom.** A MICrONS crop with thousands of instances spikes
 `cuda_memory/max_allocated_gb_train` even though
-`weight_instance.max_hard_pairs: 4096` is set.  It looks like the
+`weight_emb.max_hard_pairs: 4096` is set.  It looks like the
 knob is broken.
 
 **Where.**
-[`brainbow/losses/instance.py::_compute_loss_push`](../brainbow/losses/instance.py)
+[`brainbow/losses/combined.py`](../brainbow/losses/combined.py) embedding
+push branch
 (``diff = rearrange(centers, "i e -> i 1 e") - rearrange(centers, "j e -> 1 j e")``).
 
 **Why.** The full ``[K, K, E]`` pairwise difference tensor is
@@ -445,7 +426,7 @@ doesn't bound the forward.  If you really need to cap the forward
 peak by ``K``, the loss has to compute ``pw`` row-blockwise (e.g. 256
 rows at a time, pre-mining top-k within each block before
 concatenating).  See the comment block in
-[`configs/snemi3d.yaml`](../configs/snemi3d.yaml) `weight_instance`
+[`configs/snemi3d.yaml`](../configs/snemi3d.yaml) `weight_emb`
 for the wording.
 
 ---
@@ -471,28 +452,13 @@ tables and aggregate offline.
 
 ---
 
-## 23. `BaseModel.get_output_channels()` returns `int`, docstring says `Dict[str, int]`
+## 23. (Removed in Phase 1 cleanup -- multi-head `get_output_channels`)
 
-**Symptom.** A multi-head consumer expects a dict ``{"semantic": 1,
-"instance": 10, ...}`` and gets a single integer
-(`semantic_channels`).  Code that walks the dict crashes with
-"int has no attribute keys".
-
-**Where.** `brainbow/models/base.py` declares the abstract method as
-returning `int`; the package docstring at
-`brainbow/models/__init__.py` claims `Dict[str, int]`.
-`CosmosTransfer3DWrapper.get_output_channels` returns `num_classes`
-only (semantic head); `Vista3DWrapper` doesn't implement it at all.
-
-**Why.** API drift.  Originally a single-head abstraction; multi-head
-support was bolted on at the wrapper level without retrofitting the
-ABC.
-
-**Remediation.** **Open issue.**  Don't rely on
-`get_output_channels()` for anything other than `semantic_channels`
-today.  If you need per-head widths, read them from the loss
-modules (`<loss>.task_channels`) or from the config block
-(`model.{semantic,instance,boundary}_channels`).
+The four-head dict has been replaced by a unified 30-channel head, so
+`BaseModel.get_output_channels()` returns the single integer
+`HEAD_CHANNELS = 30` (or whatever the wrapper was configured with).
+Per-field widths are read from `brainbow.losses.HEAD_LAYOUT`, e.g.
+`HEAD_LAYOUT["dir"].stop - HEAD_LAYOUT["dir"].start`.
 
 ---
 
@@ -521,15 +487,15 @@ non-zero ranks attempt their `local_files_only` load.
 
 ---
 
-## 25. `instance/loss/norm` rises monotonically during training
+## 25. `loss/emb/norm` rises monotonically during training
 
 **Symptom.** Embedding-norm regulariser scalar climbs steadily from
 ~3 to ~4 over 30 epochs even though `weight_norm: 0.001` is enabled.
 
 **Where.**
-[`brainbow/losses/instance.py::_compute_loss_norm`](../brainbow/losses/instance.py)
-and the `weight_norm` knob in
-[`configs/snemi3d.yaml`](../configs/snemi3d.yaml) `weight_instance`.
+[`brainbow/losses/combined.py`](../brainbow/losses/combined.py)
+embedding-norm branch and the `weight_norm` knob in
+[`configs/default.yaml`](../configs/default.yaml) under `weight_emb`.
 
 **Why.** The push term repels centroids out to a margin of
 `2 * delta_d = 3.0`.  When a single crop contains many instances
@@ -592,61 +558,24 @@ pulling main; the train curves are unaffected.
 
 ---
 
-## 27. `freeze_dit_backbone: N` is an epoch count, not a layer count
+## 27. (Removed in Phase 1 cleanup -- `freeze_dit_backbone: N` epoch count)
 
-**Symptom.** ``model.freeze_dit_backbone: 2`` in a config -- you read
-it as "freeze the first 2 DiT blocks" because that's a familiar
-fine-tuning idiom, but every DiT parameter shows
-``requires_grad: True`` from epoch 2 onward.
-
-**Where.**
-[`brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start`](../brainbow/modules/cosmos_transfer_2_5/base.py)
-and the ``freeze_dit_backbone`` table in
-[`doc/ARCHITECT.md`](./ARCHITECT.md) §1.6 .
-
-**Why.** The integer form is **phased epoch-count semantics**: ``N``
-means "freeze the *entire* DiT during epochs ``0 .. N-1``, then
-unfreeze at the start of epoch ``N`` (and rebuild the optimiser so
-the new param group picks up ``optimizer.dit_backbone_lr``)".  There
-is **no** "freeze first N blocks" code path -- `freeze_dit_backbone()`
-on the wrapper toggles `requires_grad` on every parameter under
-``self.dit``.
-
-**Remediation.** Read the SNEMI3D config comment block (now
-corrected) or the `ARCHITECT.md` table.  If you genuinely need
-per-block layer freezing, you'd have to walk
-`self.dit.blocks[:N].requires_grad_(False)` yourself; not currently
-exposed via Hydra.
+The integer-epoch interpretation has been deleted along with the
+per-epoch thaw machinery (see #5).  `freeze_dit_backbone` is now a
+plain bool: `true` freezes the whole DiT for the run, `false` keeps
+it trainable.  If you need per-block layer freezing, walk
+`self.dit.blocks[:N].requires_grad_(False)` yourself outside the
+Hydra surface.
 
 ---
 
-## 28. `weight_geometry.dir_target: skeleton` raises at construction
+## 28. (Removed in Phase 1 cleanup -- `weight_geometry.dir_target`)
 
-**Symptom (historical).**  Setting
-``weight_geometry.dir_target: skeleton`` in a YAML config didn't
-actually change supervision -- the direction-field target was still
-the centroid-pointing field.
-
-**Where.**
-[`brainbow/losses/geometry.py::GeometryLoss.__init__`](../brainbow/losses/geometry.py),
-[`brainbow/transforms/direction.py::compute_direction_field`](../brainbow/transforms/direction.py),
-[`brainbow/callbacks/tensorboard/heads.py::_log_geometry`](../brainbow/callbacks/tensorboard/heads.py).
-
-**Why.**  Before the fix, ``GeometryLoss`` swallowed every unknown
-kwarg via ``**kwargs`` (kept for ``CombinedLoss``-side flat-kwarg
-forwarding flexibility), so ``dir_target=skeleton`` was silently
-dropped.  ``compute_direction_field`` only implements the centroid
-target; there is no skeleton path.  The TB callback read
-``getattr(geom_loss, "dir_target", "centroid")`` and so always
-labelled the panel ``geometry/pred/dir_centroid``.
-
-**Remediation.** Fixed: ``GeometryLoss(dir_target=...)`` now stores
-the value and **raises** at construction unless ``dir_target ==
-"centroid"``.  When you actually want a skeleton target, implement
-the skeleton branch in
-``compute_direction_field`` and relax the guard.  The TB callback
-keeps reading ``loss.dir_target`` so the new tag flows through
-automatically once the implementation lands.
+`GeometryLoss` is gone; direction supervision is now a slice of the
+unified head (`HEAD_LAYOUT["dir"]`).  There is currently no
+configurable direction target -- centroid-pointing is the only
+implementation in `brainbow/transforms/direction.py`.  Adding a
+skeleton target is a clean follow-up but not exposed via Hydra today.
 
 ---
 
@@ -719,50 +648,46 @@ top of every training log.
 
 ---
 
-## 32. Vista geometry head's `raw` channel was **not** sigmoided (resolved by #39)
+## 32. Vista regression channels were sigmoided in early versions (resolved by #39)
 
 **Symptom (historical).** Training the **Vista3D** wrapper with
-``weight_geometry.weight_raw > 0`` produced a high
-``geometry/loss/raw`` that didn't decay below ~0.5 even after many
-epochs, while the same loss config dropped to ~0.07 on the Cosmos
-wrapper.
+``weight_raw > 0`` (or any other regression head) produced a high
+``loss/raw`` that didn't decay below ~0.5 even after many epochs,
+while the same loss config dropped to ~0.07 on the Cosmos wrapper.
 
 **Resolved by #39.**  The activation policy is now uniform across
 both wrappers: every regression channel (raw, avg, dir, cov) is
-linear; only classification channels (semantic, boundary aff) carry
-sigmoid.  The mismatch this gotcha described disappeared as soon as
-the Cosmos path stopped sigmoiding geometry ch 0.
+linear; only `sem` (binary semantic) carries sigmoid; the derived
+12-channel affinity heads compute their own sigmoids inside
+`soft_aff_from_field`.
 
 ---
 
 ## 33. `loss.weight_geometry: { weight_dir: 1.0 }` (no `weight:`) used to silently disable the head
 
-**Symptom (historical).**  A nested mapping omits the head's
+**Symptom (historical).**  A nested mapping omits the field's
 ``weight:`` key, intending to inherit the default::
 
-    weight_geometry:
-      weight_dir: 1.0
-      weight_cov: 1.0
-      weight_raw: 1.0
+    weight_dir:
+      loss: l1
 
-The geometry head is then **not instantiated** and every geometry
-sub-loss kwarg is silently dropped.  No warning, no zero-scalar, just
-nothing.
+The field is then **not instantiated** and every sub-loss kwarg is
+silently dropped.  No warning, no zero-scalar, just nothing.
 
 **Where.**
-[`brainbow/losses/combined.py::_split_head`](../brainbow/losses/combined.py).
+[`brainbow/losses/combined.py::_split_field`](../brainbow/losses/combined.py).
 
-**Why.** Before the fix, ``_split_head`` used a per-head
-``default_weight`` argument (``0.0`` for geometry / boundary,
-``1.0`` for semantic / instance).  In the nested-mapping branch
+**Why.** Before the fix, ``_split_field`` used a per-field
+``default_weight`` argument (``0.0`` for some fields, ``1.0`` for
+others).  In the nested-mapping branch
 ``d.pop("weight", default_weight)`` therefore returned ``0.0`` for
-geometry / boundary, and the head was skipped.
+those fields, and they were skipped.
 
 **Remediation.** Fixed: a nested mapping without ``weight:`` is now
-treated as ``weight: 1.0`` regardless of head -- a user who wrote a
-nested block clearly intended to enable the head.  If you want the
-head disabled, write ``weight_<head>: 0`` (scalar) or
-``weight_<head>: { weight: 0 }`` (nested explicit).
+treated as ``weight: 1.0`` regardless of field -- a user who wrote a
+nested block clearly intended to enable the field.  If you want the
+field disabled, write ``weight_<field>: 0`` (scalar) or
+``weight_<field>: { weight: 0 }`` (nested explicit).
 
 ---
 
@@ -892,88 +817,51 @@ one canonical location.
 
 ## 39. Activation policy migration April 2026: regression heads are now linear
 
-**Symptom (historical).** ``geometry/loss/raw``,
-``boundary/loss/raw``, and ``boundary/loss/avg`` decayed slower than
-expected -- on `geometry/loss/raw` the curve flattened around 0.07
-on Cosmos and ~0.5 on Vista.  Loading any pre-April 2026 checkpoint
-under the new code produces nonsense on those channels.
+**Symptom (historical).** Regression-supervised channels (raw, dir,
+cov, avg) decayed slower than expected and stalled with a saturation
+plateau.  Loading any pre-April 2026 checkpoint under the new code
+produces nonsense on those channels.
 
 **Where.**
 [`brainbow/models/cosmos_transfer_2_5/decoder.py`](../brainbow/models/cosmos_transfer_2_5/decoder.py)
 (``_DecoderAdapter3D.forward`` -- the activation contract),
 [`brainbow/models/vista/wrapper.py`](../brainbow/models/vista/wrapper.py)
 (forward -- mirrors the contract),
-[`brainbow/losses/geometry.py::_compute_loss_raw`](../brainbow/losses/geometry.py)
-(target no longer clamped to ``[0, 1]``),
-[`brainbow/losses/boundary.py`](../brainbow/losses/boundary.py)
-(module docstring + sub-loss docstrings).
+[`brainbow/losses/combined.py`](../brainbow/losses/combined.py)
+(field docstrings document the linear regression contract).
 
 **Why.** The previous policy was "sigmoid everywhere we could".  For
-the **classification-supervised** channels (semantic, the 6 boundary
-affinities) that's correct -- BCE and Dice / IoU consume
-probabilities by construction.  For the **regression-supervised**
-channels (geometry's raw / dir / cov, boundary's raw and avg(3))
-sigmoid + L1 has a saturation problem: the chain-rule factor
-through ``sigmoid'(x) = p(1-p)`` collapses to ~0 whenever the target
-is near ``0`` or ``1``, so very dark / very bright voxels get
-effectively zero gradient and the loss stalls.  Moving those heads
-to linear gives the regression loss a constant gradient magnitude
-(``±1`` for L1 everywhere except the kink) and lets the model
-actually reach the extremes.
+the **classification-supervised** channels (semantic) that's correct
+-- BCE and Dice / IoU consume probabilities by construction.  For the
+**regression-supervised** channels (raw, dir, cov, avg) sigmoid + L1
+has a saturation problem: the chain-rule factor through
+``sigmoid'(x) = p(1-p)`` collapses to ~0 whenever the target is near
+``0`` or ``1``, so very dark / very bright voxels get effectively
+zero gradient and the loss stalls.  Moving those heads to linear
+gives the regression loss a constant gradient magnitude (``±1`` for
+L1 everywhere except the kink) and lets the model actually reach the
+extremes.
 
-The new rule is **sigmoid only where the loss is BCE / Dice / IoU**:
+The current rule is **sigmoid only where the loss is BCE / Dice**:
 
-| Head      | Channel(s)              | Supervision     | Activation |
-| --------- | ----------------------- | --------------- | ---------- |
-| semantic  | all                     | BCE/Dice/IoU    | sigmoid    |
-| instance  | embedding               | discriminative  | linear     |
-| geometry  | raw, dir, cov           | L1 / MSE        | linear     |
-| boundary  | raw, avg(3)             | L1 / MSE        | linear     |
-| boundary  | aff(6)                  | BCE/Dice/IoU    | sigmoid    |
+| Field        | Slice         | Supervision     | Activation |
+| ------------ | ------------- | --------------- | ---------- |
+| `raw`        | `[0, 1)`      | L1 / MSE        | linear     |
+| `sem`        | `[1, 2)`      | BCE / Dice      | sigmoid    |
+| `dir`        | `[2, 5)`      | L1 / MSE        | linear     |
+| `cov`        | `[5, 11)`     | L1 / MSE        | linear     |
+| `avg`        | `[11, 14)`    | L1 / MSE        | linear     |
+| `emb`        | `[14, 30)`    | discriminative  | linear     |
+| `aff_avg`/`aff_emb` (derived) | n/a | BCE / Dice | applied internally by `soft_aff_from_field` |
 
-**Remediation.** **Re-train from scratch** for any head whose
-activation just changed.  Concretely, ``head_geometry`` (channel 0
-permutes range pre-/post-fix) and ``head_boundary`` channels 0-3
-will produce wrong outputs if you load a pre-fix checkpoint without
-fixing up the corresponding rows of ``head.weight`` and
-``head.bias``.
+**Remediation.** Old four-head checkpoints can't be loaded under the
+unified head -- train fresh.  Inside the unified head, regression
+fields are linear and visualisation panels apply a `clamp(0, 1)` for
+display only (see
+[`brainbow/callbacks/tensorboard/heads.py`](../brainbow/callbacks/tensorboard/heads.py)).
 
-If you must resume an in-flight pre-fix run, three options:
-
-1. **Re-init only the changed rows**::
-
-       with torch.no_grad():
-           m.head_geometry.conv_out.weight[:1].normal_(0, 1e-2)
-           m.head_geometry.conv_out.bias[:1].zero_()
-           m.head_boundary.conv_out.weight[:4].normal_(0, 1e-2)
-           m.head_boundary.conv_out.bias[:4].zero_()
-
-   Other rows (``head_geometry[1:]``, ``head_boundary[4:]``,
-   semantic, instance) are unaffected because their activation
-   policy didn't change.  Expect ~few hundred steps to recover
-   ``raw`` / ``avg`` quality.
-2. **Inverse-sigmoid the existing weights.**  The pre-fix model
-   produced ``sigmoid(z)``; the post-fix model wants to produce ``z``
-   directly.  The bias shift to keep the output mean at the target
-   mean ``μ`` is ``b_new = logit(μ)``; the weight scale matters less
-   because the data overrides it within a few steps.  Faster to
-   converge than option 1 but only worth doing if the run is far
-   in.
-3. **Start a new run.**  Cleanest -- the val curves will be
-   comparable to literature numbers without the saturation
-   confound.
-
-The TensorBoard ``raw`` / ``avg`` panels already ``clamp(0, 1)``
-before display
-([`brainbow/callbacks/tensorboard/heads.py`](../brainbow/callbacks/tensorboard/heads.py)
-``_log_geometry`` line 284, ``_add_boundary_panels`` lines 444-446),
-so the visualizer is display-safe under the linear-prediction
-policy.  Sliding-window inference / downstream consumers should
-clamp at the boundary if they need a strict ``[0, 1]`` output for
-visualization or thresholding.
-
-**Replaces gotcha #32** (Vista geometry raw not sigmoided).  Under
-the new uniform policy, both wrappers emit linear geometry and the
+**Replaces gotcha #32** (Vista regression raw not sigmoided).  Under
+the new uniform policy, both wrappers emit linear regression and the
 mismatch is gone.
 
 ---
