@@ -6,8 +6,8 @@ import torch
 from einops import rearrange, repeat
 
 from brainbow.callbacks.tensorboard.geometry import (
-    _render_cov_glyphs,
-    _render_dir_quiver,
+    _render_cov_flow,
+    _render_dir_flow,
 )
 from brainbow.callbacks.tensorboard.tags import TagContext
 from brainbow.callbacks.tensorboard.viz import (
@@ -166,26 +166,31 @@ def _log_predictions(
 
     sem = _to_2d(fields["sem"]).clamp(0.0, 1.0)
     sem_ids = (sem[:, 0] > 0.5).long()
-    tb.add_images(
-        head.tag("pred/sem"),
-        repeat(sem, "b 1 h w -> b 3 h w"),
-        global_step=epoch,
-    )
+    sem_rgb = repeat(sem, "b 1 h w -> b 3 h w")
+    tb.add_images(head.tag("pred/sem"), sem_rgb, global_step=epoch)
 
     # ----- dir / cov -----
-    dir_rgb = _render_dir_quiver(
+    # Optical-flow-style HSV overlays on the raw EM (see geometry.py):
+    # `dir` colours each foreground pixel by its centroid-direction
+    # angle (hue) and magnitude (value); `cov` colours by the principal
+    # eigenvector orientation (hue) with anisotropy → saturation and
+    # max-eigenvalue → value.
+    dir_rgb = _render_dir_flow(
         _to_2d(fields["dir"]), images[:n], sem_ids, spatial_dims,
-        dir_target="centroid",
     )
     tb.add_images(head.tag("pred/dir"), dir_rgb, global_step=epoch)
 
     cov_tri = _to_2d(fields["cov"])
     cov_mat = upper_tri_to_matrix(cov_tri, spatial_dims)
-    cov_rgb = _render_cov_glyphs(cov_mat, images[:n], sem_ids, spatial_dims)
+    cov_rgb = _render_cov_flow(cov_mat, images[:n], sem_ids, spatial_dims)
     tb.add_images(head.tag("pred/cov"), cov_rgb, global_step=epoch)
 
     # ----- avg + avg-aff -----
-    avg_rgb = _to_2d(fields["avg"]).clamp(0.0, 1.0)
+    # Multiply by the predicted sem so background voxels fade to black
+    # and the per-instance RGB triplet reads cleanly against the dark
+    # backdrop, matching the `pred/label/mul` and `pred/emb/_{algo}`
+    # convention.
+    avg_rgb = _to_2d(fields["avg"]).clamp(0.0, 1.0) * sem_rgb
     tb.add_images(head.tag("pred/avg/val"), avg_rgb, global_step=epoch)
 
     if spatial_dims == 3:
@@ -197,11 +202,14 @@ def _log_predictions(
         )
 
     # ----- embedding projection + emb-aff + clustered labels -----
+    # Multiply the manifold projection by the predicted sem so the
+    # background fades to black, same convention as `pred/avg/val` and
+    # `pred/label/mul`.
     emb_2d = _to_2d(fields["emb"])
     emb_rgb = _project_embedding(
         emb_2d, n_components=3,
         algorithm=projection_algorithm, backend=projection_backend,
-    )
+    ) * sem_rgb
     tb.add_images(
         head.tag(f"pred/emb/_{projection_algorithm}"),
         emb_rgb,
@@ -227,7 +235,7 @@ def _log_predictions(
         # Multiply by predicted semantic probability so masked-out
         # voxels fade to black -- easier to read in TB next to the GT
         # label panel.
-        label_rgb_mul = label_rgb * repeat(sem, "b 1 h w -> b 3 h w")
+        label_rgb_mul = label_rgb * sem_rgb
         tb.add_images(head.tag("pred/label/mul"), label_rgb_mul, global_step=epoch)
 
 

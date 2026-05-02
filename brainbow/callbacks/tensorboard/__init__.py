@@ -29,9 +29,13 @@ Module layout::
     viz.py            -- low-level image utilities (central-slice,
                          per-image min-max normalise, HSV palette,
                          manifold projection of embeddings)
-    geometry.py       -- matplotlib glyph (covariance) + quiver (dir)
-                         renderers; isolated so the rest of the package
-                         stays NumPy / PyTorch-only
+    geometry.py       -- vectorised optical-flow-style HSV overlays for
+                         the predicted ``dir`` (Middlebury hue/value of
+                         the centroid-direction vector) and ``cov``
+                         (principal-eigenvector orientation with
+                         anisotropy → saturation) panels, mask-composited
+                         on top of the raw EM image (foreground = pure
+                         flow colour, background = raw EM)
     heads.py          -- unified-head panel logger
     image_logger.py   -- Lightning callback ``ImageLogger`` (cache first
                          batch of each epoch, forward under eval +

@@ -1,228 +1,217 @@
-"""Matplotlib-based geometry renderers.
+"""Vectorised geometry overlays for the unified-head TB panels.
 
-Ellipse glyph and direction quiver overlays used by the
-``{stage}/{mode}/geometry/*`` panels.  These functions are the only
-consumers of matplotlib in the TensorBoard logger, isolated here so
-the rest of the package stays NumPy/PyTorch-only.
+Optical-flow-style HSV encodings of the predicted ``dir`` and ``cov``
+fields, masked by the predicted semantic foreground:
+
+* :func:`_render_dir_flow` -- Middlebury HSV encoding of the in-plane
+  (Y, X) direction vector.  Hue = angle, value = magnitude.
+* :func:`_render_cov_flow` -- HSV encoding of the principal eigenvector
+  of the structure tensor.  Hue = orientation (mod π since axes are
+  bidirectional), value = max-eigenvalue magnitude, saturation =
+  anisotropy ratio (round → washed out, elongated → vivid).
+
+Foreground voxels (``mask > 0``) display the **pure** flow colour;
+background voxels keep the raw EM intensity verbatim.  No soft alpha
+blend -- it muddied the hue and made it hard to read direction at
+glance.
+
+Both renderers are pure NumPy / PyTorch -- no matplotlib pass per
+batch -- so the TB callback now overlays at GPU-tensor speed instead of
+spinning up a matplotlib figure per image.
 """
 
+import math
 from typing import Optional
 
-import numpy as np
 import torch
-import torch.nn.functional as F
-from einops import rearrange
+from einops import rearrange, repeat
+
+from brainbow.callbacks.tensorboard.viz import _hsv_to_rgb, _normalise
 
 
-def _render_cov_glyphs(
-    cov_mat: torch.Tensor,
-    img_rgb: torch.Tensor,
-    labels: torch.Tensor,
-    S: int,
-    step: int = 4,
+def _to_rgb(img: torch.Tensor) -> torch.Tensor:
+    """Broadcast a 1-channel grayscale to 3-channel RGB."""
+    if img.shape[1] == 1:
+        return repeat(img, "b 1 h w -> b 3 h w")
+    return img
+
+
+def _vector_to_flow_rgb(
+    u: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    angle_period: float = 2.0 * math.pi,
+    max_mag: Optional[torch.Tensor] = None,
+    sat: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Render EDT structure-tensor ellipse glyphs on the EM image.
-
-    Each foreground pixel on a subsampled grid gets an ellipse whose:
-    - **size** reflects the maximum eigenvalue relative to the global max
-      (large near instance centres where EDT is high, small near boundaries).
-    - **aspect ratio** reflects the eigenvalue ratio (elongated near
-      boundaries, round near the medial axis).
-    - **angle** is aligned with the major eigenvector (boundary tangent
-      direction for anisotropic regions).
+    """Map a 2-D vector field to optical-flow RGB.
 
     Args:
-        cov_mat: [B, H, W, s1, s2] predicted covariance matrices (2D-sliced).
-        img_rgb: [B, 3, H, W] grayscale EM repeated to 3 channels.
-        labels: [B, H, W] fg/bg mask (any int tensor; 0 = background, >0 = foreground).
-        S: spatial_dims (2 or 3).  For 3D the last 2x2 submatrix is used.
-        step: grid spacing for glyph placement.
+        u: ``[B, H, W]`` horizontal (X) component.
+        v: ``[B, H, W]`` vertical (Y) component.
+        angle_period: ``2π`` for full directional encoding (vector flow);
+            ``π`` for axial encoding so ``+v`` and ``-v`` map to the same
+            hue (line orientation, e.g. structure-tensor eigenvectors).
+        max_mag: ``[B, 1, 1]`` per-image magnitude normaliser.  ``None``
+            uses the per-image ``max(|uv|)`` so each panel auto-scales.
+        sat: ``[B, H, W]`` saturation in ``[0, 1]``.  ``None`` defaults to
+            ones (fully saturated, classic optical-flow look).
 
     Returns:
-        [B, 3, H, W] tensor with ellipse glyphs overlaid on the EM image.
+        ``[B, 3, H, W]`` RGB in ``[0, 1]``.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Ellipse
+    B, H, W = u.shape
+    angle = torch.atan2(v, u) + math.pi               # [0, 2π]
+    if angle_period < 2.0 * math.pi - 1e-6:
+        angle = angle % angle_period
+    hue = (angle / angle_period) % 1.0
 
-    B, _, H, W = img_rgb.shape
-    device = img_rgb.device
-    max_glyph_radius = step * 1.2
-    COLOR = (0.0, 0.8, 1.0)
+    mag = torch.sqrt(u * u + v * v)
+    if max_mag is None:
+        max_mag = rearrange(
+            mag.amax(dim=(-2, -1)), "b -> b 1 1",
+        ).clamp(min=1e-8)
+    val = (mag / max_mag).clamp(0.0, 1.0)
 
-    result = []
-    for b in range(B):
-        bg = rearrange(img_rgb[b].detach().cpu().float(), "c h w -> h w c").numpy().copy()
-        lbl = labels[b].detach().cpu().numpy()
-        mat = cov_mat[b].detach().cpu().float().numpy()
+    if sat is None:
+        sat = torch.ones_like(val)
 
-        rows_sub = np.arange(step // 2, H, step)
-        cols_sub = np.arange(step // 2, W, step)
-
-        # First pass: find global max eigenvalue for normalisation
-        max_eig_global = 0.0
-        for r in rows_sub:
-            for c in cols_sub:
-                if lbl[r, c] == 0:
-                    continue
-                T = mat[r, c]
-                if S == 3:
-                    T = T[1:, 1:]                                  # project 3x3 → 2x2 (YX plane)
-                e = np.abs(np.linalg.eigvalsh(T)).max()
-                if e > max_eig_global:
-                    max_eig_global = e
-        if max_eig_global < 1e-8:
-            max_eig_global = 1.0
-
-        fig, ax = plt.subplots(1, 1, figsize=(W / 64, H / 64), dpi=64)
-        ax.imshow(bg, aspect="equal", interpolation="nearest")
-        ax.set_xlim(-0.5, W - 0.5)
-        ax.set_ylim(H - 0.5, -0.5)
-        ax.axis("off")
-        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-
-        # Second pass: draw glyphs
-        for r in rows_sub:
-            for c in cols_sub:
-                if lbl[r, c] == 0:
-                    continue
-                T = mat[r, c]
-                if S == 3:
-                    T = T[1:, 1:]
-
-                eigvals, eigvecs = np.linalg.eigh(T)
-                abs_eig = np.abs(eigvals)
-                if abs_eig.max() < 1e-8:
-                    continue
-
-                scale = abs_eig.max() / max_eig_global
-                glyph_radius = max_glyph_radius * np.clip(scale, 0.1, 1.0)
-
-                ratio = abs_eig.min() / max(abs_eig.max(), 1e-8)
-
-                idx_max = int(abs_eig.argmax())
-                angle = np.degrees(np.arctan2(
-                    eigvecs[1, idx_max], eigvecs[0, idx_max],
-                ))
-
-                ax.add_patch(Ellipse(
-                    xy=(c, r),
-                    width=2 * glyph_radius,
-                    height=2 * glyph_radius * ratio,
-                    angle=angle,
-                    fill=True, facecolor=COLOR, edgecolor=COLOR,
-                    linewidth=1.2, alpha=0.8,
-                ))
-
-        fig.canvas.draw()
-        arr = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
-        plt.close(fig)
-
-        rendered = rearrange(
-            torch.from_numpy(arr).float() / 255.0,
-            "h w c -> c h w",
-        )
-        rendered = rearrange(
-            F.interpolate(
-                rearrange(rendered, "c h w -> 1 c h w"),
-                size=(H, W), mode="bilinear", align_corners=False,
-            ),
-            "1 c h w -> c h w",
-        )
-        result.append(rendered)
-
-    return torch.stack(result).to(device)
+    h_flat = rearrange(hue, "b h w -> (b h w)")
+    s_flat = rearrange(sat, "b h w -> (b h w)")
+    v_flat = rearrange(val, "b h w -> (b h w)")
+    rgb = _hsv_to_rgb(h_flat, s_flat, v_flat)         # [(b h w), 3]
+    return rearrange(rgb, "(b h w) c -> b c h w", b=B, h=H, w=W)
 
 
-def _render_dir_quiver(
+def _overlay(
+    fg_rgb: torch.Tensor,
+    bg_rgb: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Composite ``fg_rgb`` onto ``bg_rgb`` using ``mask`` as a hard gate.
+
+    Foreground pixels (``mask > 0``) show the pure flow colour; background
+    pixels (``mask == 0``) keep the raw EM intensity verbatim.  No soft
+    alpha blend -- the foreground hue is always at full strength so the
+    direction / orientation reads at glance.
+    """
+    if mask.dim() == 3:
+        mask = rearrange(mask, "b h w -> b 1 h w")
+    w = mask.float().clamp(0.0, 1.0)
+    return bg_rgb * (1.0 - w) + fg_rgb * w
+
+
+def _render_dir_flow(
     dir_val: torch.Tensor,
     img_rgb: torch.Tensor,
     labels: torch.Tensor,
     S: int,
-    dir_target: str = "centroid",
-    step: int = 4,
 ) -> torch.Tensor:
-    """Render direction vectors as quiver arrows on the EM image.
+    """Optical-flow-style direction overlay.
 
-    Arrow length reflects the global magnitude of each direction vector:
-    boundary pixels (far from centroid/skeleton) produce long arrows,
-    centre pixels produce short ones.
+    The in-plane (Y, X) components of the predicted direction field are
+    encoded into HSV (hue = angle, value = magnitude) and composited
+    onto the raw EM image using ``labels`` as a hard mask.  Foreground
+    pixels show the pure flow colour; background pixels keep the raw EM
+    intensity.
 
     Args:
-        dir_val: [B, S, H, W] predicted direction channels (2D-sliced).
-        img_rgb: [B, 3, H, W] grayscale EM repeated to 3 channels.
-        labels: [B, H, W] fg/bg mask (any int tensor; 0 = background, >0 = foreground).
+        dir_val: ``[B, S, H, W]`` predicted direction channels (already
+            sliced to 2-D).  For 3-D the channels are ``(Z, Y, X)``; for
+            2-D they are ``(Y, X)``.
+        img_rgb: ``[B, C, H, W]`` grayscale EM (1- or 3-channel).
+        labels: ``[B, H, W]`` foreground mask (any int tensor; 0 =
+            background, >0 = foreground).
         S: spatial_dims (2 or 3).
-        dir_target: ``"centroid"`` or ``"skeleton"`` (cosmetic only).
-        step: grid spacing for arrow placement.
 
     Returns:
-        [B, 3, H, W] tensor with quiver arrows overlaid on the EM image.
+        ``[B, 3, H, W]`` RGB tensor with the flow overlay on the EM image.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    B, _, H, W = img_rgb.shape
-    device = img_rgb.device
-    COLOR = (1.0, 0.4, 0.0, 0.9)
-
-    rows_sub = np.arange(step // 2, H, step)
-    cols_sub = np.arange(step // 2, W, step)
-    CC, RR = np.meshgrid(cols_sub, rows_sub)
-
-    result = []
-    for b in range(B):
-        bg = rearrange(img_rgb[b].detach().cpu().float(), "c h w -> h w c").numpy().copy()
-        lbl = labels[b].detach().cpu().numpy()
-        d = dir_val[b].detach().cpu().float().numpy()
-
-        if S == 3:
-            U = d[2][RR, CC]
-            V = d[1][RR, CC]
-        else:
-            U = d[0][RR, CC]
-            V = d[1][RR, CC]
-
-        fg = lbl[RR, CC] > 0
-
-        fig, ax = plt.subplots(1, 1, figsize=(W / 64, H / 64), dpi=64)
-        ax.imshow(bg, aspect="equal", interpolation="nearest")
-        m = fg.ravel()
-        if m.any():
-            ax.quiver(
-                CC.ravel()[m], RR.ravel()[m],
-                U.ravel()[m], V.ravel()[m],
-                color=COLOR,
-                angles="xy", scale_units="xy", scale=1.0 / (step * 2.0),
-                width=0.014, headwidth=4.0, headlength=4.5,
-            )
-        ax.set_xlim(-0.5, W - 0.5)
-        ax.set_ylim(H - 0.5, -0.5)
-        ax.axis("off")
-        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-
-        fig.canvas.draw()
-        arr = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
-        plt.close(fig)
-
-        rendered = rearrange(
-            torch.from_numpy(arr).float() / 255.0,
-            "h w c -> c h w",
-        )
-        rendered = rearrange(
-            F.interpolate(
-                rearrange(rendered, "c h w -> 1 c h w"),
-                size=(H, W), mode="bilinear", align_corners=False,
-            ),
-            "1 c h w -> c h w",
-        )
-        result.append(rendered)
-
-    return torch.stack(result).to(device)
+    bg = _to_rgb(_normalise(img_rgb).clamp(0.0, 1.0))
+    if S == 3:
+        v = dir_val[:, 1]                              # Y component
+        u = dir_val[:, 2]                              # X component
+    else:
+        u = dir_val[:, 0]
+        v = dir_val[:, 1]
+    fg_mask = (labels > 0).float()
+    flow_rgb = _vector_to_flow_rgb(u, v)
+    return _overlay(flow_rgb, bg, fg_mask)
 
 
-__all__ = ["_render_cov_glyphs", "_render_dir_quiver"]
+def _render_cov_flow(
+    cov_mat: torch.Tensor,
+    img_rgb: torch.Tensor,
+    labels: torch.Tensor,
+    S: int,
+) -> torch.Tensor:
+    """Optical-flow-style covariance overlay.
 
-_ = Optional  # keep forward-compat typing import available
+    Each foreground pixel's structure-tensor matrix is eigendecomposed
+    and rendered via HSV:
+
+    * **Hue** -- orientation of the major eigenvector, folded into
+      ``[0, π)`` so antipodal directions share a colour (the principal
+      axis is a line, not an arrow).
+    * **Value** -- max-eigenvalue magnitude, normalised by the per-image
+      foreground max so high-curvature regions glow.
+    * **Saturation** -- anisotropy ratio
+      ``(λ_max - λ_min) / λ_max`` so isotropic (round) regions wash out
+      to grey and elongated regions stay vivid.
+
+    Foreground pixels show the pure flow colour; background pixels keep
+    the raw EM intensity (hard mask, no soft alpha blend).
+
+    Args:
+        cov_mat: ``[B, H, W, S, S]`` predicted covariance / structure
+            tensor matrices (already sliced to 2-D).  For 3-D the YX
+            submatrix is used.
+        img_rgb: ``[B, C, H, W]`` grayscale EM (1- or 3-channel).
+        labels: ``[B, H, W]`` foreground mask (any int tensor; 0 =
+            background, >0 = foreground).
+        S: spatial_dims (2 or 3).
+
+    Returns:
+        ``[B, 3, H, W]`` RGB tensor with the cov overlay on the EM image.
+    """
+    bg = _to_rgb(_normalise(img_rgb).clamp(0.0, 1.0))
+
+    mat = cov_mat
+    if S == 3:
+        mat = mat[..., 1:, 1:]                         # project YX submatrix
+
+    # Symmetrise for numerical safety -- eigh requires Hermitian input
+    # and predictions can drift slightly off-symmetric.
+    sym = 0.5 * (mat + rearrange(mat, "... a b -> ... b a"))
+    eigvals, eigvecs = torch.linalg.eigh(sym.float())  # ascending order
+
+    abs_eig = eigvals.abs()
+    max_eig = abs_eig[..., 1]                          # [B, H, W]
+    min_eig = abs_eig[..., 0]
+    anisotropy = (
+        (max_eig - min_eig) / max_eig.clamp(min=1e-8)
+    ).clamp(0.0, 1.0)
+
+    # Major eigenvector lives in the last column (eigh returns ascending
+    # eigenvalues); rows 0/1 correspond to (Y, X) of the YX submatrix.
+    vec_y = eigvecs[..., 0, 1]
+    vec_x = eigvecs[..., 1, 1]
+
+    # Per-image normaliser uses foreground only so background noise does
+    # not wash out the colour scale.
+    fg_mask = (labels > 0).float()
+    fg_max = (max_eig * fg_mask).amax(dim=(-2, -1)).clamp(min=1e-8)
+    fg_max = rearrange(fg_max, "b -> b 1 1")
+
+    # eigh returns unit vectors; scale by max_eig so |(u,v)| = max_eig
+    # and `_vector_to_flow_rgb` picks up the magnitude as VAL.
+    flow_rgb = _vector_to_flow_rgb(
+        vec_x * max_eig, vec_y * max_eig,
+        angle_period=math.pi,
+        max_mag=fg_max,
+        sat=anisotropy,
+    )
+    return _overlay(flow_rgb, bg, fg_mask)
+
+
+__all__ = ["_render_dir_flow", "_render_cov_flow"]

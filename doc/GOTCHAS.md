@@ -249,7 +249,8 @@ the training fp16/bf16 forward (especially logits near 0).
 -- runs the forward under `autocast` then casts the output dict back
 to fp32.
 
-**Why.** Image rendering / matplotlib glyphs require fp32 precision.
+**Why.** Image rendering -- HSV→RGB LUTs, eigendecomposition for the
+`cov` overlay, manifold projection -- requires fp32 precision.
 
 **Remediation.** **Intentional.**  Don't read scalar values off the
 ImageLogger's predictions for non-visualisation purposes.

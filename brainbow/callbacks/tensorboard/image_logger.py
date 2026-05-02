@@ -244,9 +244,9 @@ class ImageLogger(pl.Callback):
             )
 
         # Autocast-returned tensors may be bf16/fp16.  Cast back to fp32
-        # so every downstream op in this callback (colour LUTs,
-        # matplotlib renderers, TB image encoders) operates in a single,
-        # display-friendly dtype.
+        # so every downstream op in this callback (colour LUTs, eigh
+        # decomposition for the cov overlay, TB image encoders) operates
+        # in a single, display-friendly dtype.
         head_pred = head_pred.float()
         if wan_decoder_pred is not None:
             wan_decoder_pred = wan_decoder_pred.float()

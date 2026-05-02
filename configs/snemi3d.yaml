@@ -312,10 +312,10 @@ loss:
   background: -1
 
   weight_raw:
-    weight: 1.0
+    weight: 2.0
     loss: l1
   weight_sem:
-    weight: 1.0
+    weight: 2.0
     class_weights: [0.1]
     weight_ce: 1.0
     weight_dice: 1.0
@@ -338,12 +338,12 @@ loss:
     normalize_embeddings: false
     max_hard_pairs: 4096
   weight_aff_emb:
-    weight: 1.0
+    weight: 2.0
     weight_ce: 0.0
     weight_dice: 1.0
     tau: 1.0
   weight_aff_avg:
-    weight: 1.0
+    weight: 2.0
     weight_ce: 0.0
     weight_dice: 1.0
     tau: 1.0

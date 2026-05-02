@@ -122,7 +122,9 @@ hf_loader.py             # MONAI/VISTA3D-HF encoder download + partial-load
 ```
 __init__.py      # re-exports ImageLogger
 tags.py          # TagContext: {stage}/{mode}/{panel}
-geometry.py      # direction-quiver + covariance-glyph rendering helpers
+geometry.py      # optical-flow-style HSV overlays for `dir` and `cov`
+                 # (vectorised, mask-composited on the raw EM:
+                 # pure flow on predicted foreground, raw EM on background)
 heads.py         # unified-head panel logger (`_log_predictions`)
 viz.py           # colour-map, overlay, tile builders
 image_logger.py  # ImageLogger callback (the public class)
