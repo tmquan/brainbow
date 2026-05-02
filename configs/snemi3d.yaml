@@ -102,6 +102,10 @@ data:
       seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
       root: data/SNEMI3D
 
+    - vol: neurite11_5000x2900x300_x3000_y7200_z950_volume
+      seg: neurite11_5000x2900x300_x3000_y7200_z950_segmentation
+      root: data/SNEMI3D
+
     # --- MICrONS minnie65 (40x8x8 nm, 4096x4096x800 crops) ---
     #   Download: python scripts/download_microns.py --split
     - vol: minnie65_mip0_4096x4096x800_x50000_y60000_z16000_volume          # train01
@@ -144,6 +148,9 @@ data:
       root: data/SNEMI3D
     - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
       seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
+      root: data/SNEMI3D
+    - vol: neurite11_5000x2900x300_x3000_y7200_z950_volume
+      seg: neurite11_5000x2900x300_x3000_y7200_z950_segmentation
       root: data/SNEMI3D
     - vol: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume          # test01
       seg: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation
