@@ -192,7 +192,7 @@ model:
   freeze_vae_decoder: true
 
   gradient_checkpointing: false
-  dropout: 0.0
+  dropout: 0.2
 
 
 # ---------------------------------------------------------------------
