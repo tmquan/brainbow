@@ -28,7 +28,20 @@ logger: tensorboard  # Options: tensorboard, wandb
 # Pass via the CLI (e.g. ``+ckpt_path=outputs/<run>/checkpoints/last.ckpt``)
 # or set here directly.  Mutually exclusive with
 # ``training.resume_from_checkpoint`` (full-state Lightning resume).
+#
+# Companion filters (only meaningful when ``ckpt_path`` is set):
+# * ``ckpt_path_skip_prefixes`` drops any saved key starting with one of
+#   the listed prefixes -- use when the live model has submodules that
+#   should keep their fresh init (e.g. pretrained HF DiT, a newly-added
+#   ControlNet branch).
+#     +ckpt_path_skip_prefixes='[model.dit.,model.controlnet.]'
+# * ``ckpt_path_only_prefixes`` is the inverse allowlist: keep *only*
+#   keys matching one of the listed prefixes.
+#     +ckpt_path_only_prefixes='[model.feature_projector.,model.decoder_adapter.]'
+# The two filters are mutually exclusive.
 ckpt_path: null
+ckpt_path_skip_prefixes: null
+ckpt_path_only_prefixes: null
 
 # Data configuration
 data:

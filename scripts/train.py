@@ -457,11 +457,40 @@ def build_trainer(
 # ----------------------------------------------------------------------
 
 
+def _summarise_keys_by_prefix(keys: List[str], depth: int = 2) -> Dict[str, int]:
+    """Group state-dict keys by their first ``depth`` dotted segments.
+
+    Used to log readable breakdowns like ``model.dit.*: 487`` instead of
+    a bare count, so cross-architecture warm starts are unambiguous in
+    the log.
+    """
+    counter: Dict[str, int] = collections.OrderedDict()
+    for k in keys:
+        prefix = ".".join(k.split(".")[:depth]) + (".*" if k.count(".") >= depth else "")
+        counter[prefix] = counter.get(prefix, 0) + 1
+    return counter
+
+
 def _resolve_checkpoint(cfg: DictConfig, module: pl.LightningModule) -> Optional[str]:
     """Pick up an existing checkpoint, either full-resume or weights-only.
 
     Returns the path to pass to ``trainer.fit(..., ckpt_path=...)`` for
     full-resume, or ``None`` after applying a weights-only load in-place.
+
+    Two optional weights-only filters are honoured (Hydra ``+`` overrides):
+
+    * ``+ckpt_path_skip_prefixes=[<prefix>, ...]`` -- drop any state-dict
+      key whose dotted name starts with one of the given prefixes
+      *before* loading.  Use to keep freshly-instantiated submodules
+      (e.g. a new ``model.controlnet.*`` branch, or pretrained HF DiT
+      weights) instead of overwriting them with an old ckpt's values.
+    * ``+ckpt_path_only_prefixes=[<prefix>, ...]`` -- inverse allowlist:
+      keep *only* keys matching one of these prefixes.  Mutually
+      exclusive with ``ckpt_path_skip_prefixes``.
+
+    Both filters operate on the saved keys exactly as
+    ``module.state_dict()`` produces them (so include the leading
+    ``model.`` for keys inside the wrapper).
     """
     training_cfg = cfg.training
     resume_ckpt = training_cfg.get("resume_from_checkpoint")
@@ -478,14 +507,47 @@ def _resolve_checkpoint(cfg: DictConfig, module: pl.LightningModule) -> Optional
         return str(resume_ckpt)
 
     if weights_only_ckpt:
+        skip_prefixes = list(cfg.get("ckpt_path_skip_prefixes") or [])
+        only_prefixes = list(cfg.get("ckpt_path_only_prefixes") or [])
+        if skip_prefixes and only_prefixes:
+            raise ValueError(
+                "Use either +ckpt_path_skip_prefixes= or "
+                "+ckpt_path_only_prefixes=, not both."
+            )
+
         console.log(f"Loading model weights from checkpoint: {weights_only_ckpt}")
         ckpt = torch.load(weights_only_ckpt, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("state_dict", ckpt)
+
+        if skip_prefixes:
+            dropped = [k for k in state_dict if any(k.startswith(p) for p in skip_prefixes)]
+            for k in dropped:
+                state_dict.pop(k)
+            console.log(
+                f"  Dropped {len(dropped)} keys matching skip prefixes "
+                f"{skip_prefixes}: {dict(_summarise_keys_by_prefix(dropped))}"
+            )
+        elif only_prefixes:
+            kept = [k for k in state_dict if any(k.startswith(p) for p in only_prefixes)]
+            dropped = [k for k in state_dict if k not in set(kept)]
+            for k in dropped:
+                state_dict.pop(k)
+            console.log(
+                f"  Kept {len(kept)} keys matching only prefixes "
+                f"{only_prefixes}: {dict(_summarise_keys_by_prefix(kept))}"
+            )
+
         missing, unexpected = module.load_state_dict(state_dict, strict=False)
         if missing:
-            console.log(f"  Missing keys: {len(missing)}")
+            console.log(
+                f"  Missing keys ({len(missing)}, kept fresh init): "
+                f"{dict(_summarise_keys_by_prefix(list(missing)))}"
+            )
         if unexpected:
-            console.log(f"  Unexpected keys: {len(unexpected)}")
+            console.log(
+                f"  Unexpected keys ({len(unexpected)}, ignored): "
+                f"{dict(_summarise_keys_by_prefix(list(unexpected)))}"
+            )
         console.log("Model weights loaded (optimiser state skipped).")
 
     return None
