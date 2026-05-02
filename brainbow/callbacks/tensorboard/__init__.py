@@ -33,9 +33,12 @@ Module layout::
                          the predicted ``dir`` (Middlebury hue/value of
                          the centroid-direction vector) and ``cov``
                          (principal-eigenvector orientation with
-                         anisotropy → saturation) panels, mask-composited
-                         on top of the raw EM image (foreground = pure
-                         flow colour, background = raw EM)
+                         anisotropy → saturation) panels, soft-composited
+                         on top of the raw EM image with the predicted
+                         sigmoid sem probability as the per-pixel blend
+                         weight (high-confidence foreground = pure flow
+                         colour, low-confidence = raw EM, boundary fades
+                         smoothly)
     heads.py          -- unified-head panel logger
     image_logger.py   -- Lightning callback ``ImageLogger`` (cache first
                          batch of each epoch, forward under eval +

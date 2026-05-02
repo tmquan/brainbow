@@ -174,15 +174,19 @@ def _log_predictions(
     # `dir` colours each foreground pixel by its centroid-direction
     # angle (hue) and magnitude (value); `cov` colours by the principal
     # eigenvector orientation (hue) with anisotropy → saturation and
-    # max-eigenvalue → value.
+    # max-eigenvalue → value.  Both panels use the **soft** sem
+    # probability as the per-pixel composite weight (same convention as
+    # `pred/avg/val`, `pred/emb/_{algo}`, `pred/label/mul`) so the
+    # foreground fades smoothly into the raw EM at boundary regions.
+    sem_soft = sem[:, 0]
     dir_rgb = _render_dir_flow(
-        _to_2d(fields["dir"]), images[:n], sem_ids, spatial_dims,
+        _to_2d(fields["dir"]), images[:n], sem_soft, spatial_dims,
     )
     tb.add_images(head.tag("pred/dir"), dir_rgb, global_step=epoch)
 
     cov_tri = _to_2d(fields["cov"])
     cov_mat = upper_tri_to_matrix(cov_tri, spatial_dims)
-    cov_rgb = _render_cov_flow(cov_mat, images[:n], sem_ids, spatial_dims)
+    cov_rgb = _render_cov_flow(cov_mat, images[:n], sem_soft, spatial_dims)
     tb.add_images(head.tag("pred/cov"), cov_rgb, global_step=epoch)
 
     # ----- avg + avg-aff -----

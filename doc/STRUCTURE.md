@@ -180,7 +180,7 @@ concrete `module.py`.
 | `callbacks/tensorboard/image_logger.py` | `ImageLogger` callback (the public class).                        |
 | `callbacks/tensorboard/tags.py`   | `TagContext` — single source of `{stage}/{mode}/[{head}/]{panel}`.      |
 | `callbacks/tensorboard/heads.py`  | `_log_predictions` (unified-head orchestrator) + `_add_aff_panels` / `_aff_fg_mask_2d` helpers. |
-| `callbacks/tensorboard/geometry.py` | Optical-flow-style HSV overlays for `dir` and `cov`, mask-composited on the raw EM (pure flow on predicted foreground, raw EM on background). |
+| `callbacks/tensorboard/geometry.py` | Optical-flow-style HSV overlays for `dir` and `cov`, soft-composited on the raw EM with the predicted sigmoid sem as the per-pixel blend weight (boundary regions fade smoothly between flow colour and raw EM). |
 | `callbacks/tensorboard/viz.py`    | Colour-map, overlay, tile builders.                                     |
 
 ### `brainbow/inference/` — sliding-window + clustering
