@@ -101,7 +101,71 @@ def _overlay(
     return bg_rgb * (1.0 - w) + fg_rgb * w
 
 
-def _render_dir_flow(
+def _eigh_2x2_sym(
+    mat: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Closed-form eigendecomposition of batched 2x2 symmetric matrices.
+
+    We **deliberately avoid** ``torch.linalg.eigh`` here because it
+    dispatches to cuSOLVER's batched ``syevj`` kernel
+    (``cusolverDnXsyevBatched``), which raises
+    ``CUSOLVER_STATUS_INTERNAL_ERROR`` on the million-matrix batches we
+    pass per panel -- especially during sanity check, when the model's
+    predictions can contain large or NaN/Inf entries that destabilise
+    the iterative solver.  See the GOTCHAS entry "cov-overlay
+    eigendecomposition".
+
+    The 2x2 closed-form is exact, dispatch-free, fp32-safe, and
+    avoids any cuSOLVER call entirely.
+
+    Args:
+        mat: ``[..., 2, 2]`` symmetric matrix batch.  Off-diagonal is
+            symmetrised internally; NaN/Inf entries are zeroed before
+            the decomposition so a single bad pixel does not poison the
+            whole panel.
+
+    Returns:
+        ``(lam_min, lam_max, vec_max)`` where ``lam_min`` / ``lam_max``
+        are ``[...]`` ascending real eigenvalues and ``vec_max`` is the
+        ``[..., 2]`` unit-norm principal eigenvector (rows match the
+        input row order).
+    """
+    mat = torch.nan_to_num(mat.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    a = mat[..., 0, 0]
+    c = mat[..., 1, 1]
+    b = 0.5 * (mat[..., 0, 1] + mat[..., 1, 0])
+
+    trace = a + c
+    diff = a - c
+    # disc = sqrt((a-c)^2 + 4 b^2); the +eps guards downstream divisions.
+    disc = torch.sqrt(diff * diff + 4.0 * b * b + 1e-12)
+
+    lam_max = 0.5 * (trace + disc)
+    lam_min = 0.5 * (trace - disc)
+
+    # Two algebraically equivalent forms of the principal eigenvector;
+    # pick the better-conditioned one per pixel to avoid the degenerate
+    # case where (a == lam_max) cancels v1 or (c == lam_max) cancels v2.
+    v1x, v1y = b, lam_max - a
+    v2x, v2y = lam_max - c, b
+    n1 = v1x * v1x + v1y * v1y
+    n2 = v2x * v2x + v2y * v2y
+    use1 = n1 >= n2
+    vx = torch.where(use1, v1x, v2x)
+    vy = torch.where(use1, v1y, v2y)
+
+    # Isotropic / scalar matrices have both forms == 0; fall back to
+    # +x as an arbitrary-but-deterministic principal axis.
+    norm = torch.sqrt(vx * vx + vy * vy)
+    is_iso = norm < 1e-12
+    safe_norm = norm.clamp(min=1e-12)
+    vx = torch.where(is_iso, torch.ones_like(vx), vx / safe_norm)
+    vy = torch.where(is_iso, torch.zeros_like(vy), vy / safe_norm)
+
+    return lam_min, lam_max, torch.stack([vx, vy], dim=-1)
+
+
+xdef _render_dir_flow(
     dir_val: torch.Tensor,
     img_rgb: torch.Tensor,
     labels: torch.Tensor,
@@ -180,22 +244,22 @@ def _render_cov_flow(
     if S == 3:
         mat = mat[..., 1:, 1:]                         # project YX submatrix
 
-    # Symmetrise for numerical safety -- eigh requires Hermitian input
-    # and predictions can drift slightly off-symmetric.
-    sym = 0.5 * (mat + rearrange(mat, "... a b -> ... b a"))
-    eigvals, eigvecs = torch.linalg.eigh(sym.float())  # ascending order
+    # Closed-form 2x2 eigendecomposition.  We *deliberately* sidestep
+    # `torch.linalg.eigh` here because cuSOLVER's batched syevj kernel
+    # crashes on million-pixel batches with NaN/Inf-tinged predictions
+    # early in training (see _eigh_2x2_sym docstring).
+    lam_min, lam_max_signed, vec_max = _eigh_2x2_sym(mat)
 
-    abs_eig = eigvals.abs()
-    max_eig = abs_eig[..., 1]                          # [B, H, W]
-    min_eig = abs_eig[..., 0]
+    max_eig = lam_max_signed.abs()
+    min_eig = lam_min.abs()
     anisotropy = (
         (max_eig - min_eig) / max_eig.clamp(min=1e-8)
     ).clamp(0.0, 1.0)
 
-    # Major eigenvector lives in the last column (eigh returns ascending
-    # eigenvalues); rows 0/1 correspond to (Y, X) of the YX submatrix.
-    vec_y = eigvecs[..., 0, 1]
-    vec_x = eigvecs[..., 1, 1]
+    # Rows of the YX submatrix correspond to (Y, X); the principal
+    # eigenvector is returned in row order, so component 0 = Y, 1 = X.
+    vec_y = vec_max[..., 0]
+    vec_x = vec_max[..., 1]
 
     # Per-image normaliser uses foreground only so background noise does
     # not wash out the colour scale.
@@ -203,8 +267,9 @@ def _render_cov_flow(
     fg_max = (max_eig * fg_mask).amax(dim=(-2, -1)).clamp(min=1e-8)
     fg_max = rearrange(fg_max, "b -> b 1 1")
 
-    # eigh returns unit vectors; scale by max_eig so |(u,v)| = max_eig
-    # and `_vector_to_flow_rgb` picks up the magnitude as VAL.
+    # _eigh_2x2_sym returns unit vectors; scale by max_eig so
+    # |(u,v)| = max_eig and `_vector_to_flow_rgb` picks up the magnitude
+    # as VAL.
     flow_rgb = _vector_to_flow_rgb(
         vec_x * max_eig, vec_y * max_eig,
         angle_period=math.pi,

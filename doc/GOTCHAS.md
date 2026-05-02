@@ -901,3 +901,40 @@ restoration recipe is one of:
    / branch.
 2. Re-apply the patch from a previous commit (``git log --all -- <path>``
    to find the last revision that had it).
+
+---
+
+## 41. cov-overlay eigendecomposition does **not** use `torch.linalg.eigh`
+
+**Symptom.** Training crashes during sanity check (or the first few
+ImageLogger panels) with::
+
+    cusolver error: CUSOLVER_STATUS_INTERNAL_ERROR, when calling
+    `cusolverDnXsyevBatched(...)`. ... try linear algebra operators
+    with other supported backends.
+
+**Where.** `brainbow/callbacks/tensorboard/geometry.py::_eigh_2x2_sym`
+and its caller `_render_cov_flow`.
+
+**Why.** The `pred/cov` panel needs the principal eigenvector of a
+2x2 symmetric structure-tensor matrix at **every foreground pixel**.
+At a typical 4×512×512 panel that's ~1M matrices per epoch.
+``torch.linalg.eigh`` dispatches to cuSOLVER's batched ``syevj``
+kernel (``cusolverDnXsyevBatched``), which is iterative and unstable
+on million-matrix batches when the inputs are still random or
+contain NaN/Inf -- exactly the situation during PyTorch Lightning's
+sanity-check pass and the first training epochs.  The crash
+manifests as the cuSOLVER status code above and aborts training.
+
+**Remediation.** **Intentional.**  We use a closed-form 2×2
+analytical eigendecomposition (`_eigh_2x2_sym`) that is exact,
+dispatch-free, fp32-safe, and requires no cuSOLVER call.  The input
+is also `nan_to_num`-sanitised so a single bad pixel cannot poison
+the whole panel.  Do **not** "simplify" this back to
+``torch.linalg.eigh`` -- the previous implementation crashed every
+fresh run before the first checkpoint.
+
+If you ever extend the cov overlay to 3×3 (full ZYX submatrix) you
+will need a closed-form 3×3 routine, **not** ``eigh``; do it on CPU
+or via Cardano's formula rather than reintroducing the cuSOLVER
+batched path.
