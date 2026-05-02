@@ -163,7 +163,24 @@ data:
 
 
 # ---------------------------------------------------------------------
-# Model -- CosmosTransfer3D (Cosmos-Transfer2.5-2B backbone)
+# Model -- CosmosTransfer3D (Cosmos-Transfer2.5-2B backbone + ControlNet)
+# ---------------------------------------------------------------------
+# Cosmos-Transfer2.5 ships as a **base DiT + ControlNet** stack (see
+# ``brainbow/models/cosmos_transfer_2_5/variants.py``).  Both branches
+# are loaded from ``nvidia/Cosmos-Transfer2.5-2B`` (different HF
+# revisions, summed via ``block_controlnet_hidden_states`` injection
+# inside ``CosmosTransformer3DModel``):
+#
+#   self.dit         -- ``CosmosTransformer3DModel`` (~2B), the
+#                       "upper" path; FROZEN below.
+#   self.controlnet  -- ``CosmosControlNetModel`` (a few replicated
+#                       transformer blocks), the trainable RESIDUAL
+#                       path whose ``control_block_samples`` are added
+#                       to the base every ``controlnet_block_every_n``
+#                       blocks.
+#
+# The same EM VAE latent feeds both paths (volume = generative input
+# *and* its own control signal).
 # ---------------------------------------------------------------------
 model:
   type: cosmostransfer3d
@@ -176,8 +193,17 @@ model:
   head_channels: 30               # raw(1)+sem(1)+dir(3)+cov(6)+avg(3)+emb(16)
   feature_size: 64
 
-  # What to freeze.  Backbone is pretrained, so we adapt only the heads
-  # by default.  ``freeze_dit_backbone`` accepts:
+  # ControlNet variant.  Lives on a sibling branch of the same HF repo
+  # as the base DiT.  ``edge`` is the closest analog to EM contrast;
+  # other shipped modalities are ``depth`` / ``seg`` / ``blur``.  Set
+  # to an empty string ``""`` to disable the ControlNet load path.
+  controlnet_revision: diffusers/controlnet/general/edge
+
+  # What to freeze.  Cosmos-Transfer2.5 is a ControlNet stack, so we
+  # keep the strong pretrained base DiT frozen and adapt only the
+  # smaller ControlNet branch + new heads.
+  #
+  # ``freeze_dit_backbone`` accepts:
   #   true  -> permanently frozen
   #   false -> permanently trainable
   #   N     -> freeze the **entire** DiT during epochs 0 .. N-1, then
@@ -188,7 +214,8 @@ model:
   # ``brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start``;
   # see ``doc/ARCHITECT.md`` § 1.6 for the parameter-budget table.
   freeze_vae_encoder: true
-  freeze_dit_backbone: false
+  freeze_dit_backbone: true       # FROZEN upper part (base DiT)
+  freeze_controlnet: false        # TRAINABLE residual part (ControlNet)
   freeze_vae_decoder: true
 
   gradient_checkpointing: false
@@ -289,6 +316,8 @@ training:
 optimizer:
   lr: 2e-4                        # head / new-parameter LR
   dit_backbone_lr: 2e-5           # 10x lower for the pretrained DiT backbone
+  controlnet_lr: 2e-5             # ControlNet residual branch LR
+                                  # (defaults to ``dit_backbone_lr`` if unset)
   weight_decay: 1.0e-4
   scheduler:
     type: cosine_warmup

@@ -2,8 +2,25 @@
 
 One :class:`_VariantConfig` entry captures both architectural shape
 (hidden dim, layer count, compression ratios) and download metadata
-(HF repo id + revision) so the wrapper can spin up a 2B or 14B
+(HF repo id + revisions) so the wrapper can spin up a 2B or 14B
 variant without branching on variant-specific constants elsewhere.
+
+ControlNet split
+----------------
+Cosmos-Transfer2.5 is structured as **base DiT + ControlNet**:
+
+* ``hf_revision`` (e.g. ``diffusers/general``) holds the full base
+  ``CosmosTransformer3DModel`` -- the "upper" path that does the bulk
+  of the work and we keep frozen by default.
+* ``hf_revision_controlnet`` (e.g. ``diffusers/controlnet/general/edge``)
+  holds a small ``CosmosControlNetModel`` (a few replicated transformer
+  blocks) whose ``control_block_samples`` are injected into the base
+  every ``controlnet_block_every_n`` blocks.  This is the residual
+  branch we keep trainable.
+
+The two revisions live in the **same** repo (``nvidia/Cosmos-Transfer2.5-2B``);
+the loader in :mod:`.wrapper` downloads both and instantiates the
+matching diffusers classes.
 
 Release notes
 -------------
@@ -36,12 +53,20 @@ class _VariantConfig:
     max_sequence_length: int
     patch_size: int = 2
     mlp_ratio: float = 4.0
+    # Branch holding the ControlNet residual weights.  ``None`` disables
+    # the ControlNet load path (variant trains on base DiT only).
+    hf_revision_controlnet: Optional[str] = None
 
 
 _VARIANT_CONFIGS: Dict[str, _VariantConfig] = {
     "2B": _VariantConfig(
         hf_repo_id="nvidia/Cosmos-Transfer2.5-2B",
         hf_revision="diffusers/general",
+        # ``edge`` is the closest analog to EM contrast (Canny-style
+        # high-frequency structure); other shipped modalities are
+        # ``depth`` / ``seg`` / ``blur``.  Override via
+        # ``model.controlnet_revision`` in the recipe config.
+        hf_revision_controlnet="diffusers/controlnet/general/edge",
         hidden_dim=2048,
         num_layers=28,
         num_heads=16,
@@ -58,6 +83,7 @@ _VARIANT_CONFIGS: Dict[str, _VariantConfig] = {
     "14B": _VariantConfig(
         hf_repo_id=None,
         hf_revision=None,
+        hf_revision_controlnet=None,
         hidden_dim=5120,
         num_layers=40,
         num_heads=40,

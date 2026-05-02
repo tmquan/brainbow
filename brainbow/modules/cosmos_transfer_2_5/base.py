@@ -85,6 +85,7 @@ class BaseCosmosModule(BaseCircuitModule):
             dtype=model_config.get("dtype", "bf16"),
             pretrained=model_config.get("pretrained", True),
             freeze_dit_backbone=model_config.get("freeze_dit_backbone", False),
+            freeze_controlnet=model_config.get("freeze_controlnet", False),
             freeze_vae_decoder=model_config.get("freeze_vae_decoder", False),
             freeze_vae_encoder=model_config.get("freeze_vae_encoder", True),
             gradient_checkpointing=model_config.get("gradient_checkpointing", False),
@@ -92,6 +93,7 @@ class BaseCosmosModule(BaseCircuitModule):
             cache_dir=model_config.get("cache_dir"),
             hf_token=model_config.get("hf_token"),
             dropout=model_config.get("dropout", 0.0),
+            controlnet_revision=model_config.get("controlnet_revision"),
         )
 
     # ------------------------------------------------------------------
@@ -129,24 +131,36 @@ class BaseCosmosModule(BaseCircuitModule):
         backbone_lr = self.optimizer_config.get("dit_backbone_lr")
         if backbone_lr is None:
             backbone_lr = lr
+        # ControlNet residual branch.  Defaults to the backbone LR
+        # (it's also pretrained Cosmos-Transfer2.5 weight, just a
+        # smaller replicated stack); override via ``optimizer.controlnet_lr``.
+        controlnet_lr = self.optimizer_config.get("controlnet_lr")
+        if controlnet_lr is None:
+            controlnet_lr = backbone_lr
 
         backbone_decay, backbone_no_decay = [], []
+        controlnet_decay, controlnet_no_decay = [], []
         head_decay, head_no_decay = [], []
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
             is_backbone = name.startswith("model.dit.")
+            is_controlnet = name.startswith("model.controlnet.")
             no_decay = param.dim() <= 1 or name.endswith(".bias")
-            if is_backbone:
+            if is_controlnet:
+                (controlnet_no_decay if no_decay else controlnet_decay).append(param)
+            elif is_backbone:
                 (backbone_no_decay if no_decay else backbone_decay).append(param)
             else:
                 (head_no_decay if no_decay else head_decay).append(param)
 
         param_groups = [
-            {"params": backbone_decay,    "lr": backbone_lr, "weight_decay": wd},
-            {"params": backbone_no_decay, "lr": backbone_lr, "weight_decay": 0.0},
-            {"params": head_decay,        "lr": lr,          "weight_decay": wd},
-            {"params": head_no_decay,     "lr": lr,          "weight_decay": 0.0},
+            {"params": backbone_decay,      "lr": backbone_lr,   "weight_decay": wd},
+            {"params": backbone_no_decay,   "lr": backbone_lr,   "weight_decay": 0.0},
+            {"params": controlnet_decay,    "lr": controlnet_lr, "weight_decay": wd},
+            {"params": controlnet_no_decay, "lr": controlnet_lr, "weight_decay": 0.0},
+            {"params": head_decay,          "lr": lr,            "weight_decay": wd},
+            {"params": head_no_decay,       "lr": lr,            "weight_decay": 0.0},
         ]
         param_groups = [g for g in param_groups if g["params"]]
 

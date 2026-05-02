@@ -53,6 +53,24 @@ class CosmosTransfer3DWrapper(nn.Module):
     of the EM volume is mapped to the temporal axis of the backbone,
     making the 3-D adaptation architecturally natural.
 
+    ControlNet split
+    ----------------
+    Upstream Cosmos-Transfer2.5 is a **base DiT + ControlNet** stack
+    (see :mod:`.variants`).  This wrapper loads both branches:
+
+    * ``self.dit``         -- ``CosmosTransformer3DModel`` (~2 B params),
+                              the "upper" path; frozen by default.
+    * ``self.controlnet``  -- ``CosmosControlNetModel`` (a few replicated
+                              transformer blocks), the trainable
+                              residual path that injects
+                              ``block_controlnet_hidden_states`` into
+                              the base every
+                              ``controlnet_block_every_n`` blocks.
+
+    For EM segmentation we feed the **same** EM VAE latent into both
+    paths -- the base sees the volume as ``hidden_states`` and the
+    ControlNet sees it as ``controls_latents``.
+
     Args:
         in_channels: Number of input channels (1 for EM volumes).
         head_channels: Unified head width (default 30).
@@ -60,7 +78,17 @@ class CosmosTransfer3DWrapper(nn.Module):
         variant: ``"2B"`` or ``"14B"`` model variant.
         checkpoint_variant: HuggingFace revision string.
         dtype: Weight dtype (``"bf16"``, ``"fp16"``, ``"fp32"``).
-        freeze_dit_backbone: Whether to freeze the pretrained DiT backbone.
+        freeze_dit_backbone: Whether to freeze the pretrained base DiT
+            (the "upper part").  Defaults to ``False`` (legacy behaviour
+            -- the recipe config typically flips this to ``True`` so
+            only the ControlNet trains).
+        freeze_controlnet: Whether to freeze the ControlNet (the
+            "residual part").  Defaults to ``False`` so the ControlNet
+            adapts to the EM domain.
+        controlnet_revision: HF revision for the ControlNet weights.
+            ``None`` falls back to the variant default.  Pass an empty
+            string ``""`` (or set the variant default to ``None``) to
+            disable the ControlNet load path entirely.
         feature_layers: DiT block indices to extract features from.
         cache_dir: HuggingFace download cache directory.
         hf_token: HuggingFace authentication token.
@@ -84,6 +112,7 @@ class CosmosTransfer3DWrapper(nn.Module):
         dtype: str = "bf16",
         pretrained: bool = True,
         freeze_dit_backbone: bool = False,
+        freeze_controlnet: bool = False,
         freeze_vae_decoder: bool = False,
         freeze_vae_encoder: bool = True,
         gradient_checkpointing: bool = False,
@@ -91,6 +120,7 @@ class CosmosTransfer3DWrapper(nn.Module):
         cache_dir: Optional[str] = None,
         hf_token: Optional[str] = None,
         dropout: float = 0.0,
+        controlnet_revision: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -116,9 +146,19 @@ class CosmosTransfer3DWrapper(nn.Module):
             "fp32": torch.float32,
         }[dtype]
         self._freeze_dit_backbone = freeze_dit_backbone
+        self._freeze_controlnet = freeze_controlnet
         self._freeze_vae_decoder = freeze_vae_decoder
         self._freeze_vae_encoder = freeze_vae_encoder
         self._gradient_checkpointing = gradient_checkpointing
+        # ``""`` (empty string) acts as an explicit "disable controlnet"
+        # override; ``None`` means "fall back to variant default".
+        self._controlnet_revision = (
+            controlnet_revision
+            if controlnet_revision is not None
+            else self.cfg.hf_revision_controlnet
+        ) or None
+        self.controlnet: Optional[nn.Module] = None
+        self._controlnet_loaded = False
 
         if feature_layers is not None:
             self._feature_layers = sorted(feature_layers)
@@ -174,6 +214,12 @@ class CosmosTransfer3DWrapper(nn.Module):
         else:
             self.dit.train()
 
+        if self.controlnet is not None:
+            if freeze_controlnet:
+                self.freeze_controlnet()
+            else:
+                self.controlnet.train()
+
         self._make_params_contiguous()
 
         if gradient_checkpointing:
@@ -181,10 +227,12 @@ class CosmosTransfer3DWrapper(nn.Module):
 
         logger.info(
             "CosmosTransfer3DWrapper initialised: variant=%s, "
-            "feature_layers=%s, backbone_loaded=%s, frozen=%s, "
-            "grad_ckpt=%s, params=%s (trainable=%s)",
+            "feature_layers=%s, backbone_loaded=%s, controlnet_loaded=%s, "
+            "frozen_dit=%s, frozen_controlnet=%s, grad_ckpt=%s, "
+            "params=%s (trainable=%s)",
             variant, self._feature_layers, self._backbone_loaded,
-            freeze_dit_backbone, self._gradient_checkpointing,
+            self._controlnet_loaded, freeze_dit_backbone, freeze_controlnet,
+            self._gradient_checkpointing,
             f"{self.get_num_parameters(trainable_only=False):,}",
             f"{self.get_num_parameters(trainable_only=True):,}",
         )
@@ -305,12 +353,86 @@ class CosmosTransfer3DWrapper(nn.Module):
             self._backbone_loaded = True
             self._backend = "diffusers"
             logger.info(
-                "Loaded 3-D backbone + VAE via diffusers (local snapshot).",
+                "Loaded base 3-D DiT + VAE via diffusers (local snapshot, "
+                "rev=%s).",
+                self.cfg.hf_revision,
             )
-            return True
         except Exception as exc:
             logger.warning("diffusers load from local snapshot failed: %s", exc)
             return False
+
+        # ControlNet (residual branch).  Lives in the same HF repo on a
+        # different revision; load it from a separate local snapshot
+        # so it doesn't conflict with the base ``transformer/`` weights.
+        self._try_load_controlnet(cache_dir, hf_token)
+        return True
+
+    def _try_load_controlnet(
+        self,
+        cache_dir: Optional[str],
+        hf_token: Optional[str],
+    ) -> None:
+        """Load the ControlNet residual branch (``CosmosControlNetModel``).
+
+        Failures here are non-fatal: the wrapper still works on the
+        base DiT alone.  When the ControlNet is loaded its
+        ``control_block_samples`` are summed into the base DiT's
+        block hidden states inside :meth:`_extract_features_hook`.
+        """
+        if self._controlnet_revision is None:
+            logger.info(
+                "No ControlNet revision configured -- running on base DiT only.",
+            )
+            return
+
+        try:
+            from diffusers import (  # type: ignore[import-untyped]
+                CosmosControlNetModel,
+            )
+        except ImportError:
+            logger.warning(
+                "diffusers does not expose CosmosControlNetModel "
+                "-- skipping ControlNet load.",
+            )
+            return
+
+        try:
+            local_path = _download_from_hf(
+                self.cfg.hf_repo_id,
+                revision=self._controlnet_revision,
+                cache_dir=cache_dir,
+                token=hf_token,
+            )
+        except Exception as exc:
+            logger.warning(
+                "ControlNet HuggingFace download failed (rev=%s): %s",
+                self._controlnet_revision, exc,
+            )
+            return
+
+        try:
+            controlnet = CosmosControlNetModel.from_pretrained(
+                str(local_path),
+                torch_dtype=self._dtype,
+            )
+        except Exception:
+            try:
+                controlnet = CosmosControlNetModel.from_pretrained(
+                    str(local_path),
+                    subfolder="controlnet",
+                    torch_dtype=self._dtype,
+                )
+            except Exception as exc:
+                logger.warning("ControlNet load failed: %s", exc)
+                return
+
+        self.controlnet = controlnet.to(self._dtype)
+        self._controlnet_loaded = True
+        logger.info(
+            "Loaded Cosmos ControlNet via diffusers (rev=%s, %d control blocks).",
+            self._controlnet_revision,
+            len(getattr(self.controlnet, "control_blocks", [])),
+        )
 
     def _try_load_cosmos_package(
         self,
@@ -481,7 +603,16 @@ class CosmosTransfer3DWrapper(nn.Module):
                 if not self._hooks_active:
                     return
                 out = output[0] if isinstance(output, tuple) else output
-                if self._freeze_dit_backbone:
+                # Only detach when there is no trainable path through this
+                # block.  When the ControlNet is trainable its residuals
+                # are summed into the block output (see
+                # ``CosmosTransformerBlock.forward``: ``hidden_states +=
+                # controlnet_residual``), so detaching here would break
+                # the gradient path back to the ControlNet weights.
+                cn_trainable = (
+                    self.controlnet is not None and not self._freeze_controlnet
+                )
+                if self._freeze_dit_backbone and not cn_trainable:
                     out = out.detach()
                 if out.dim() == 3:
                     self._hook_buffer.append(out)
@@ -520,8 +651,17 @@ class CosmosTransfer3DWrapper(nn.Module):
         self._hook_buffer.clear()
         self._hooks_active = True
 
+        # Grad must be enabled whenever *any* trainable branch is in
+        # play.  The ControlNet residuals are summed into base-DiT
+        # block outputs, so even with a frozen base we still need
+        # autograd enabled for the ControlNet update path.
+        cn_trainable = (
+            self.controlnet is not None and not self._freeze_controlnet
+        )
+        any_trainable = (not self._freeze_dit_backbone) or cn_trainable
+
         try:
-            ctx = torch.no_grad() if self._freeze_dit_backbone else torch.enable_grad()
+            ctx = torch.enable_grad() if any_trainable else torch.no_grad()
             with ctx:
                 B = latent.shape[0]
                 dit_cfg = getattr(self.dit, "config", None)
@@ -539,11 +679,38 @@ class CosmosTransfer3DWrapper(nn.Module):
                 padding_mask = torch.ones(1, 1, latent.shape[-2], latent.shape[-1], device=latent.device, dtype=latent.dtype)
                 null_condition = torch.zeros(B, 1, *latent.shape[2:], device=latent.device, dtype=latent.dtype)
 
+                # Run the ControlNet residual branch first so its
+                # ``control_block_samples`` can be summed into the base
+                # DiT every ``controlnet_block_every_n`` blocks (see
+                # ``CosmosTransformer3DModel.forward``).  We feed the
+                # *same* EM latent into both ``controls_latents`` and
+                # ``latents`` -- the EM volume is simultaneously the
+                # generative input and its own conditioning signal.
+                block_controlnet_hidden_states = None
+                if self.controlnet is not None:
+                    cn_ctx = (
+                        torch.no_grad() if self._freeze_controlnet
+                        else torch.enable_grad()
+                    )
+                    with cn_ctx:
+                        cn_out = self.controlnet(
+                            controls_latents=latent,
+                            latents=latent,
+                            timestep=timestep,
+                            encoder_hidden_states=enc_hidden,
+                            condition_mask=null_condition,
+                            conditioning_scale=1.0,
+                            padding_mask=padding_mask,
+                            return_dict=False,
+                        )
+                        block_controlnet_hidden_states = cn_out[0]
+
                 with self._dit_forward_without_ckpt_when_eval():
                     self.dit(
                         hidden_states=latent,
                         timestep=timestep,
                         encoder_hidden_states=enc_hidden,
+                        block_controlnet_hidden_states=block_controlnet_hidden_states,
                         condition_mask=null_condition,
                         padding_mask=padding_mask,
                     )
@@ -654,6 +821,24 @@ class CosmosTransfer3DWrapper(nn.Module):
         self.dit.requires_grad_(True)
         self._freeze_dit_backbone = False
         logger.info("DiT backbone unfrozen (%s trainable params).",
+                     f"{self.get_num_parameters(True):,}")
+
+    def freeze_controlnet(self) -> None:
+        if self.controlnet is None:
+            return
+        self.controlnet.requires_grad_(False)
+        self.controlnet.eval()
+        self._freeze_controlnet = True
+        logger.info("ControlNet frozen (%s trainable params).",
+                     f"{self.get_num_parameters(True):,}")
+
+    def unfreeze_controlnet(self) -> None:
+        if self.controlnet is None:
+            return
+        self.controlnet.requires_grad_(True)
+        self.controlnet.train()
+        self._freeze_controlnet = False
+        logger.info("ControlNet unfrozen (%s trainable params).",
                      f"{self.get_num_parameters(True):,}")
 
     def freeze_vae_encoder(self) -> None:
