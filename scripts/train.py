@@ -345,6 +345,7 @@ def setup_callbacks(cfg: DictConfig) -> List[pl.Callback]:
             spatial_dims=3,
             projection_algorithm=img_cfg.get("projection_algorithm", "pca"),
             projection_backend=img_cfg.get("projection_backend", "auto"),
+            geometry_style=img_cfg.get("geometry_style", "glyph"),
         ))
 
     callbacks.append(RichProgressBar())

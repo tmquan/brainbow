@@ -13,7 +13,7 @@ import pytorch_lightning as pl
 import torch
 from einops import rearrange
 
-from brainbow.callbacks.tensorboard.heads import _log_predictions
+from brainbow.callbacks.tensorboard.heads import GEOMETRY_STYLES, _log_predictions
 from brainbow.callbacks.tensorboard.tags import TagContext
 from brainbow.callbacks.tensorboard.viz import _to_2d
 
@@ -79,6 +79,16 @@ class ImageLogger(pl.Callback):
             umap-learn.  Explicit choices: ``"cuml"`` (forces GPU),
             ``"torch"`` (pca/svd CPU or CUDA SVD), ``"umap-learn"``
             (forces CPU UMAP).
+        geometry_style: Renderer family for the ``pred/dir`` and
+            ``pred/cov`` panels.  ``"glyph"`` (default) draws
+            matplotlib quiver arrows for ``dir`` and ellipse glyphs for
+            ``cov`` -- the most literal reading.  ``"flow"`` uses a
+            vectorised optical-flow-style HSV colour map (no
+            matplotlib, ~10× faster).  Both styles composite onto the
+            raw EM with the soft predicted sem as the per-pixel blend
+            weight.  Validated against
+            :data:`brainbow.callbacks.tensorboard.heads.GEOMETRY_STYLES`
+            at construction time so a typo in the YAML fails fast.
     """
 
     def __init__(
@@ -89,14 +99,21 @@ class ImageLogger(pl.Callback):
         mode: str = "automatic",
         projection_algorithm: str = "pca",
         projection_backend: str = "auto",
+        geometry_style: str = "glyph",
     ) -> None:
         super().__init__()
+        if geometry_style not in GEOMETRY_STYLES:
+            raise ValueError(
+                f"geometry_style must be one of {GEOMETRY_STYLES}; "
+                f"got {geometry_style!r}."
+            )
         self.every_n_epochs = max(every_n_epochs, 1)
         self.max_images = max_images
         self.spatial_dims = spatial_dims
         self.mode = mode
         self.projection_algorithm = projection_algorithm
         self.projection_backend = projection_backend
+        self.geometry_style = geometry_style
         self._train_batch: Optional[Dict[str, torch.Tensor]] = None
         self._val_batch: Optional[Dict[str, torch.Tensor]] = None
 
@@ -284,6 +301,7 @@ class ImageLogger(pl.Callback):
             aff_avg_tau=aff_avg_tau,
             normalize_embeddings=normalize_embeddings,
             wan_decoder_2d=wan_decoder_2d,
+            geometry_style=self.geometry_style,
         )
         del head_pred, wan_decoder_pred
 

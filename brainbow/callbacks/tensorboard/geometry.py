@@ -1,34 +1,53 @@
-"""Vectorised geometry overlays for the unified-head TB panels.
+"""Geometry overlays for the unified-head TB panels.
 
-Optical-flow-style HSV encodings of the predicted ``dir`` and ``cov``
-fields, composited onto the raw EM using the **soft** predicted
-semantic probability as the per-pixel blend weight:
+Two renderer families are available; the active one is chosen by the
+``geometry_style`` knob plumbed through
+:class:`brainbow.callbacks.tensorboard.image_logger.ImageLogger`:
 
-* :func:`_render_dir_flow` -- Middlebury hue (angle) with a pastel
-  palette that mirrors :func:`brainbow.callbacks.tensorboard.viz._label_to_rgb`
-  (constant low saturation, value lifted into ``[0.85, 1.0]``) so the
-  ``pred/dir`` panel reads with the same soft-pastel feel as
-  ``pred/label``.
-* :func:`_render_cov_flow` -- HSV encoding of the principal eigenvector
-  of the structure tensor.  Hue = orientation (mod π since axes are
-  bidirectional), value = max-eigenvalue magnitude, saturation =
-  anisotropy ratio (round → washed out, elongated → vivid).
+* ``"glyph"`` (**default**) -- direct geometric depiction.
 
-The composite formula is per-pixel ``bg * (1 - sem) + fg * sem`` where
-``sem`` ∈ [0, 1] is the predicted sigmoid probability (same multiplier
-used by ``pred/avg/val``, ``pred/emb/_{algo}``, and
-``pred/label/mul``).  High-confidence foreground voxels show the pure
-flow colour; background voxels keep the raw EM intensity verbatim;
-boundary voxels fade smoothly between the two.
+  - :func:`_render_dir_quiver` draws a matplotlib quiver of the
+    predicted (Y, X) direction vectors at every foreground voxel on a
+    subsampled grid; arrow length scales with vector magnitude.
+  - :func:`_render_cov_glyphs` draws an ellipse glyph at every
+    foreground voxel on a subsampled grid; ellipse size scales with
+    the major eigenvalue, aspect ratio with anisotropy, orientation
+    with the major eigenvector.
 
-Both renderers are pure NumPy / PyTorch -- no matplotlib pass per
-batch -- so the TB callback now overlays at GPU-tensor speed instead of
-spinning up a matplotlib figure per image.
+  These match the previous (pre-April-2026) panel style and are the
+  most literal way to read predictions: an arrow is an arrow, an
+  ellipse is an ellipse.  They use matplotlib internally so each panel
+  costs ~50ms per epoch -- fine since the TB callback fires only at
+  ``every_n_epochs``.
+
+* ``"flow"`` -- vectorised optical-flow-style HSV colour map.
+
+  - :func:`_render_dir_flow` -- Middlebury hue (angle) with a pastel
+    palette mirroring
+    :func:`brainbow.callbacks.tensorboard.viz._label_to_rgb`
+    (constant low saturation, value lifted into ``[0.85, 1.0]``).
+  - :func:`_render_cov_flow` -- HSV of the principal eigenvector
+    (hue = orientation mod π, value = max-eigenvalue, saturation =
+    anisotropy).
+
+  No matplotlib; pure GPU-tensor ops.  Reads as a colour field (no
+  obvious arrow / ellipse), useful when zoomed out at a glance.
+
+Both styles composite the rendered overlay onto the raw EM using the
+**soft** predicted sem probability as the per-pixel blend weight::
+
+    composited = bg * (1 - sem) + fg * sem
+
+so high-confidence foreground voxels show the rendered overlay,
+low-confidence voxels keep the raw EM, and boundary regions fade
+smoothly between the two -- same convention as ``pred/avg/val``,
+``pred/emb/_{algo}``, and ``pred/label/mul``.
 """
 
 import math
 from typing import Optional
 
+import numpy as np
 import torch
 from einops import rearrange, repeat
 
@@ -336,4 +355,268 @@ def _render_cov_flow(
     return _overlay(flow_rgb, bg, sem)
 
 
-__all__ = ["_render_dir_flow", "_render_cov_flow"]
+# ---------------------------------------------------------------------------
+# Style 2: matplotlib quiver / ellipse-glyph renderers (default)
+# ---------------------------------------------------------------------------
+#
+# These are the previous (pre-April-2026) panel renderers, restored so
+# the user can flip back to a literal arrow / ellipse depiction via
+# ``geometry_style="glyph"`` (the default).  They are matplotlib-based
+# -- ~50ms / panel -- so we keep them in this dedicated section to make
+# the matplotlib dependency easy to spot and to keep the ``flow``
+# renderers above purely tensor-only.
+#
+# Both renderers follow the same two-step pattern as ``flow``:
+#
+#   1. Build an opaque RGB ``overlay`` (matplotlib draws bg + glyphs).
+#   2. Composite onto the **original** raw EM with the soft sem as the
+#      per-pixel blend weight, so glyphs that fall on uncertain pixels
+#      fade out gracefully (matches the rest of the panel family).
+
+_QUIVER_COLOR = (1.0, 0.4, 0.0, 0.9)       # warm orange, high alpha
+_GLYPH_COLOR = (0.0, 0.8, 1.0)             # cyan; complements the orange quiver
+
+
+def _matplotlib_render_to_tensor(
+    draw_fn,
+    bg_chw: torch.Tensor,
+    *,
+    dpi: int = 64,
+) -> torch.Tensor:
+    """Run ``draw_fn(ax)`` over a matplotlib figure seeded with ``bg_chw``.
+
+    Returns the rasterised result as a ``[3, H, W]`` float tensor in
+    ``[0, 1]``, resampled back to the input ``H, W`` if matplotlib's
+    canvas size diverged from the input by a pixel (Agg renders at a
+    rounded pixel size).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import torch.nn.functional as F
+
+    bg_hwc = rearrange(
+        bg_chw.detach().cpu().float(), "c h w -> h w c",
+    ).numpy().copy()
+    H, W, _ = bg_hwc.shape
+
+    fig, ax = plt.subplots(1, 1, figsize=(W / dpi, H / dpi), dpi=dpi)
+    ax.imshow(bg_hwc, aspect="equal", interpolation="nearest")
+    ax.set_xlim(-0.5, W - 0.5)
+    ax.set_ylim(H - 0.5, -0.5)
+    ax.axis("off")
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    draw_fn(ax)
+
+    fig.canvas.draw()
+    arr = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+    plt.close(fig)
+
+    rendered = rearrange(
+        torch.from_numpy(arr).float() / 255.0, "h w c -> c h w",
+    )
+    if rendered.shape[-2:] != (H, W):
+        rendered = rearrange(
+            F.interpolate(
+                rearrange(rendered, "c h w -> 1 c h w"),
+                size=(H, W), mode="bilinear", align_corners=False,
+            ),
+            "1 c h w -> c h w",
+        )
+    return rendered
+
+
+def _render_dir_quiver(
+    dir_val: torch.Tensor,
+    img_rgb: torch.Tensor,
+    sem: torch.Tensor,
+    S: int,
+    *,
+    step: int = 4,
+) -> torch.Tensor:
+    """Direction overlay as matplotlib quiver arrows on the raw EM.
+
+    Arrows are placed on a ``step``-spaced subsampled grid; only voxels
+    where the predicted soft sem exceeds 0.5 are drawn.  The rendered
+    figure is then composited onto the **original** raw EM using the
+    soft sem as the per-pixel blend weight (same convention as the
+    optical-flow style and every other ``pred/*/mul`` panel) so arrows
+    on uncertain pixels fade gracefully.
+
+    Args:
+        dir_val: ``[B, S, H, W]`` predicted direction channels (already
+            sliced to 2-D).  For 3-D the channels are ``(Z, Y, X)``;
+            for 2-D they are ``(Y, X)``.
+        img_rgb: ``[B, C, H, W]`` grayscale EM (1- or 3-channel).
+        sem: ``[B, H, W]`` predicted soft semantic probability in
+            ``[0, 1]`` (clamped).
+        S: spatial_dims (2 or 3).
+        step: grid spacing for arrow placement.  Larger = sparser
+            arrows.
+
+    Returns:
+        ``[B, 3, H, W]`` RGB tensor.
+    """
+    bg = _to_rgb(_normalise(img_rgb).clamp(0.0, 1.0))
+    B, _, H, W = bg.shape
+
+    rows_sub = np.arange(step // 2, H, step)
+    cols_sub = np.arange(step // 2, W, step)
+    CC, RR = np.meshgrid(cols_sub, rows_sub)
+
+    sem_np = sem.detach().cpu().float().numpy()
+    dir_np = dir_val.detach().cpu().float().numpy()
+
+    rendered_per_b = []
+    for b in range(B):
+        d = dir_np[b]
+        if S == 3:
+            U = d[2][RR, CC]
+            V = d[1][RR, CC]
+        else:
+            U = d[0][RR, CC]
+            V = d[1][RR, CC]
+        fg = sem_np[b][RR, CC] > 0.5
+        cc_fg = CC.ravel()[fg.ravel()]
+        rr_fg = RR.ravel()[fg.ravel()]
+        u_fg = U.ravel()[fg.ravel()]
+        v_fg = V.ravel()[fg.ravel()]
+
+        def _draw(ax, _cc=cc_fg, _rr=rr_fg, _u=u_fg, _v=v_fg):
+            if _cc.size == 0:
+                return
+            ax.quiver(
+                _cc, _rr, _u, _v,
+                color=_QUIVER_COLOR,
+                angles="xy", scale_units="xy", scale=1.0 / (step * 2.0),
+                width=0.014, headwidth=4.0, headlength=4.5,
+            )
+
+        rendered_per_b.append(_matplotlib_render_to_tensor(_draw, bg[b]))
+
+    overlay = torch.stack(rendered_per_b).to(bg.device)
+    return _overlay(overlay, bg, sem)
+
+
+def _render_cov_glyphs(
+    cov_mat: torch.Tensor,
+    img_rgb: torch.Tensor,
+    sem: torch.Tensor,
+    S: int,
+    *,
+    step: int = 4,
+) -> torch.Tensor:
+    """Covariance overlay as matplotlib ellipse glyphs on the raw EM.
+
+    Each foreground voxel on a ``step``-spaced subsampled grid gets an
+    ellipse whose:
+
+    * **size** -- scales with the major eigenvalue (rel. to the
+      per-image foreground max), so high-curvature regions glow.
+    * **aspect ratio** -- ``λ_min / λ_max`` (round near medial axis,
+      thin near boundaries).
+    * **angle** -- aligned with the major eigenvector.
+
+    Eigendecomposition is done on CPU with NumPy on the per-pixel 2x2
+    submatrix, so we never touch cuSOLVER's batched syevj kernel
+    (see GOTCHAS §41 / :func:`_eigh_2x2_sym`).  ``nan_to_num`` is
+    applied first so a single bad pixel does not poison the panel.
+
+    The rendered figure is then composited onto the original raw EM
+    using the soft sem as the per-pixel blend weight.
+
+    Args:
+        cov_mat: ``[B, H, W, S, S]`` predicted covariance / structure
+            tensor matrices (already sliced to 2-D).  For 3-D the YX
+            submatrix is used.
+        img_rgb: ``[B, C, H, W]`` grayscale EM (1- or 3-channel).
+        sem: ``[B, H, W]`` predicted soft semantic probability in
+            ``[0, 1]`` (clamped).
+        S: spatial_dims (2 or 3).
+        step: grid spacing for glyph placement.
+
+    Returns:
+        ``[B, 3, H, W]`` RGB tensor.
+    """
+    from matplotlib.patches import Ellipse
+
+    bg = _to_rgb(_normalise(img_rgb).clamp(0.0, 1.0))
+    B, _, H, W = bg.shape
+    max_glyph_radius = step * 1.2
+
+    sem_np = sem.detach().cpu().float().numpy()
+    cov_np = np.nan_to_num(
+        cov_mat.detach().cpu().float().numpy(),
+        nan=0.0, posinf=0.0, neginf=0.0,
+    )
+
+    rows_sub = np.arange(step // 2, H, step)
+    cols_sub = np.arange(step // 2, W, step)
+
+    rendered_per_b = []
+    for b in range(B):
+        sem_b = sem_np[b]
+        mat_b = cov_np[b]
+
+        # First pass: per-image normaliser for glyph size.
+        max_eig_global = 0.0
+        for r in rows_sub:
+            for c in cols_sub:
+                if sem_b[r, c] <= 0.5:
+                    continue
+                T = mat_b[r, c]
+                if S == 3:
+                    T = T[1:, 1:]
+                e = float(np.abs(np.linalg.eigvalsh(T)).max())
+                if e > max_eig_global:
+                    max_eig_global = e
+        if max_eig_global < 1e-8:
+            max_eig_global = 1.0
+
+        glyphs = []
+        for r in rows_sub:
+            for c in cols_sub:
+                if sem_b[r, c] <= 0.5:
+                    continue
+                T = mat_b[r, c]
+                if S == 3:
+                    T = T[1:, 1:]
+                eigvals, eigvecs = np.linalg.eigh(T)
+                abs_eig = np.abs(eigvals)
+                if abs_eig.max() < 1e-8:
+                    continue
+                scale = abs_eig.max() / max_eig_global
+                glyph_radius = max_glyph_radius * float(np.clip(scale, 0.1, 1.0))
+                ratio = float(abs_eig.min() / max(abs_eig.max(), 1e-8))
+                idx_max = int(abs_eig.argmax())
+                # Rows of YX submatrix are (Y, X); matplotlib ellipse
+                # angle is measured CCW from +X in degrees.
+                angle = float(np.degrees(np.arctan2(
+                    eigvecs[0, idx_max], eigvecs[1, idx_max],
+                )))
+                glyphs.append((c, r, glyph_radius, ratio, angle))
+
+        def _draw(ax, _glyphs=glyphs):
+            for c, r, gr, ratio, angle in _glyphs:
+                ax.add_patch(Ellipse(
+                    xy=(c, r),
+                    width=2 * gr,
+                    height=2 * gr * ratio,
+                    angle=angle,
+                    fill=True, facecolor=_GLYPH_COLOR, edgecolor=_GLYPH_COLOR,
+                    linewidth=1.2, alpha=0.8,
+                ))
+
+        rendered_per_b.append(_matplotlib_render_to_tensor(_draw, bg[b]))
+
+    overlay = torch.stack(rendered_per_b).to(bg.device)
+    return _overlay(overlay, bg, sem)
+
+
+__all__ = [
+    "_render_dir_flow",
+    "_render_cov_flow",
+    "_render_dir_quiver",
+    "_render_cov_glyphs",
+]

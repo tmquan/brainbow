@@ -29,16 +29,20 @@ Module layout::
     viz.py            -- low-level image utilities (central-slice,
                          per-image min-max normalise, HSV palette,
                          manifold projection of embeddings)
-    geometry.py       -- vectorised optical-flow-style HSV overlays for
-                         the predicted ``dir`` (Middlebury hue/value of
-                         the centroid-direction vector) and ``cov``
-                         (principal-eigenvector orientation with
-                         anisotropy → saturation) panels, soft-composited
-                         on top of the raw EM image with the predicted
-                         sigmoid sem probability as the per-pixel blend
-                         weight (high-confidence foreground = pure flow
-                         colour, low-confidence = raw EM, boundary fades
-                         smoothly)
+    geometry.py       -- ``pred/dir`` and ``pred/cov`` overlays in two
+                         renderer families, picked by
+                         ``image_logger.geometry_style``:
+                           * ``"glyph"`` (default) -- matplotlib quiver
+                             arrows for ``dir`` and ellipse glyphs for
+                             ``cov``; literal arrow / ellipse depiction.
+                           * ``"flow"``  -- vectorised optical-flow-style
+                             HSV colour map (no matplotlib, pure
+                             GPU-tensor ops, ~10× faster).
+                         Both styles soft-composite onto the raw EM
+                         using the predicted sigmoid sem as the
+                         per-pixel blend weight (matches
+                         ``pred/avg/val`` / ``pred/emb/_{algo}`` /
+                         ``pred/label/mul``).
     heads.py          -- unified-head panel logger
     image_logger.py   -- Lightning callback ``ImageLogger`` (cache first
                          batch of each epoch, forward under eval +

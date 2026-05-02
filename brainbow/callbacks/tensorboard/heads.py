@@ -7,8 +7,16 @@ from einops import rearrange, repeat
 
 from brainbow.callbacks.tensorboard.geometry import (
     _render_cov_flow,
+    _render_cov_glyphs,
     _render_dir_flow,
+    _render_dir_quiver,
 )
+
+# Public list of valid ``geometry_style`` values.  The dispatcher in
+# ``_log_predictions`` raises if it sees anything else; the
+# ``ImageLogger`` constructor cross-checks the same set so a typo in
+# the YAML fails fast at trainer setup rather than mid-epoch.
+GEOMETRY_STYLES: tuple[str, ...] = ("glyph", "flow")
 from brainbow.callbacks.tensorboard.tags import TagContext
 from brainbow.callbacks.tensorboard.viz import (
     _label_to_rgb,
@@ -92,6 +100,7 @@ def _log_predictions(
     aff_avg_tau: float = 1.0,
     normalize_embeddings: bool = False,
     wan_decoder_2d: torch.Tensor | None = None,
+    geometry_style: str = "glyph",
 ) -> None:
     """Log true panels plus the unified-head prediction panels.
 
@@ -170,23 +179,35 @@ def _log_predictions(
     tb.add_images(head.tag("pred/sem"), sem_rgb, global_step=epoch)
 
     # ----- dir / cov -----
-    # Optical-flow-style HSV overlays on the raw EM (see geometry.py):
-    # `dir` colours each foreground pixel by its centroid-direction
-    # angle (hue) and magnitude (value); `cov` colours by the principal
-    # eigenvector orientation (hue) with anisotropy → saturation and
-    # max-eigenvalue → value.  Both panels use the **soft** sem
-    # probability as the per-pixel composite weight (same convention as
-    # `pred/avg/val`, `pred/emb/_{algo}`, `pred/label/mul`) so the
-    # foreground fades smoothly into the raw EM at boundary regions.
+    # Two renderer styles are available; the active one is picked by
+    # `geometry_style` (see `brainbow.callbacks.tensorboard.geometry`):
+    #
+    #   "glyph" (default) -- matplotlib quiver arrows for `dir` and
+    #     ellipse glyphs for `cov`; the most literal reading.
+    #   "flow"            -- optical-flow-style HSV colour map for both;
+    #     no matplotlib, pure GPU-tensor ops.
+    #
+    # Both styles composite onto the raw EM with the **soft** sem
+    # probability as the per-pixel blend weight, same convention as
+    # `pred/avg/val`, `pred/emb/_{algo}`, and `pred/label/mul`.
+    if geometry_style not in GEOMETRY_STYLES:
+        raise ValueError(
+            f"geometry_style must be one of {GEOMETRY_STYLES}; "
+            f"got {geometry_style!r}."
+        )
     sem_soft = sem[:, 0]
-    dir_rgb = _render_dir_flow(
-        _to_2d(fields["dir"]), images[:n], sem_soft, spatial_dims,
-    )
-    tb.add_images(head.tag("pred/dir"), dir_rgb, global_step=epoch)
-
+    dir_2d = _to_2d(fields["dir"])
     cov_tri = _to_2d(fields["cov"])
     cov_mat = upper_tri_to_matrix(cov_tri, spatial_dims)
-    cov_rgb = _render_cov_flow(cov_mat, images[:n], sem_soft, spatial_dims)
+
+    if geometry_style == "glyph":
+        dir_rgb = _render_dir_quiver(dir_2d, images[:n], sem_soft, spatial_dims)
+        cov_rgb = _render_cov_glyphs(cov_mat, images[:n], sem_soft, spatial_dims)
+    else:  # "flow"
+        dir_rgb = _render_dir_flow(dir_2d, images[:n], sem_soft, spatial_dims)
+        cov_rgb = _render_cov_flow(cov_mat, images[:n], sem_soft, spatial_dims)
+
+    tb.add_images(head.tag("pred/dir"), dir_rgb, global_step=epoch)
     tb.add_images(head.tag("pred/cov"), cov_rgb, global_step=epoch)
 
     # ----- avg + avg-aff -----

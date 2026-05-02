@@ -122,10 +122,14 @@ hf_loader.py             # MONAI/VISTA3D-HF encoder download + partial-load
 ```
 __init__.py      # re-exports ImageLogger
 tags.py          # TagContext: {stage}/{mode}/{panel}
-geometry.py      # optical-flow-style HSV overlays for `dir` and `cov`
-                 # (vectorised, soft-composited on the raw EM with the
-                 # predicted sigmoid sem as the per-pixel blend weight;
-                 # boundary regions fade smoothly between flow and EM)
+geometry.py      # `pred/dir` + `pred/cov` renderers in two families,
+                 # picked by `image_logger.geometry_style`:
+                 #   - "glyph" (default): matplotlib quiver arrows for
+                 #     `dir` and ellipse glyphs for `cov`
+                 #   - "flow" : vectorised optical-flow-style HSV colour
+                 #     map (no matplotlib, ~10x faster)
+                 # Both soft-composite onto the raw EM with the
+                 # predicted sigmoid sem as the per-pixel blend weight.
 heads.py         # unified-head panel logger (`_log_predictions`)
 viz.py           # colour-map, overlay, tile builders
 image_logger.py  # ImageLogger callback (the public class)

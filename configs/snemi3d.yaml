@@ -273,7 +273,7 @@ training:
     backend: self
     min_cluster_size: 50
     connectivity: 1
-    bandwidth: [0.1, 0.5, 0.5]  # [Z, Y, X]; tighter Z respects 5:1 anisotropy
+    bandwidth: [0.09, 0.45, 0.45]  # [Z, Y, X]; tighter Z respects 5:1 anisotropy
 
 
 # ---------------------------------------------------------------------

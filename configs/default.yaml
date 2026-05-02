@@ -217,6 +217,18 @@ callbacks:
     #   - auto (default): cuML on CUDA when available, else torch / umap-learn
     projection_algorithm: pca
     projection_backend: auto
+    # Renderer style for the `pred/dir` and `pred/cov` panels.
+    # See ``brainbow/callbacks/tensorboard/geometry.py`` module docstring.
+    #   - glyph (default): matplotlib quiver arrows for `dir` and ellipse
+    #     glyphs for `cov`; the most literal reading of the predictions.
+    #     ~50ms / panel (matplotlib).
+    #   - flow            : optical-flow-style HSV colour map for both;
+    #     pure GPU-tensor ops, ~10× faster, but reads as a colour field
+    #     rather than discrete arrows / ellipses.
+    # Both styles composite onto the raw EM with the soft predicted sem
+    # as the per-pixel blend weight (matches `pred/avg/val`,
+    # `pred/emb/_{algo}`, `pred/label/mul`).
+    geometry_style: glyph
 
   # Clear the CUDA allocator cache on *both* sides of validation
   # (before + after).  Helps large 3-D models at the train/val boundary
