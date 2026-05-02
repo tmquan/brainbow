@@ -45,6 +45,7 @@ class ImageLogger(pl.Callback):
         {stage}/automatic/true/avg/val                          (3-D only)
         {stage}/automatic/true/image
         {stage}/automatic/true/label
+        {stage}/automatic/true/wan_decoder                      (Cosmos + VAE only)
         {stage}/automatic/pred/raw
         {stage}/automatic/pred/sem
         {stage}/automatic/pred/dir
@@ -232,11 +233,24 @@ class ImageLogger(pl.Callback):
             n = min(images.shape[0], self.max_images)
             head_pred = pl_module.model(images[:n])
 
+            # Optional: pretrained Wan-VAE pixel reconstruction (Cosmos
+            # only).  Diagnostic side branch — see
+            # ``CosmosTransfer3DWrapper.wan_decoder_output``.  Returns
+            # ``None`` for the random-init standalone DiT and for the
+            # Vista wrapper, which suppresses the panel downstream.
+            wan_decoder = getattr(pl_module.model, "wan_decoder_output", None)
+            wan_decoder_pred = (
+                wan_decoder(images[:n]) if callable(wan_decoder) else None
+            )
+
         # Autocast-returned tensors may be bf16/fp16.  Cast back to fp32
         # so every downstream op in this callback (colour LUTs,
         # matplotlib renderers, TB image encoders) operates in a single,
         # display-friendly dtype.
         head_pred = head_pred.float()
+        if wan_decoder_pred is not None:
+            wan_decoder_pred = wan_decoder_pred.float()
+
         clusterer = (
             getattr(pl_module, "clusterer", None)
             or getattr(pl_module, "_clusterer", None)
@@ -254,6 +268,9 @@ class ImageLogger(pl.Callback):
             _to_2d(rearrange(labels[:n], "b ... -> b 1 ...")),
             "b 1 ... -> b ...",
         )
+        wan_decoder_2d = (
+            _to_2d(wan_decoder_pred) if wan_decoder_pred is not None else None
+        )
 
         ctx = TagContext(stage=stage, mode=self.mode)
         _log_predictions(
@@ -266,8 +283,9 @@ class ImageLogger(pl.Callback):
             aff_emb_tau=aff_emb_tau,
             aff_avg_tau=aff_avg_tau,
             normalize_embeddings=normalize_embeddings,
+            wan_decoder_2d=wan_decoder_2d,
         )
-        del head_pred
+        del head_pred, wan_decoder_pred
 
 
 __all__ = ["ImageLogger"]

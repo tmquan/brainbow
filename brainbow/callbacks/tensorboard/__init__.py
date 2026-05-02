@@ -11,9 +11,9 @@ where
 * ``stage``  -- ``"train"`` | ``"val"``
 * ``mode``   -- ``"automatic"`` (single mode today; structured so
   additional modes such as ``"prompted"`` can slot in later)
-* ``panel``  -- e.g. ``true/image``, ``true/avg/val``, ``pred/raw``,
-  ``pred/sem``, ``pred/avg/val``, ``pred/avg/aff/01_t1``,
-  ``pred/emb/_pca``, ``pred/label/{pre,mul}``.  Affinity panels are prefixed with their 1-based
+* ``panel``  -- e.g. ``true/image``, ``true/avg/val``,
+  ``true/wan_decoder``, ``pred/raw``, ``pred/sem``, ``pred/avg/val``,
+  ``pred/avg/aff/01_t1``, ``pred/emb/_pca``, ``pred/label/{pre,mul}``.  Affinity panels are prefixed with their 1-based
   position in :data:`brainbow.losses.DIRECTIONS` so the alphabetical
   TB sort pairs each axis (T/B, U/D, L/R) on consecutive panels.
 

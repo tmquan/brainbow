@@ -91,6 +91,7 @@ def _log_predictions(
     aff_emb_tau: float = 1.0,
     aff_avg_tau: float = 1.0,
     normalize_embeddings: bool = False,
+    wan_decoder_2d: torch.Tensor | None = None,
 ) -> None:
     """Log true panels plus the unified-head prediction panels.
 
@@ -110,6 +111,9 @@ def _log_predictions(
       ``mul`` = same panel multiplied by the predicted sem mask)
     * ``true/image``, ``true/label``
     * ``true/avg/val`` and ``true/aff/{01_t1,...,12_r2}`` (3-D only)
+    * ``true/wan_decoder`` (RGB pixel reconstruction from the original
+      pretrained Wan decoder; only emitted when ``wan_decoder_2d`` is
+      passed in -- i.e. on the Cosmos wrapper with a loaded VAE).
     """
     if head_pred.shape[1] != HEAD_CHANNELS:
         raise ValueError(
@@ -140,6 +144,18 @@ def _log_predictions(
         _label_to_rgb(labels[:n]),
         global_step=epoch,
     )
+
+    # Pretrained Wan decoder reconstruction (Cosmos only).  Wan emits
+    # values in roughly ``[-1, 1]``; per-image min/max normalise to
+    # ``[0, 1]`` for display so the panel reads naturally next to
+    # ``true/image``.  Suppressed when no VAE was loaded
+    # (``wan_decoder_2d is None``).
+    if wan_decoder_2d is not None:
+        tb.add_images(
+            head.tag("true/wan_decoder"),
+            _normalise(wan_decoder_2d[:n]),
+            global_step=epoch,
+        )
 
     # ----- raw / sem -----
     raw = repeat(

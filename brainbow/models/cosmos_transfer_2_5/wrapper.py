@@ -575,6 +575,51 @@ class CosmosTransfer3DWrapper(nn.Module):
         Returns:
             Unified head tensor ``[B, 30, D, H, W]``.
         """
+        features, target_size = self._encode_and_extract(x)
+        return self.decoder_adapter(features, target_size=target_size)
+
+    @torch.no_grad()
+    def wan_decoder_output(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """RGB reconstruction from the **original (pretrained) Wan decoder**.
+
+        Mirrors :meth:`forward` through encode + DiT + ``decoder_body``,
+        then applies the pretrained ``conv_out`` preserved at
+        construction in
+        :attr:`decoder_adapter.original_conv_out` instead of the
+        unified task head.
+
+        Diagnostic only (``true/wan_decoder`` TensorBoard panel).  The
+        pretrained ``conv_out`` is frozen and never optimised; it shows
+        what the Wan VAE believes the model's learned latent should
+        decode to in pixel space.
+
+        Args:
+            x: Input volume ``[B, C, D, H, W]`` (single-channel EM is
+                tiled to 3-channel RGB internally).
+
+        Returns:
+            ``[B, 3, D, H, W]`` RGB reconstruction in roughly
+            ``[-1, 1]``, or ``None`` if the wrapper was built without a
+            pretrained VAE (random-init standalone DiT path).
+        """
+        if not getattr(self.decoder_adapter, "_has_pretrained", False):
+            return None
+        if getattr(self.decoder_adapter, "original_conv_out", None) is None:
+            return None
+        features, target_size = self._encode_and_extract(x)
+        return self.decoder_adapter.wan_reconstruct(features, target_size=target_size)
+
+    def _encode_and_extract(
+        self, x: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[int, int, int]]:
+        """Shared head of :meth:`forward` and :meth:`wan_decoder_output`.
+
+        Adapts to RGB, pads to compression multiples, encodes to the
+        VAE latent, runs the DiT to extract per-layer features, and
+        casts back to the input dtype.  Returns the projected feature
+        map plus the original ``(D, H, W)`` so the decoder side can
+        crop / interpolate back.
+        """
         original_dtype = x.dtype
         D_in, H_in, W_in = x.shape[-3], x.shape[-2], x.shape[-1]
 
@@ -593,8 +638,7 @@ class CosmosTransfer3DWrapper(nn.Module):
 
         features = self._extract_features(latent)
         features = features.to(dtype=original_dtype)
-
-        return self.decoder_adapter(features, target_size=(D_in, H_in, W_in))
+        return features, (D_in, H_in, W_in)
 
     # ------------------------------------------------------------------
     # Freeze / unfreeze

@@ -97,13 +97,20 @@ class _ProgressiveUpsampler3D(nn.Module):
 class _DecoderAdapter3D(nn.Module):
     """Reuses pretrained VAE decoder for multi-head volumetric segmentation.
 
-    Replaces the decoder's final output convolution with four parallel
-    task heads while preserving all pretrained upsampling weights.
+    Replaces the decoder's final output convolution with the unified
+    30-channel task head while preserving all pretrained upsampling
+    weights.  The pretrained ``conv_out`` itself is kept on the side as
+    :attr:`original_conv_out` (frozen) so the original Wan pixel
+    reconstruction can still be emitted for diagnostic visualisation
+    (see :meth:`wan_reconstruct` and the ``true/wan_decoder``
+    TensorBoard panel) -- otherwise the ``setattr(..., Identity())``
+    swap would garbage-collect the pretrained weights.
 
     Freeze policy:
       - Decoder body (early / mid blocks): frozen
       - Last up-block + output norm: trainable
-      - Task heads: trainable (randomly initialised)
+      - Task head: trainable (randomly initialised)
+      - Preserved ``original_conv_out``: frozen (pretrained weights only).
     """
 
     def __init__(
@@ -120,6 +127,12 @@ class _DecoderAdapter3D(nn.Module):
         super().__init__()
         self._has_pretrained = vae_decoder is not None
         self.head_channels = int(head_channels)
+
+        # Will be populated by ``_replace_conv_out`` when a pretrained
+        # decoder is provided; stays ``None`` for the random-init
+        # standalone path (where there is no pretrained reconstruction
+        # to emit).
+        self.original_conv_out: Optional[nn.Module] = None
 
         if vae_decoder is not None:
             self.to_latent = _PointwiseLinear(feature_size, latent_channels)
@@ -163,13 +176,27 @@ class _DecoderAdapter3D(nn.Module):
                     ch = final.weight.shape[1]
                 else:
                     continue
+                # Preserve the pretrained final conv on the side BEFORE
+                # overwriting it with Identity inside the body.  Without
+                # this snapshot the weights become unreachable as soon
+                # as ``setattr`` swaps in ``nn.Identity()``, and the
+                # only way to recover them is a fresh HF download.
+                # Keeping them frozen mirrors their pretrained-only
+                # contract -- they are diagnostic, never optimised.
+                self.original_conv_out = final
+                for p in self.original_conv_out.parameters():
+                    p.requires_grad = False
                 setattr(self.decoder_body, attr, nn.Identity())
                 logger.info(
-                    "Replaced decoder.%s (hidden_ch=%d) with Identity.", attr, ch,
+                    "Replaced decoder.%s (hidden_ch=%d) with Identity; "
+                    "preserved original conv_out as adapter.original_conv_out "
+                    "(frozen) for `true/wan_decoder` reconstruction.",
+                    attr, ch,
                 )
                 return ch
         logger.warning(
-            "Could not find decoder final conv; using latent_channels as hidden_ch."
+            "Could not find decoder final conv; using latent_channels as "
+            "hidden_ch.  `true/wan_decoder` panel will be unavailable."
         )
         return self.to_latent.linear.out_features
 
@@ -196,6 +223,28 @@ class _DecoderAdapter3D(nn.Module):
     def forward(
         self, features: torch.Tensor, target_size: tuple,
     ) -> torch.Tensor:
+        decoded = self._decode_body(features, target_size)
+        out = self.head(decoded)
+        return torch.cat(
+            [
+                out[:, :SEM_SLICE.start],
+                out[:, SEM_SLICE].sigmoid(),
+                out[:, SEM_SLICE.stop:],
+            ],
+            dim=1,
+        )
+
+    def _decode_body(
+        self, features: torch.Tensor, target_size: tuple,
+    ) -> torch.Tensor:
+        """Run features through ``decoder_body`` (with the swapped-out
+        ``Identity`` final conv) and resize to ``target_size``.
+
+        Returns the post-norm-out, pre-conv-out feature volume that the
+        unified head consumes.  Shared between :meth:`forward` and
+        :meth:`wan_reconstruct` so both paths see identical body
+        activations on the same call.
+        """
         if self._has_pretrained:
             latent = self.to_latent(features)
             body_dtype = next(self.decoder_body.parameters()).dtype
@@ -211,15 +260,37 @@ class _DecoderAdapter3D(nn.Module):
             decoded = F.interpolate(
                 decoded, size=target_size, mode="trilinear", align_corners=False,
             )
-        out = self.head(decoded)
-        return torch.cat(
-            [
-                out[:, :SEM_SLICE.start],
-                out[:, SEM_SLICE].sigmoid(),
-                out[:, SEM_SLICE.stop:],
-            ],
-            dim=1,
-        )
+        return decoded
+
+    @torch.no_grad()
+    def wan_reconstruct(
+        self, features: torch.Tensor, target_size: tuple,
+    ) -> Optional[torch.Tensor]:
+        """Pretrained Wan-VAE pixel reconstruction from DiT features.
+
+        Mirrors :meth:`forward`'s body pass and then applies the
+        original Wan ``conv_out`` (preserved at construction in
+        :attr:`original_conv_out` before the adapter swapped it for
+        ``Identity``) instead of the unified task head.
+
+        Diagnostic only -- shows what the pretrained Wan decoder
+        believes the model's learned latent should decode to in pixel
+        space.  At epoch 0 this matches the input closely; as
+        ``decoder_body`` drifts under training the reconstruction
+        degrades, which is itself a useful "is the latent staying in
+        the VAE's prior?" signal.
+
+        Returns:
+            ``[B, 3, D, H, W]`` RGB reconstruction in roughly
+            ``[-1, 1]`` (Wan's tanh-equivalent output range), or
+            ``None`` if the wrapper was built without a pretrained VAE.
+        """
+        if not self._has_pretrained or self.original_conv_out is None:
+            return None
+        decoded = self._decode_body(features, target_size)
+        body_dtype = next(self.original_conv_out.parameters()).dtype
+        rgb = self.original_conv_out(decoded.to(body_dtype))
+        return rgb.to(features.dtype)
 
 
 __all__ = [
