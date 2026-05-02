@@ -262,28 +262,47 @@ eventually sees.
 parameters into `weight_decay` / `no_weight_decay` (norms + biases).
 The Cosmos module overrides this in
 [brainbow/modules/cosmos_transfer_2_5/base.py](../brainbow/modules/cosmos_transfer_2_5/base.py)
-to add a third group with `lr = optimizer.dit_backbone_lr` for the DiT
-backbone params (taking effect only when the DiT is unfrozen — see §6).
+to surface three architecturally-distinct learning rates:
+
+* `model.dit.*`        → `optimizer.dit_backbone_lr` (base DiT,
+                          the "upper part" — typically frozen).
+* `model.controlnet.*` → `optimizer.controlnet_lr` (residual branch;
+                          defaults to `dit_backbone_lr` if unset).
+* everything else      → `optimizer.lr` (heads, projector, decoder shim).
+
+Each takes effect only when the corresponding submodule is unfrozen
+(see §6).
 
 ---
 
 ## 6. Freeze flags (Cosmos only)
 
-The Cosmos backbone exposes three independent freeze knobs:
-`freeze_vae_encoder`, `freeze_dit_backbone`, `freeze_vae_decoder`.
-They are **bools**, applied **once at construction** by
+The Cosmos backbone exposes four independent freeze knobs:
+`freeze_vae_encoder`, `freeze_dit_backbone`, `freeze_controlnet`,
+`freeze_vae_decoder`.  They are **bools**, applied **once at
+construction** by
 [brainbow/models/cosmos_transfer_2_5/wrapper.py](../brainbow/models/cosmos_transfer_2_5/wrapper.py)
 when the wrapper is built; there is no per-epoch thaw schedule.
+
+Cosmos-Transfer2.5 is a **base DiT + ControlNet** stack: the upstream
+`nvidia/Cosmos-Transfer2.5-2B` repo holds the full base transformer on
+revision `diffusers/general` and a small replicated control branch on
+`diffusers/controlnet/general/{edge,depth,seg,blur}`.  Both are loaded
+by `_try_load_diffusers` / `_try_load_controlnet`; the ControlNet's
+`control_block_samples` are summed into the base DiT inside
+`CosmosTransformerBlock.forward` (`hidden_states += controlnet_residual`).
 
 * `freeze_*: true`  → that submodule is frozen (`requires_grad_(False)`)
   for the whole run; its parameters are excluded from the AdamW param
   groups in `configure_optimizers`.
 * `freeze_*: false` → that submodule trains for the whole run;
-  if it's the DiT backbone, it is placed in its own param group with
-  `lr = optimizer.dit_backbone_lr` (default `lr` if unset).
+  if it's the base DiT or the ControlNet, it is placed in its own param
+  group with `lr = optimizer.dit_backbone_lr` /
+  `optimizer.controlnet_lr` (each defaulting to `lr` if unset).
 
-Defaults in `configs/snemi3d.yaml`: VAE encoder frozen, DiT and VAE
-decoder trainable.  See
+Defaults in `configs/snemi3d.yaml`: VAE encoder frozen, **base DiT
+frozen, ControlNet trainable** (the natural ControlNet pattern), VAE
+decoder frozen except the fine-tuning shim.  See
 [`ARCHITECT.md` §1.6](./ARCHITECT.md#16-freeze-flags--what-actually-moves)
 for parameter-budget consequences.
 
