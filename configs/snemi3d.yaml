@@ -33,6 +33,20 @@
 #
 #   python scripts/train.py --config-name snemi3d \
 #     training.resume_from_checkpoint=<run_dir>/checkpoints/last.ckpt
+#
+# Cross-architecture warm start.  When the saved ``last.ckpt`` was
+# trained with the **base DiT only** (no ControlNet branch) and you're
+# now resuming on the new ControlNet-aware wrapper, full Lightning
+# resume cannot be used (key + optimiser-state mismatch).  Use the
+# weights-only path with the skip list pinned below to:
+#
+#   * keep ``model.dit.*`` at the freshly-pulled HF base DiT,
+#   * keep ``model.controlnet.*`` at the freshly-pulled HF ControlNet,
+#   * restore everything else (heads, projector, decoder shim, loss
+#     buffers, ...) from the ckpt where keys overlap.
+#
+#   python scripts/train.py --config-name snemi3d \
+#     +ckpt_path=<run_dir>/checkpoints/last.ckpt
 # =====================================================================
 
 defaults:
@@ -41,6 +55,36 @@ defaults:
 experiment_name: snemi3d
 project_name: brainbow
 output_dir: outputs
+
+
+# ---------------------------------------------------------------------
+# Checkpoint loading policy (weights-only warm start)
+# ---------------------------------------------------------------------
+# Source-of-truth for ``+ckpt_path=...`` loads on this recipe.  The
+# behaviour table is:
+#
+#   model.dit.*               -> Fresh nvidia/Cosmos-Transfer2.5-2B @
+#                                ``diffusers/general`` (HF, dropped from
+#                                ckpt by the skip list below).
+#   model.controlnet.*        -> Fresh nvidia/Cosmos-Transfer2.5-2B @
+#                                ``diffusers/controlnet/general/edge``
+#                                (HF, dropped from ckpt by the skip list
+#                                below).
+#   model.feature_projector.* -> Restored from ``last.ckpt``.
+#   model.decoder_adapter.*   -> Restored from ``last.ckpt`` (head +
+#                                decoder shim).
+#   anything else (e.g. ``loss.*`` buffers)
+#                             -> Restored from ``last.ckpt`` where keys
+#                                overlap; fresh init otherwise.
+#
+# See ``scripts/train.py::_resolve_checkpoint`` for the loader.  Pass
+# ``+ckpt_path_skip_prefixes=[]`` on the CLI to override (e.g. when
+# you've trained a true ControlNet-aware ckpt and want to restore both
+# branches as well).
+# ---------------------------------------------------------------------
+ckpt_path_skip_prefixes:
+  - model.dit.
+  - model.controlnet.
 
 
 # ---------------------------------------------------------------------
