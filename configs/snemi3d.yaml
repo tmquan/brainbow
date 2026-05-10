@@ -64,8 +64,9 @@ output_dir: outputs
 # behaviour table is:
 #
 #   model.dit.*               -> Fresh nvidia/Cosmos-Predict2.5-2B @
-#                                ``diffusers/general`` (HF, dropped from
-#                                ckpt by the skip list below).
+#                                ``diffusers/base/post-trained`` (HF,
+#                                dropped from ckpt by the skip list
+#                                below).
 #   model.feature_projector.* -> Restored from ``last.ckpt``.
 #   model.decoder_adapter.*   -> Restored from ``last.ckpt`` (head +
 #                                decoder shim).
@@ -208,9 +209,10 @@ data:
 # stack -- a plain DiT + Wan-VAE pair, with no ControlNet residual
 # branch (that's the Cosmos-Transfer 2.5 add-on; see the sister
 # package ``brainbow/models/cosmos_transfer_2_5/`` if you want it).
-# Loaded from ``nvidia/Cosmos-Predict2.5-2B`` @ ``diffusers/general``
-# (matches the base DiT revision Cosmos-Transfer 2.5 uses, so warm-
-# starting between the two backbones works out of the box):
+# Loaded from ``nvidia/Cosmos-Predict2.5-2B`` @
+# ``diffusers/base/post-trained`` (the closest analog to the
+# ``diffusers/general`` revision Cosmos-Transfer 2.5 uses, so warm-
+# starting between the two backbones still works):
 #
 #   self.dit  -- ``CosmosTransformer3DModel`` (~2 B params), the only
 #                transformer branch.  Whether it trains depends on

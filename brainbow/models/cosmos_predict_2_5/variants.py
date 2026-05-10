@@ -12,12 +12,15 @@ no Predict-specific extension fields are needed (no ControlNet).
 
 Release notes
 -------------
-The 2B variant lives at ``nvidia/Cosmos-Predict2.5-2B``.  The
-``hf_revision`` default below matches Cosmos-Transfer 2.5's base DiT
-revision (``diffusers/general``) so the two backbones share a base
-when used side-by-side.  Override via ``model.hf_revision`` in the
-recipe config if a different branch (e.g. ``diffusers/text2world``,
-``diffusers/video2world``, ``diffusers/auto-multi-view``) is desired.
+The 2B variant lives at ``nvidia/Cosmos-Predict2.5-2B``.  As of
+2026-05 the diffusers-format branches published on that repo are::
+
+    diffusers/base/post-trained   # default below
+    diffusers/base/pre-trained    # earlier checkpoint, less polished
+
+We pin ``diffusers/base/post-trained`` -- the closest analog to
+Cosmos-Transfer 2.5's ``diffusers/general`` base DiT -- so Predict
+and Transfer warm-start from comparable weights.
 """
 
 from typing import Dict
@@ -28,11 +31,13 @@ from brainbow.models.cosmos_2_5_common.variants import _VariantConfigBase
 _VARIANT_CONFIGS: Dict[str, _VariantConfigBase] = {
     "2B": _VariantConfigBase(
         hf_repo_id="nvidia/Cosmos-Predict2.5-2B",
-        # Match Cosmos-Transfer 2.5's base revision so Predict and
-        # Transfer share the same upstream base DiT weights.  Override
-        # via ``model.hf_revision`` in the recipe config to pin a
-        # different branch (text2world / video2world / etc.).
-        hf_revision="diffusers/general",
+        # Predict 2.5 ships the diffusers-format base DiT under
+        # ``diffusers/base/{post,pre}-trained`` rather than the
+        # ``diffusers/general`` branch Transfer uses.  Pin the
+        # post-trained branch (the closer analog to Transfer's
+        # ``general``); pass ``diffusers/base/pre-trained`` (or a
+        # custom branch / commit) via the variant override if needed.
+        hf_revision="diffusers/base/post-trained",
         hidden_dim=2048,
         num_layers=28,
         num_heads=16,
