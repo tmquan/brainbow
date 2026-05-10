@@ -1,8 +1,10 @@
-"""Shared primitive layers for the Cosmos-Transfer 3D wrapper.
+"""Shared primitive layers for the Cosmos 2.5 wrappers.
 
-Kept dependency-light so every other submodule in the package can
-import from here without pulling in the heavyweight diffusers / VAE
-classes required by the wrapper.
+Used by both :mod:`brainbow.models.cosmos_transfer_2_5` (the base DiT
+plus ControlNet) and :mod:`brainbow.models.cosmos_predict_2_5` (base
+DiT only).  Kept dependency-light so every other submodule in the
+package can import from here without pulling in the heavyweight
+diffusers / VAE classes required by the wrappers.
 """
 
 import torch

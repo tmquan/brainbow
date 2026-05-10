@@ -69,15 +69,18 @@ data:
 
 # Model configuration
 model:
-  type: cosmostransfer3d  # Options: cosmostransfer3d, vista3d
+  type: cosmostransfer3d  # Options: cosmostransfer3d, cosmospredict3d, vista3d
   in_channels: 1
   head_channels: 30       # Unified head: raw(1)+sem(1)+dir(3)+cov(6)+avg(3)+emb(16)
   feature_size: 64
   dropout: 0.2
   # If true, the wrapper will auto-pull pretrained weights from HuggingFace
-  # on first instantiation (Cosmos -> nvidia/Cosmos-Transfer2.5-2B,
-  # Vista -> MONAI/VISTA3D-HF).  Downloads are cached under
-  # ~/.cache/brainbow/.  Set to false to train from scratch.
+  # on first instantiation:
+  #   cosmostransfer3d -> nvidia/Cosmos-Transfer2.5-2B
+  #   cosmospredict3d  -> nvidia/Cosmos-Predict2.5-2B
+  #   vista3d          -> MONAI/VISTA3D-HF
+  # Downloads are cached under ~/.cache/brainbow/.  Set to false to
+  # train from scratch.
   pretrained: true
 
 # Optimizer configuration

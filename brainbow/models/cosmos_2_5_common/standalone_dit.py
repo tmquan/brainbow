@@ -1,9 +1,10 @@
-"""Random-init 3-D DiT fallback for Cosmos-Transfer2.5.
+"""Random-init 3-D DiT fallback for the Cosmos 2.5 family.
 
-Used when neither ``diffusers`` nor the ``cosmos_transfer2`` package
-can provide pretrained weights.  Shape-compatible with the official
-variants (hidden dim / layer count / head count follow
-:class:`_VariantConfig`) but trained from scratch.
+Used by both Cosmos-Transfer 2.5 and Cosmos-Predict 2.5 wrappers when
+neither ``diffusers`` nor the upstream ``cosmos_*`` package can provide
+pretrained weights.  Shape-compatible with the official variants
+(hidden dim / layer count / head count follow
+:class:`_VariantConfigBase`) but trained from scratch.
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -12,7 +13,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 
-from brainbow.models.cosmos_transfer_2_5.variants import _VariantConfig
+from brainbow.models.cosmos_2_5_common.variants import _VariantConfigBase
 
 
 class _DiTBlock(nn.Module):
@@ -80,14 +81,14 @@ class _DiTBlock(nn.Module):
 
 
 class _StandaloneDiT3D(nn.Module):
-    """Minimal 3-D DiT matching Cosmos-Transfer2.5 shape.
+    """Minimal 3-D DiT matching the Cosmos 2.5 family's shape.
 
     Patch embedding operates on volumetric patches
     ``(P_d, P_h, P_w) = (patch_size,) * 3`` producing a 1-D sequence of
     tokens processed by self-attention blocks.
     """
 
-    def __init__(self, cfg: _VariantConfig) -> None:
+    def __init__(self, cfg: _VariantConfigBase) -> None:
         super().__init__()
         self.hidden_dim = cfg.hidden_dim
         self.patch_size = cfg.patch_size

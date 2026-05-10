@@ -222,15 +222,18 @@ def build_datamodule(cfg: DictConfig) -> pl.LightningDataModule:
 def build_module(cfg: DictConfig) -> pl.LightningModule:
     """Instantiate the Lightning module selected by ``cfg.model.type``."""
     from brainbow.modules import (
-        Vista3DModule,
+        CosmosPredict3DModule,
         CosmosTransfer3DModule,
+        Vista3DModule,
     )
 
     module_classes = {
         "vista3d": Vista3DModule,
         "cosmostransfer3d": CosmosTransfer3DModule,
-        # Legacy alias.
+        "cosmospredict3d": CosmosPredict3DModule,
+        # Legacy / verbose aliases.
         "cosmos_transfer25_3d": CosmosTransfer3DModule,
+        "cosmos_predict25_3d": CosmosPredict3DModule,
     }
 
     model_cfg = dict(cfg.get("model", {}))

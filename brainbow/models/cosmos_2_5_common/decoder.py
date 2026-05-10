@@ -1,4 +1,4 @@
-"""Decoder-side modules for the Cosmos-Transfer 3D wrapper.
+"""Decoder-side modules shared by the Cosmos 2.5 wrappers.
 
 The decoder hosts one unified Vista-style task head that emits the
 canonical ``[B, 30, D, H, W]`` tensor consumed by
@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from brainbow.models.cosmos_transfer_2_5.layers import (
+from brainbow.models.cosmos_2_5_common.layers import (
     _NORM,
     _PointwiseLinear,
 )

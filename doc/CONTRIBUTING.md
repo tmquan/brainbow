@@ -202,6 +202,18 @@ brainbow/modules/<arch>/base.py           # arch-specific concerns
 brainbow/modules/<arch>/module.py         # concrete Lightning class
 ```
 
+> **If the new backbone is a thin variant of an existing one** (e.g.
+> Cosmos-Predict 2.5 vs. Cosmos-Transfer 2.5, which share the base DiT
+> + Wan VAE and only differ in whether a ControlNet residual branch is
+> loaded on top), prefer factoring the shared scaffolding into a
+> `cosmos_<family>_common/` package and inheriting from it.  See
+> [`brainbow/models/cosmos_2_5_common/`](../brainbow/models/cosmos_2_5_common/)
+> and [`brainbow/modules/cosmos_2_5_common/`](../brainbow/modules/cosmos_2_5_common/)
+> for the canonical example: `_BaseCosmos25Wrapper` exposes
+> `_init_arch_state` / `_post_load_diffusers` /
+> `_compute_controlnet_residuals` extension hooks so each backbone-
+> specific package only owns its true delta.
+
 ### 3.1 The wrapper class
 
 * Inherit from `torch.nn.Module` (or `BaseModel` if you want the type
@@ -240,12 +252,13 @@ class MyArchModule(BaseMyArchModule):
 
 ### 3.3 Wire-in the dispatch
 
-`scripts/train.py:get_module` (line 198):
+`scripts/train.py:build_module`:
 
 ```python
 module_classes = {
     "vista3d": Vista3DModule,
     "cosmostransfer3d": CosmosTransfer3DModule,
+    "cosmospredict3d": CosmosPredict3DModule,
     "myarch": MyArchModule,                    # <-- new
 }
 ```

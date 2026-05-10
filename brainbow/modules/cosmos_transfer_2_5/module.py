@@ -1,28 +1,34 @@
 """
-Cosmos-Transfer2.5 **3D** Lightning module for volumetric segmentation.
+Cosmos-Transfer 2.5 **3D** Lightning module for volumetric segmentation.
 
 Only the **automatic** training mode is supported.  See
 :class:`BaseCosmosModule` for the full training / evaluation logic.
 """
 
+from typing import Any, Dict
+
 from brainbow.losses import CombinedLoss
 from brainbow.models.cosmos_transfer_2_5 import CosmosTransfer3DWrapper
-from brainbow.modules.cosmos_transfer_2_5.base import BaseCosmosModule
+from brainbow.modules.cosmos_2_5_common.base import BaseCosmosModule
 
 
 class CosmosTransfer3DModule(BaseCosmosModule):
-    """Cosmos-Transfer2.5 3-D volumetric segmentation module.
+    """Cosmos-Transfer 2.5 3-D volumetric segmentation module.
 
-    Four output heads:
-
-    * ``semantic`` ``[B, L, D, H, W]``      -- per-voxel class logits.
-    * ``instance`` ``[B, E, D, H, W]``      -- discriminative embedding.
-    * ``geometry`` ``[B, G, D, H, W]``      -- raw + dir + cov-upper-tri.
-    * ``boundary`` ``[B, C, D, H, W]``      -- raw + avg RGB + 6 direct face-affinity (10 channels).
-
-    Heads with weight ``0`` in the loss config are not constructed; see
-    :class:`brainbow.losses.CombinedLoss`.
+    Forwards the Transfer-specific ``controlnet_revision`` and
+    ``freeze_controlnet`` knobs through to
+    :class:`CosmosTransfer3DWrapper` via :meth:`_extra_model_kwargs`;
+    the rest (in/head channels, freeze schedule, optimiser groups) is
+    inherited from :class:`BaseCosmosModule`.
     """
 
     _model_cls = CosmosTransfer3DWrapper
     _loss_cls = CombinedLoss
+
+    def _extra_model_kwargs(
+        self, model_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "controlnet_revision": model_config.get("controlnet_revision"),
+            "freeze_controlnet": model_config.get("freeze_controlnet", False),
+        }

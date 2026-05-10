@@ -1,9 +1,9 @@
 # =====================================================================
-# SNEMI3D + Neurons + MICrONS  --  CosmosTransfer3D training config
+# SNEMI3D + Neurons + MICrONS  --  CosmosPredict3D training config
 # =====================================================================
 # Inheritance chain:  default <- snemi3d
 #
-# Trains CosmosTransfer3D jointly on three EM datasets at a harmonised
+# Trains CosmosPredict3D jointly on three EM datasets at a harmonised
 # resolution so a single model sees all three:
 #
 #   Dataset    Native res (Z, Y, X nm)   Source
@@ -35,13 +35,13 @@
 #     training.resume_from_checkpoint=<run_dir>/checkpoints/last.ckpt
 #
 # Cross-architecture warm start.  When the saved ``last.ckpt`` was
-# trained with the **base DiT only** (no ControlNet branch) and you're
-# now resuming on the new ControlNet-aware wrapper, full Lightning
-# resume cannot be used (key + optimiser-state mismatch).  Use the
-# weights-only path with the skip list pinned below to:
+# trained with a different backbone (e.g. the older Cosmos-Transfer
+# wrapper, which carried a ``model.controlnet.*`` branch this Predict
+# wrapper does not), full Lightning resume cannot be used (key +
+# optimiser-state mismatch).  Use the weights-only path with the skip
+# list pinned below to:
 #
 #   * keep ``model.dit.*`` at the freshly-pulled HF base DiT,
-#   * keep ``model.controlnet.*`` at the freshly-pulled HF ControlNet,
 #   * restore everything else (heads, projector, decoder shim, loss
 #     buffers, ...) from the ckpt where keys overlap.
 #
@@ -63,13 +63,9 @@ output_dir: outputs
 # Source-of-truth for ``+ckpt_path=...`` loads on this recipe.  The
 # behaviour table is:
 #
-#   model.dit.*               -> Fresh nvidia/Cosmos-Transfer2.5-2B @
+#   model.dit.*               -> Fresh nvidia/Cosmos-Predict2.5-2B @
 #                                ``diffusers/general`` (HF, dropped from
 #                                ckpt by the skip list below).
-#   model.controlnet.*        -> Fresh nvidia/Cosmos-Transfer2.5-2B @
-#                                ``diffusers/controlnet/general/edge``
-#                                (HF, dropped from ckpt by the skip list
-#                                below).
 #   model.feature_projector.* -> Restored from ``last.ckpt``.
 #   model.decoder_adapter.*   -> Restored from ``last.ckpt`` (head +
 #                                decoder shim).
@@ -79,12 +75,11 @@ output_dir: outputs
 #
 # See ``scripts/train.py::_resolve_checkpoint`` for the loader.  Pass
 # ``+ckpt_path_skip_prefixes=[]`` on the CLI to override (e.g. when
-# you've trained a true ControlNet-aware ckpt and want to restore both
-# branches as well).
+# you want the ckpt's ``model.dit.*`` to win over the freshly-pulled HF
+# weights).
 # ---------------------------------------------------------------------
 ckpt_path_skip_prefixes:
   - model.dit.
-  - model.controlnet.
 
 
 # ---------------------------------------------------------------------
@@ -207,59 +202,58 @@ data:
 
 
 # ---------------------------------------------------------------------
-# Model -- CosmosTransfer3D (Cosmos-Transfer2.5-2B backbone + ControlNet)
+# Model -- CosmosPredict3D (Cosmos-Predict2.5-2B base DiT, no ControlNet)
 # ---------------------------------------------------------------------
-# Cosmos-Transfer2.5 ships as a **base DiT + ControlNet** stack (see
-# ``brainbow/models/cosmos_transfer_2_5/variants.py``).  Both branches
-# are loaded from ``nvidia/Cosmos-Transfer2.5-2B`` (different HF
-# revisions, summed via ``block_controlnet_hidden_states`` injection
-# inside ``CosmosTransformer3DModel``):
+# Cosmos-Predict2.5 is the upstream base DiT in NVIDIA's Cosmos 2.5
+# stack -- a plain DiT + Wan-VAE pair, with no ControlNet residual
+# branch (that's the Cosmos-Transfer 2.5 add-on; see the sister
+# package ``brainbow/models/cosmos_transfer_2_5/`` if you want it).
+# Loaded from ``nvidia/Cosmos-Predict2.5-2B`` @ ``diffusers/general``
+# (matches the base DiT revision Cosmos-Transfer 2.5 uses, so warm-
+# starting between the two backbones works out of the box):
 #
-#   self.dit         -- ``CosmosTransformer3DModel`` (~2B), the
-#                       "upper" path; FROZEN below.
-#   self.controlnet  -- ``CosmosControlNetModel`` (a few replicated
-#                       transformer blocks), the trainable RESIDUAL
-#                       path whose ``control_block_samples`` are added
-#                       to the base every ``controlnet_block_every_n``
-#                       blocks.
+#   self.dit  -- ``CosmosTransformer3DModel`` (~2 B params), the only
+#                transformer branch.  Whether it trains depends on
+#                ``freeze_dit_backbone`` below.
 #
-# The same EM VAE latent feeds both paths (volume = generative input
-# *and* its own control signal).
+# The same EM VAE latent feeds the DiT alone (no auxiliary control
+# signal).  See ``brainbow/models/cosmos_predict_2_5/`` for the wrapper
+# and ``brainbow/models/cosmos_2_5_common/`` for the scaffolding shared
+# with Cosmos-Transfer 2.5.
 # ---------------------------------------------------------------------
 model:
-  type: cosmostransfer3d
+  type: cosmospredict3d
   variant: "2B"
   dtype: "bf16"
-  pretrained: true                # auto-pulls nvidia/Cosmos-Transfer2.5-2B from HF
+  pretrained: true                # auto-pulls nvidia/Cosmos-Predict2.5-2B from HF
 
   # Unified output head (must match brainbow.losses._common.HEAD_CHANNELS):
   in_channels: 1                  # raw EM input -> 1 channel
   head_channels: 30               # raw(1)+sem(1)+dir(3)+cov(6)+avg(3)+emb(16)
   feature_size: 64
 
-  # ControlNet variant.  Lives on a sibling branch of the same HF repo
-  # as the base DiT.  ``edge`` is the closest analog to EM contrast;
-  # other shipped modalities are ``depth`` / ``seg`` / ``blur``.  Set
-  # to an empty string ``""`` to disable the ControlNet load path.
-  controlnet_revision: diffusers/controlnet/general/edge
-
-  # What to freeze.  Cosmos-Transfer2.5 is a ControlNet stack, so we
-  # keep the strong pretrained base DiT frozen and adapt only the
-  # smaller ControlNet branch + new heads.
+  # What to freeze.  Cosmos-Predict has no ControlNet residual branch
+  # to absorb the trainable load, so leaving the DiT permanently frozen
+  # would mean only the heads + last VAE-decoder up-block train.  The
+  # default below freezes the DiT for a 5-epoch warm-up so the heads
+  # find a reasonable init at ``optimizer.lr``, then unfreezes at
+  # epoch 5 so the much larger DiT param group can adapt to the EM
+  # domain at the smaller ``optimizer.dit_backbone_lr``.  Set to
+  # ``true`` for a heads-only run or ``false`` to train end-to-end
+  # from step 0.
   #
   # ``freeze_dit_backbone`` accepts:
-  #   true  -> permanently frozen
+  #   true  -> permanently frozen (heads-only training)
   #   false -> permanently trainable
   #   N     -> freeze the **entire** DiT during epochs 0 .. N-1, then
   #            unfreeze at the start of epoch N (optimizer rebuilt so
   #            the new param group picks up ``optimizer.dit_backbone_lr``).
   # i.e. the integer is an **epoch count, not a layer count**.  The
   # phased-schedule machinery lives in
-  # ``brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start``;
-  # see ``doc/ARCHITECT.md`` § 1.6 for the parameter-budget table.
+  # ``brainbow/modules/cosmos_2_5_common/base.py``;
+  # see ``doc/ARCHITECT.md`` for the parameter-budget table.
   freeze_vae_encoder: true
-  freeze_dit_backbone: true       # FROZEN upper part (base DiT)
-  freeze_controlnet: false        # TRAINABLE residual part (ControlNet)
+  freeze_dit_backbone: false          # 5-epoch frozen warm-up, then unfreeze
   freeze_vae_decoder: true
 
   gradient_checkpointing: false
@@ -355,12 +349,16 @@ training:
 
 
 # ---------------------------------------------------------------------
-# Optimizer (algorithm hard-coded to AdamW; see modules/cosmos_transfer_2_5/base.py)
+# Optimizer (algorithm hard-coded to AdamW; see modules/cosmos_2_5_common/base.py)
 # ---------------------------------------------------------------------
 optimizer:
   lr: 2e-4                        # head / new-parameter LR
   dit_backbone_lr: 2e-5           # 10x lower for the pretrained DiT backbone
-  controlnet_lr: 2e-5             # ControlNet residual branch LR
+  # ``controlnet_lr`` is harmless on Cosmos-Predict (no ControlNet
+  # branch -> the param group is empty -> the value is ignored), but
+  # left here so flipping ``model.type`` to cosmostransfer3d doesn't
+  # also need an optimizer-section edit.
+  controlnet_lr: 2e-5
                                   # (defaults to ``dit_backbone_lr`` if unset)
   weight_decay: 1.0e-4
   scheduler:

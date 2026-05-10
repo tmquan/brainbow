@@ -132,20 +132,47 @@ and the loss targets.  No learnable state.
 `models/base.py::BaseModel` is the abstract contract (forward →
 dict with `logits`, `get_output_channels()`).
 
+#### `models/cosmos_2_5_common/` — shared scaffolding for the Cosmos 2.5 family
+
+Both Cosmos-Transfer 2.5 and Cosmos-Predict 2.5 share the same
+underlying base DiT, Wan VAE, feature-extraction hooks, decoder
+adapter, freeze plumbing and HF auto-pull path.  Those live here so
+each backbone-specific package only owns its true delta.
+
+| File                  | Purpose                                                               |
+| --------------------- | --------------------------------------------------------------------- |
+| `__init__.py`         | Re-exports the shared symbols.                                        |
+| `wrapper_base.py`     | `_BaseCosmos25Wrapper` — abstract wrapper with extension hooks.       |
+| `variants.py`         | `_VariantConfigBase` dataclass (each backbone extends as needed).     |
+| `layers.py`           | Shared primitives (`_NORM`, `_PointwiseLinear`, `_adapt_to_rgb`).     |
+| `decoder.py`          | `_FeatureProjector3D` / `_DecoderAdapter3D` (VAE + unified head).     |
+| `standalone_dit.py`   | Random-init `_StandaloneDiT3D` fallback for `pretrained=False`.       |
+| `hf_loader.py`        | Rank-aware HF snapshot download (ignores `text_encoder/*`).           |
+
 #### `models/cosmos_transfer_2_5/` — Cosmos-Transfer 2.5 3-D wrapper
 
-Split into a package because the wrapper needs HF auto-pull, a
-standalone-DiT fallback, and a variant registry.
+The Transfer-specific delta on top of `cosmos_2_5_common`: the
+ControlNet residual branch (`CosmosControlNetModel`) loaded from a
+sibling HF revision and summed into the base DiT every
+`controlnet_block_every_n` blocks.
 
 | File                  | Purpose                                                               |
 | --------------------- | --------------------------------------------------------------------- |
 | `__init__.py`         | Re-exports `CosmosTransfer3DWrapper`.                                 |
-| `wrapper.py`          | `CosmosTransfer3DWrapper` — the public class.                         |
-| `variants.py`         | 2B / 14B variant registry (+ sanity for unreleased variants).         |
-| `layers.py`           | Shared primitives (conv blocks, normalisation wrappers).              |
-| `decoder.py`          | Feature projector + VAE decoder adapter.                              |
-| `standalone_dit.py`   | Random-init DiT fallback for `pretrained=False`.                      |
-| `hf_loader.py`        | Rank-aware HF snapshot download (ignores `text_encoder/*`).           |
+| `wrapper.py`          | `CosmosTransfer3DWrapper` — adds ControlNet load / freeze / forward.  |
+| `variants.py`         | `_VariantConfig(_VariantConfigBase)` adding `hf_revision_controlnet`. |
+
+#### `models/cosmos_predict_2_5/` — Cosmos-Predict 2.5 3-D wrapper
+
+The base DiT in NVIDIA's Cosmos 2.5 stack (no ControlNet).  Inherits
+everything from `_BaseCosmos25Wrapper` without overriding any
+extension hooks.
+
+| File                  | Purpose                                                               |
+| --------------------- | --------------------------------------------------------------------- |
+| `__init__.py`         | Re-exports `CosmosPredict3DWrapper`.                                  |
+| `wrapper.py`          | `CosmosPredict3DWrapper` — thin subclass of `_BaseCosmos25Wrapper`.   |
+| `variants.py`         | Predict-specific variant registry (`nvidia/Cosmos-Predict2.5-2B`).    |
 
 #### `models/vista/` — Vista3D wrapper + head
 
@@ -165,11 +192,13 @@ concrete `module.py`.
 
 | Path                                  | Purpose                                                      |
 | ------------------------------------- | ------------------------------------------------------------ |
-| `modules/base.py`                     | `BaseCircuitModule` — loop + head-oriented scalar logging.   |
-| `modules/cosmos_transfer_2_5/base.py` | `BaseCosmosModule` — freeze schedule + optim parameter split.|
-| `modules/cosmos_transfer_2_5/module.py` | `CosmosTransfer3DModule` — the concrete Lightning class.   |
-| `modules/vista/base.py`               | `BaseVistaModule` — Vista-specific freeze schedule.          |
-| `modules/vista/module.py`             | `Vista3DModule` — the concrete Lightning class.              |
+| `modules/base.py`                       | `BaseCircuitModule` — loop + head-oriented scalar logging. |
+| `modules/cosmos_2_5_common/base.py`     | `BaseCosmosModule` — freeze schedule + optim param-group split (shared by Predict and Transfer). |
+| `modules/cosmos_transfer_2_5/base.py`   | Back-compat re-export of `BaseCosmosModule`.               |
+| `modules/cosmos_transfer_2_5/module.py` | `CosmosTransfer3DModule` — concrete Lightning class.       |
+| `modules/cosmos_predict_2_5/module.py`  | `CosmosPredict3DModule` — concrete Lightning class.        |
+| `modules/vista/base.py`                 | `BaseVistaModule` — Vista-specific freeze schedule.        |
+| `modules/vista/module.py`               | `Vista3DModule` — concrete Lightning class.                |
 
 ### `brainbow/callbacks/` — Lightning callbacks
 
@@ -229,13 +258,15 @@ concrete `module.py`.
 | Subsystem                               | .py files  |
 | --------------------------------------- | ---------- |
 | `brainbow/transforms/`                  | 10 (incl. `__init__`, `_region_field`)               |
-| `brainbow/models/cosmos_transfer_2_5/`  |  7 (incl. `__init__`)                                |
+| `brainbow/models/cosmos_2_5_common/`    |  7 (incl. `__init__`)                                |
+| `brainbow/models/cosmos_transfer_2_5/`  |  3 (`__init__`, `wrapper`, `variants`)               |
+| `brainbow/models/cosmos_predict_2_5/`   |  3 (`__init__`, `wrapper`, `variants`)               |
 | `brainbow/models/vista/`                |  4 (incl. `__init__`)                                |
 | `brainbow/callbacks/tensorboard/`       |  6 (incl. `__init__`)                                |
 | `brainbow/losses/`                      |  3 (`__init__`, `_common`, `combined`)               |
 | `brainbow/datamodules/` + `datasets/`   |  5 + 7 (datasets incl. `lazy.py`, `_patches.py`)     |
 | `brainbow/preprocessors/`               |  6 (incl. `__init__`, `base`)                        |
-| `brainbow/modules/`                     |  2 (top-level) + 3 + 3 (per arch package)            |
+| `brainbow/modules/`                     |  2 (top-level) + per-arch packages (`cosmos_2_5_common`, `cosmos_transfer_2_5`, `cosmos_predict_2_5`, `vista`) |
 | `brainbow/metrics/`                     |  3                                                   |
 | `brainbow/inference/`                   |  3                                                   |
 | `brainbow/utils/`                       |  4 (incl. `__init__`)                                |

@@ -1,7 +1,7 @@
 """
-Cosmos-Transfer2.5 **3D** model wrapper for volumetric connectomics segmentation.
+Cosmos-Transfer 2.5 **3D** model wrapper for volumetric connectomics segmentation.
 
-Adapts the Cosmos-Transfer2.5 DiT backbone (2B or 14B) as a feature
+Adapts the Cosmos-Transfer 2.5 DiT backbone (2B or 14B) as a feature
 extractor for the unified 30-channel volumetric segmentation head:
 
 ``raw(1) | sem(1) | dir(3) | cov(6) | avg(3) | emb(16)``
@@ -9,7 +9,7 @@ extractor for the unified 30-channel volumetric segmentation head:
 See :mod:`brainbow.losses._common` for the canonical slice constants and
 12-direction second-order affinity convention.
 
-Cosmos-Transfer2.5 is natively a video model with temporal + spatial
+Cosmos-Transfer 2.5 is natively a video model with temporal + spatial
 dimensions.  For volumetric EM data the depth axis maps directly to the
 temporal axis, making the 3D adaptation architecturally natural::
 
@@ -21,13 +21,13 @@ then processes the full 3D latent grid.
 
 Module layout::
 
-    layers.py         -- shared primitives (_NORM, _PointwiseLinear, _adapt_to_rgb)
-    variants.py       -- _VariantConfig dataclass + _VARIANT_CONFIGS registry
-    hf_loader.py      -- rank-aware HuggingFace snapshot download
-    standalone_dit.py -- _DiTBlock / _StandaloneDiT3D (random-init fallback)
-    decoder.py        -- _FeatureProjector3D, _ProgressiveUpsampler3D,
-                         _DecoderAdapter3D (VAE decoder + unified head)
-    wrapper.py        -- CosmosTransfer3DWrapper (public API)
+    variants.py       -- _VariantConfig (extends _VariantConfigBase with
+                         hf_revision_controlnet) + _VARIANT_CONFIGS registry
+    wrapper.py        -- CosmosTransfer3DWrapper (public API, ControlNet add-on)
+
+All shared scaffolding (layers, hf_loader, standalone_dit, decoder,
+wrapper base class) lives in :mod:`brainbow.models.cosmos_2_5_common`
+and is reused by :mod:`brainbow.models.cosmos_predict_2_5`.
 
 References:
     - https://github.com/nvidia-cosmos/cosmos-transfer2.5

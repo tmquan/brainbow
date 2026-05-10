@@ -18,7 +18,7 @@ Cosmos-Transfer2.5 video-diffusion backbone (DiT + VAE).
 flowchart LR
     cli["python scripts/train.py<br/>--config-name combine"] --> hydra["Hydra compose<br/>(default + snemi3d + combine)"]
     hydra --> dm["LightningDataModule<br/>(LazyVolDataset + MONAI transforms)"]
-    hydra --> mod["LightningModule<br/>(CosmosTransfer3D / Vista3D)"]
+    hydra --> mod["LightningModule<br/>(CosmosTransfer3D / CosmosPredict3D / Vista3D)"]
     hydra --> tr["Trainer<br/>(DDP, callbacks, logger)"]
     dm --> tr
     mod --> tr
@@ -28,10 +28,13 @@ flowchart LR
     loss --> log["TensorBoard<br/>scalars + image panels"]
 ```
 
-Two end-to-end backbones live under `brainbow/models/`:
+Three end-to-end backbones live under `brainbow/models/`:
 
-- **`CosmosTransfer3DWrapper`** — Cosmos-Transfer 2.5 DiT + Wan VAE;
-  one unified 30-channel head.
+- **`CosmosTransfer3DWrapper`** — Cosmos-Transfer 2.5 (base DiT +
+  ControlNet residual branch + Wan VAE); one unified 30-channel head.
+- **`CosmosPredict3DWrapper`** — Cosmos-Predict 2.5 (base DiT + Wan
+  VAE, no ControlNet); same unified head, shares all scaffolding with
+  Transfer via `brainbow/models/cosmos_2_5_common/`.
 - **`Vista3DWrapper`** — SegResNetDS2; the same unified 30-channel head
   for fast local iteration.
 

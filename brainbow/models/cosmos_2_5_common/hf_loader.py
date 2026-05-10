@@ -1,4 +1,9 @@
-"""Rank-aware HuggingFace snapshot download for Cosmos-Transfer2.5."""
+"""Rank-aware HuggingFace snapshot download for Cosmos 2.5 backbones.
+
+Shared between :mod:`brainbow.models.cosmos_transfer_2_5` and
+:mod:`brainbow.models.cosmos_predict_2_5`.  The function is generic
+over ``repo_id`` / ``revision`` so both packages call it the same way.
+"""
 
 import logging
 from pathlib import Path
@@ -6,8 +11,8 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Files never read by CosmosTransfer3DWrapper.  The T5-XXL text encoder
-# is upstream Cosmos baggage: our wrapper feeds null prompt embeddings,
+# Files never read by the Cosmos 2.5 wrappers.  The T5-XXL text encoder
+# is upstream Cosmos baggage: our wrappers feed null prompt embeddings,
 # so skipping it saves ~15 GB per checkpoint snapshot.
 _DEFAULT_IGNORE_PATTERNS: List[str] = [
     "*.md",
@@ -17,6 +22,11 @@ _DEFAULT_IGNORE_PATTERNS: List[str] = [
     "text_encoder/*",
     "tokenizer/*",
 ]
+
+# Default cache subdirectory under ``~/.cache/brainbow/`` when the
+# caller does not pass ``cache_dir``.  Shared between Transfer and
+# Predict so HuggingFace's per-repo subdirs naturally separate them.
+_DEFAULT_CACHE_SUBDIR = "cosmos25"
 
 
 def _download_from_hf(
@@ -34,25 +44,25 @@ def _download_from_hf(
     Args:
         repo_id: ``"<org>/<name>"`` HF Hub identifier.
         revision: Git ref (branch/tag/commit) to pin the download at.
-        cache_dir: Where to cache the snapshot (default: Brainbow cache).
+        cache_dir: Where to cache the snapshot
+            (default: ``~/.cache/brainbow/cosmos25``).
         token: HF access token for gated repositories.
         ignore_patterns: Override the default ignore list.  By default
-            the text encoder and tokenizer are skipped because
-            :class:`CosmosTransfer3DWrapper` feeds a null prompt
-            embedding and never loads them.
+            the text encoder and tokenizer are skipped because the
+            wrappers feed a null prompt embedding and never load them.
     """
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
         raise ImportError(
-            "huggingface_hub is required for Cosmos-Transfer2.5 weight "
+            "huggingface_hub is required for Cosmos 2.5 weight "
             "download.  Install with: pip install huggingface_hub"
         )
 
     import torch.distributed as dist
 
     cache_dir = cache_dir or str(
-        Path.home() / ".cache" / "brainbow" / "cosmos_transfer25"
+        Path.home() / ".cache" / "brainbow" / _DEFAULT_CACHE_SUBDIR
     )
     ignore = list(ignore_patterns) if ignore_patterns is not None else list(_DEFAULT_IGNORE_PATTERNS)
 

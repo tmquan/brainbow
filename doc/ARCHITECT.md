@@ -1,9 +1,10 @@
 # Brainbow — Model Architecture & Parameter Budget
 
-Two end-to-end wrappers live under `brainbow/models/`:
+Three end-to-end wrappers live under `brainbow/models/`:
 
 1. [`CosmosTransfer3DWrapper`](#1-cosmostransfer3dwrapper) — EM → pretrained Wan VAE → Cosmos-Transfer 2.5 (base DiT **+ ControlNet residual branch**) → one VISTA-style **30-channel unified head**.
-2. [`Vista3DWrapper`](#2-vista3dwrapper) — EM → SegResNetDS2 → the same **30-channel unified head**.
+2. `CosmosPredict3DWrapper` — same data flow as Transfer **without** the ControlNet residual branch (Predict is the upstream base DiT in NVIDIA's Cosmos 2.5 stack).  Shares all scaffolding with Transfer via `brainbow/models/cosmos_2_5_common/`; the only difference is the variant registry (HF repo `nvidia/Cosmos-Predict2.5-2B`) and the absence of `controlnet_revision` / `freeze_controlnet`.  When evaluating the parameter budget, drop the ControlNet row from §1.2.
+3. [`Vista3DWrapper`](#2-vista3dwrapper) — EM → SegResNetDS2 → the same **30-channel unified head**.
 
 Every channel count below mirrors `configs/default.yaml`. Parameter counts are
 approximate; use `model.get_num_parameters(trainable_only=…)` on a loaded
