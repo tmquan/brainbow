@@ -194,6 +194,31 @@ def _bbox_slices(mask: np.ndarray) -> Optional[Tuple[slice, ...]]:
     return tuple(slice(lo, hi) for lo, hi in coords_per_axis)
 
 
+def _all_bbox_slices(
+    label_np: np.ndarray,
+    uids: np.ndarray,
+) -> Dict[int, Tuple[slice, ...]]:
+    """Compute tight bboxes for every label in one full-volume pass.
+
+    Replaces the per-uid ``mask = label == uid`` + ``_bbox_slices(mask)``
+    pattern, which is ``O(N_uids * crop_voxels)``.  ``scipy.ndimage.
+    find_objects`` does a single linear scan over ``label_np`` and
+    returns one slice tuple per consecutive integer id in
+    ``[1, label_max]``.  We then filter to the uids actually present.
+    """
+    from scipy.ndimage import find_objects
+
+    label_max = int(uids.max())
+    objects = find_objects(label_np, max_label=label_max)
+    out: Dict[int, Tuple[slice, ...]] = {}
+    for uid in uids:
+        uid_int = int(uid)
+        sl = objects[uid_int - 1]
+        if sl is not None:
+            out[uid_int] = sl
+    return out
+
+
 def compute_skeleton_field(
     label: np.ndarray,
     *,
@@ -237,43 +262,58 @@ def compute_skeleton_field(
             skel_per_uid = {}
             use_kimimaro = False
 
+    # One full-volume pass to get every instance's bbox, instead of
+    # ``len(uids)`` independent ``label == uid`` + projection passes.
+    bbox_per_uid = _all_bbox_slices(label_np, uids)
+
     for uid in uids:
         uid_int = int(uid)
-        verts = skel_per_uid.get(uid_int)
-        if verts is not None and len(verts) > 0:
-            # Rasterise the kimimaro vertex set, then clip to the
-            # instance mask so spurious vertices on the instance
-            # boundary never bleed into a neighbour.
-            tmp = np.zeros(shape, dtype=bool)
-            tmp[verts[:, 0], verts[:, 1], verts[:, 2]] = True
-            tmp &= (label_np == uid_int)
-            if tmp.any():
-                out[0][tmp] = 1.0
-                continue
-
-        # Fall back to skimage / single-voxel-instance handling.  We
-        # only build the per-instance mask when we actually need it,
-        # since materialising a [80, 256, 256] bool per uid was a
-        # noticeable chunk of the per-crop budget pre-optimisation.
-        m_i = (label_np == uid_int)
-        if not m_i.any():
-            continue
-        n_vox = int(m_i.sum())
-        if n_vox == 1:
-            out[0][m_i] = 1.0
-            continue
-
-        # Crop to the instance bbox so skimage's 3-D skeletonize sees a
-        # tight volume rather than the whole crop.
-        slices = _bbox_slices(m_i)
+        slices = bbox_per_uid.get(uid_int)
         if slices is None:
             continue
-        sub = m_i[slices]
-        skel_sub = _skeletonize_with_skimage(sub)
+
+        verts = skel_per_uid.get(uid_int)
+        if verts is not None and len(verts) > 0:
+            # Rasterise the kimimaro vertex set inside the bbox and
+            # clip to the per-instance mask so spurious vertices on
+            # the instance boundary never bleed into a neighbour.
+            origin = np.asarray(
+                [s.start for s in slices], dtype=np.int64,
+            )
+            sub_shape = tuple(s.stop - s.start for s in slices)
+            local = verts - origin
+            in_bounds = np.all(
+                (local >= 0) & (local < np.asarray(sub_shape)),
+                axis=1,
+            )
+            local = local[in_bounds]
+            if local.size:
+                sub_m = (label_np[slices] == uid_int)
+                tmp = np.zeros(sub_shape, dtype=bool)
+                if sub_shape and len(local):
+                    tmp[tuple(local.T)] = True
+                tmp &= sub_m
+                if tmp.any():
+                    out_sub = out[(0,) + slices]
+                    out_sub[tmp] = 1.0
+                    continue
+
+        # Fall back to skimage / single-voxel-instance handling on the
+        # bbox-cropped mask -- avoids materialising a full-crop bool.
+        sub_m = (label_np[slices] == uid_int)
+        if not sub_m.any():
+            continue
+        n_vox = int(sub_m.sum())
+        if n_vox == 1:
+            out_sub = out[(0,) + slices]
+            out_sub[sub_m] = 1.0
+            continue
+
+        skel_sub = _skeletonize_with_skimage(sub_m)
         if skel_sub.sum() == 0:
             # Degenerate instance with no skeleton -- fall back to the
             # foreground itself so the loss has a non-empty target.
-            skel_sub = sub.astype(np.float32)
+            skel_sub = sub_m.astype(np.float32)
         out_sub = out[(0,) + slices]
         np.maximum(out_sub, skel_sub, out=out_sub)
 
@@ -324,19 +364,21 @@ def compute_radius_field(
     if len(uids) == 0:
         return out
 
+    # Single full-volume pass for all bboxes (instead of N per-uid
+    # ``label == uid`` + projection passes).
+    bbox_per_uid = _all_bbox_slices(label_np, uids)
+
     for uid in uids:
         uid_int = int(uid)
-        m_i = (label_np == uid_int)
-        if not m_i.any():
-            continue
-
-        # Crop to the instance bounding box so the EDT sees a tight
-        # sub-volume instead of the whole crop.  Skeleton voxels live
-        # inside the instance so the bbox always contains the seeds.
-        slices = _bbox_slices(m_i)
+        slices = bbox_per_uid.get(uid_int)
         if slices is None:
             continue
-        sub_m = m_i[slices]
+
+        # Crop into the instance bounding box and build the per-instance
+        # mask there directly -- avoids materialising a full-crop bool.
+        sub_m = (label_np[slices] == uid_int)
+        if not sub_m.any():
+            continue
         sub_skl = skl_bool[slices] & sub_m
         if not sub_skl.any():
             continue
@@ -445,21 +487,24 @@ def compute_skeleton_geometry(
     tri_j = np.asarray([p[1] for p in tri_pairs], dtype=np.int64)
     diag_channels = np.flatnonzero(tri_i == tri_j)
 
+    # One full-volume pass for every instance's bbox (rather than N
+    # ``label == uid`` + axis-projection passes).
+    bbox_per_uid = _all_bbox_slices(label_np, uids)
+
     for uid in uids:
         uid_int = int(uid)
-        m_i = (label_np == uid_int)
-        if not m_i.any():
-            continue
-
-        # ---- Per-instance bounding box ----
-        slices = _bbox_slices(m_i)
+        slices = bbox_per_uid.get(uid_int)
         if slices is None:
             continue
         origin = np.asarray(
             [s.start for s in slices], dtype=np.int64,
         )                                                   # [S]
         sub_shape = tuple(s.stop - s.start for s in slices)
-        sub_m = m_i[slices]                                # bool [*sub]
+        # Build the per-instance mask directly inside the bbox -- much
+        # cheaper than a full-crop ``label == uid`` + slice.
+        sub_m = (label_np[slices] == uid_int)
+        if not sub_m.any():
+            continue
 
         # ---- Build the per-instance skeleton mask in sub-volume ----
         sub_skel = np.zeros(sub_shape, dtype=bool)
@@ -516,10 +561,11 @@ def compute_skeleton_geometry(
         # Coordinates of each fg voxel's nearest skeleton voxel
         # (still in sub-volume coordinates -- offsets are
         # translation-invariant so this is fine for dir/rad/cov).
-        s_coords = np.stack(
-            [sub_idx[k].ravel()[flat_fg] for k in range(S)],
-            axis=0,
-        ).astype(np.float32)                               # [S, n_fg]
+        # Reshape ``sub_idx`` from ``[S, *sub_shape]`` to ``[S, prod]``
+        # and gather all axes in one indexed read instead of S copies.
+        s_coords = np.asarray(
+            sub_idx, dtype=np.int64,
+        ).reshape(S, -1)[:, flat_fg].astype(np.float32)    # [S, n_fg]
 
         offsets = s_coords - v_coords                      # [S, n_fg]
         mags = np.sqrt(np.sum(offsets ** 2, axis=0))       # [n_fg]
@@ -527,7 +573,7 @@ def compute_skeleton_geometry(
 
         # ----- dir: per-voxel unit centripetal vector -----
         unit = offsets / mags_safe                         # [S, n_fg]
-        unit = np.where(mags > 1e-8, unit, 0.0)
+        unit = np.where(mags > 1e-8, unit, 0.0).astype(np.float32, copy=False)
         dir_sub = dir_field[(slice(None),) + slices]
         for k in range(S):
             dir_sub[k][sub_m] = unit[k]
