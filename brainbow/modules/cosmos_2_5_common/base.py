@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from brainbow.losses import HEAD_CHANNELS
 from brainbow.modules.base import BaseCircuitModule
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ class BaseCosmosModule(BaseCircuitModule):
     def _build_model(self, model_config: Dict[str, Any]) -> torch.nn.Module:
         return self._model_cls(
             in_channels=model_config.get("in_channels", 1),
-            head_channels=model_config.get("head_channels", 30),
+            head_channels=model_config.get("head_channels", HEAD_CHANNELS),
             feature_size=model_config.get("feature_size", 64),
             variant=model_config.get("variant", "2B"),
             dtype=model_config.get("dtype", "bf16"),

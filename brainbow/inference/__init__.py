@@ -17,7 +17,7 @@ Public surface
 Extending this module: a new clusterer should subclass
 :class:`brainbow.inference.clusterer._BaseUnsupervisedClusterer` and
 register itself in :func:`build_clusterer`'s ``_CLUSTERER_REGISTRY``.
-Sliding-window aggregation operates on the unified 30-channel head
+Sliding-window aggregation operates on the unified 32-channel head
 tensor; see :mod:`sliding_window` for the gaussian-blended patch
 fusion logic.
 """

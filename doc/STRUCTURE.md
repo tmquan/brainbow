@@ -57,7 +57,8 @@ applicable or directly: `python scripts/<name>.py`.
 
 | File                               | Covers                                                     |
 | ---------------------------------- | ---------------------------------------------------------- |
-| `tests/test_losses.py`             | Unified 30-channel `CombinedLoss` (field slicing, 12-aff targets/kernels, scalar keys, backward). |
+| `tests/test_losses.py`             | Unified 32-channel `CombinedLoss` (field slicing, sigmoid policy, 12-aff targets/kernels, scalar keys, backward). |
+| `tests/test_skeleton_transform.py` | `SkeletonGeometryd` transform end-to-end: skl/dir/cov/rad shapes, kimimaro+skimage backends, `rad × dir == s* − v` reconstruction identity, Voronoi-cell covariance eigenstructure. |
 | `tests/test_datasets.py`           | `CircuitDataset` abstract contract (resolution, anisotropy, length virtualisation). |
 | `tests/test_datamodules.py`        | `CircuitDataModule` augmentation pipeline (via a synthetic in-memory dataset). |
 | `tests/test_preprocessors.py`      | HDF5 / NRRD / TIFF / NfTy converters.                      |
@@ -113,12 +114,12 @@ and the loss targets.  No learnable state.
 | `microns.py`    | MICrONS datamodule leaf.                                            |
 | `neurons.py`    | Internal neurons datamodule leaf.                                   |
 
-### `brainbow/losses/` — unified 30-channel loss
+### `brainbow/losses/` — unified 32-channel loss
 
 | File            | Purpose                                                                        |
 | --------------- | ------------------------------------------------------------------------------ |
-| `_common.py`    | Single source of truth for the unified head layout (`raw|sem|dir|cov|avg|emb`), 12-direction affinity geometry, slicing helpers, regression/BCE utilities. |
-| `combined.py`   | `CombinedLoss` — one monolithic loss over the 30-channel head: raw, sem, dir, cov, avg, emb, derived `aff_avg`, derived `aff_emb`. |
+| `_common.py`    | Single source of truth for the unified head layout (`raw|sem|skl|dir|cov|rad|avg|emb`), the contiguous `SIGMOID_SLICE` over (sem, skl), `apply_head_activations` helper, 12-direction affinity geometry, slicing helpers, regression/BCE utilities. |
+| `combined.py`   | `CombinedLoss` — one monolithic loss over the 32-channel head: raw, sem, skl, dir, cov, rad, avg, emb, derived `aff_avg`, derived `aff_emb`. |
 
 ### `brainbow/metrics/` — per-head eval metrics
 
@@ -281,5 +282,5 @@ concrete `module.py`.
   "how to add a new …" checklists.
 - `configs/*.yaml` — every knob is documented inline.
 - `brainbow/losses/combined.py` — `CombinedLoss` consumes the model's
-  single 30-channel head tensor plus a target dict and returns
+  single 32-channel head tensor plus a target dict and returns
   per-field scalar losses.

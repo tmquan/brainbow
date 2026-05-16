@@ -222,7 +222,7 @@ class BaseCircuitModule(pl.LightningModule):
         )
         if "image" in batch and needs_raw:
             targets["raw_image"] = batch["image"]
-        for key in ("label_direction", "label_covariance"):
+        for key in ("label_skl", "label_direction", "label_covariance", "label_radius"):
             if key in batch:
                 targets[key] = batch[key]
         targets["_cached_targets"] = self.criterion.build_targets(

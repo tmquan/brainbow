@@ -1,4 +1,4 @@
-"""Vista3D wrapper with one unified 30-channel dense-prediction head."""
+"""Vista3D wrapper with one unified 32-channel dense-prediction head."""
 
 import logging
 from typing import Any, Dict, Optional
@@ -12,7 +12,7 @@ from brainbow.models.vista.hf_loader import (
     DEFAULT_VISTA3D_REVISION,
     load_pretrained_vista3d_encoder,
 )
-from brainbow.losses import HEAD_CHANNELS, SEM_SLICE
+from brainbow.losses import HEAD_CHANNELS, apply_head_activations
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ class Vista3DWrapper(nn.Module):
 
     Args:
         in_channels: Number of input channels (default: 1 for EM).
-        head_channels: Unified dense head width (default 30).
+        head_channels: Unified dense head width (default 32).
         feature_size: Base feature dimension from backbone (default: 64).
             Set to 48 to load the pretrained MONAI VISTA3D encoder
             cleanly (upstream uses ``init_filters=48``).
@@ -45,7 +45,7 @@ class Vista3DWrapper(nn.Module):
         >>> model = Vista3DWrapper(in_channels=1)
         >>> x = torch.randn(1, 1, 64, 64, 64)
         >>> out = model(x)
-        >>> out.shape   # [1, 30, 64, 64, 64]
+        >>> out.shape   # [1, 32, 64, 64, 64]
     """
 
     def __init__(
@@ -84,7 +84,7 @@ class Vista3DWrapper(nn.Module):
         # ``ClassMappingClassify.image_post_mapping`` (2× residual
         # UnetrBasicBlock with instance norm) and replaces the class
         # embedding mask-attention with a per-voxel 1×1 projection so
-        # we can emit the 30-channel dense field consumed by
+        # we can emit the 32-channel dense field consumed by
         # ``CombinedLoss``.  Refinement runs at ``feature_size`` — the
         # same width the SegResNetDS2 encoder emits — matching the
         # reference VISTA3D network exactly.
@@ -177,16 +177,14 @@ class Vista3DWrapper(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return the unified ``[B, 30, D, H, W]`` head tensor.
+        """Return the unified ``[B, 32, D, H, W]`` head tensor.
 
-        Activation policy: sigmoid only on the semantic channel
-        (``SEM_SLICE``); raw / dir / cov / avg / emb stay linear.
+        Activation policy: sigmoid on the semantic and skeleton channels
+        (the contiguous run :data:`brainbow.losses.SIGMOID_SLICE`);
+        raw / dir / cov / rad / avg / emb stay linear.
         """
         feat = self.backbone(x)
         if isinstance(feat, (tuple, list)):
             feat = feat[0]
         out = self.head(feat)
-        return torch.cat(
-            [out[:, :SEM_SLICE.start], out[:, SEM_SLICE].sigmoid(), out[:, SEM_SLICE.stop:]],
-            dim=1,
-        )
+        return apply_head_activations(out)

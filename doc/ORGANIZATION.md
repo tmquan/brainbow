@@ -47,7 +47,7 @@ brainbow/
     ├── datamodules/      # Lightning DataModules (base + per-dataset).
     ├── datasets/         # MONAI CacheDatasets (base + per-dataset + lazy).
     ├── inference/        # sliding-window inference + instance clustering.
-    ├── losses/           # Unified 30-channel CombinedLoss + shared helpers.
+    ├── losses/           # Unified 32-channel CombinedLoss + shared helpers.
     ├── metrics/          # per-head evaluation metrics.
     ├── models/           # model wrappers (BaseModel + per-arch packages).
     ├── modules/          # Lightning modules (BaseCircuitModule + per-arch).
@@ -147,7 +147,7 @@ image_logger.py  # ImageLogger callback (the public class)
 
 ---
 
-## 5. Unified 30-channel loss
+## 5. Unified 32-channel loss
 
 The current loss package has one public loss, `CombinedLoss`, and one
 shared helper module, `_common.py`.
@@ -158,10 +158,23 @@ shared helper module, `_common.py`.
 | ----- | ----- | -------- |
 | `raw` | `[0, 1)` | 1 |
 | `sem` | `[1, 2)` | 1 |
-| `dir` | `[2, 5)` | 3 |
-| `cov` | `[5, 11)` | 6 |
-| `avg` | `[11, 14)` | 3 |
-| `emb` | `[14, 30)` | 16 |
+| `skl` | `[2, 3)` | 1 |
+| `dir` | `[3, 6)` | 3 |
+| `cov` | `[6, 12)` | 6 |
+| `rad` | `[12, 13)` | 1 |
+| `avg` | `[13, 16)` | 3 |
+| `emb` | `[16, 32)` | 16 |
+
+Activation policy: sigmoid on the contiguous `SIGMOID_SLICE = [1, 3)`
+(sem + skl); linear elsewhere.  Wrappers route their head output
+through `apply_head_activations` (one helper, two sigmoid channels).
+
+`dir`, `cov`, and `rad` are **skeleton-relative**: their targets are
+precomputed by `SkeletonGeometryd` in
+[brainbow/transforms/skeleton.py](../brainbow/transforms/skeleton.py)
+from a single per-instance Euclidean distance transform whose seeds
+are the instance's skeleton voxels (kimimaro or skimage fallback).
+See ARCHITECT.md §1.6 for the algorithm.
 
 It also owns the 12-direction second-order affinity convention
 (`T1/B1/U1/D1/L1/R1/T2/B2/U2/D2/L2/R2`) and helpers such as

@@ -105,8 +105,8 @@ checks the prediction dict for the key first.
 ## 4. (Removed in Phase 1 cleanup -- `sliding_window_inference` head auto-detect)
 
 `sliding_window_inference` no longer detects head sets from a dummy
-pass.  The unified 30-channel head means the model wrapper returns a
-single tensor `[B, 30, ...]`; the sliding-window code aggregates it as
+pass.  The unified 32-channel head means the model wrapper returns a
+single tensor `[B, 32, ...]`; the sliding-window code aggregates it as
 one tensor and slices into named fields downstream via
 `brainbow.losses.slice_head`.  See
 [brainbow/inference/sliding_window.py](../brainbow/inference/sliding_window.py).
@@ -356,11 +356,11 @@ in `try/except NotImplementedError`.
 ## 19. (Removed in Phase 1 cleanup -- separate `GeometryLoss` head)
 
 The standalone four-head structure (`semantic`, `instance`, `geometry`,
-`boundary`) was replaced by a unified 30-channel head whose layout is
+`boundary`) was replaced by a unified 32-channel head whose layout is
 owned by `brainbow.losses._common.HEAD_LAYOUT`:
 
 ```
-raw[0,1) | sem[1,2) | dir[2,5) | cov[5,11) | avg[11,14) | emb[14,30)
+raw[0,1) | sem[1,2) | skl[2,3) | dir[3,6) | cov[6,12) | rad[12,13) | avg[13,16) | emb[16,32)
 ```
 
 The previous geometry-head layout swap (`raw|cov|dir` → `raw|dir|cov`)
@@ -455,9 +455,9 @@ tables and aggregate offline.
 
 ## 23. (Removed in Phase 1 cleanup -- multi-head `get_output_channels`)
 
-The four-head dict has been replaced by a unified 30-channel head, so
+The four-head dict has been replaced by a unified 32-channel head, so
 `BaseModel.get_output_channels()` returns the single integer
-`HEAD_CHANNELS = 30` (or whatever the wrapper was configured with).
+`HEAD_CHANNELS = 32` (or whatever the wrapper was configured with).
 Per-field widths are read from `brainbow.losses.HEAD_LAYOUT`, e.g.
 `HEAD_LAYOUT["dir"].stop - HEAD_LAYOUT["dir"].start`.
 
@@ -938,3 +938,41 @@ If you ever extend the cov overlay to 3×3 (full ZYX submatrix) you
 will need a closed-form 3×3 routine, **not** ``eigh``; do it on CPU
 or via Cardano's formula rather than reintroducing the cuSOLVER
 batched path.
+
+---
+
+## kimimaro skeletonization runs inside DataLoader workers (CPU only)
+
+**Symptom (debugging mode).** With `data.num_workers: 0`, every
+training step blocks for ~100 ms on the main process while
+`SkeletonGeometryd` runs `kimimaro.skeletonize` and the per-instance
+Euclidean distance transform.  Throughput is much lower than expected.
+
+**Where.**
+[`brainbow/transforms/skeleton.py`](../brainbow/transforms/skeleton.py)
+inside :class:`SkeletonGeometryd` and :func:`compute_skeleton_geometry`.
+
+**Why.**  kimimaro is CPU-only and we call it with `parallel=0` so it
+stays single-threaded under MONAI's `forkserver` DataLoader workers
+(any `parallel>0` would fork-bomb when MONAI itself forks workers).
+With `num_workers > 0` this cost is hidden by the dataloader prefetch
+queue; with `num_workers: 0` it lands directly on the training loop's
+critical path.
+
+**Remediation.**
+- For real training, leave `data.num_workers >= 4` so kimimaro overlaps
+  with the GPU forward.  At ~50 instances on a 64³ crop the geometry
+  pass is ~100-200 ms, well under the typical prefetch budget.
+- For step-through debugging (a profiler, `breakpoint()`, etc.), set
+  `loss.weight_skl: 0`, `loss.weight_dir: 0`, `loss.weight_cov: 0`,
+  `loss.weight_rad: 0` -- this disables `compute_geometry` end-to-end
+  and skips `SkeletonGeometryd` entirely.  Or set `data.num_workers >= 4`
+  even in single-step debugging and place breakpoints inside
+  `training_step` only.
+
+**Falls back gracefully.** When kimimaro fails to import (no wheel
+for the platform, or fresh editable install without the dep), the
+transform silently downgrades to
+`skimage.morphology.skeletonize` per instance.  Topology is preserved
+but the centerline can be 1-2 voxels off where the two algorithms
+disagree (most prominent at branch points).

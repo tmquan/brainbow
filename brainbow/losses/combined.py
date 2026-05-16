@@ -1,9 +1,10 @@
 """
-Unified head loss for the 30-channel Vista-style task head.
+Unified head loss for the 32-channel Vista-style task head.
 
-Composes six per-field sub-losses plus two derived face-affinity terms
-into a single dict-returning module.  See :mod:`brainbow.losses._common`
-for the canonical channel layout and direction tables.
+Composes eight per-field sub-losses plus two derived face-affinity
+terms into a single dict-returning module.  See
+:mod:`brainbow.losses._common` for the canonical channel layout and
+direction tables.
 
 Field summary
 -------------
@@ -14,11 +15,13 @@ Field summary
     -----   ---------   ----------   ------------------   ----------------
     raw     [ 0,  1)    linear       L1 / MSE / Smooth-L1 vs the (clipped) input image
     sem     [ 1,  2)    sigmoid      BCE + Dice           vs (label > 0)
-    dir     [ 2,  5)    linear       L1 / MSE / Smooth-L1 vs centroid-direction field, fg-only
-    cov     [ 5, 11)    linear       L1 / MSE / Smooth-L1 vs upper-triangle covariance, fg-only
-    avg     [11, 14)    linear       L1 / MSE / Smooth-L1 vs normalised centroid (z, y, x), fg-only
+    skl     [ 2,  3)    sigmoid      BCE + Dice           vs binary skeleton mask
+    dir     [ 3,  6)    linear       L1 / MSE / Smooth-L1 vs skeleton-direction field, fg-only
+    cov     [ 6, 12)    linear       L1 / MSE / Smooth-L1 vs upper-triangle Voronoi-cell covariance, fg-only
+    rad     [12, 13)    linear       L1 / MSE / Smooth-L1 vs distance-to-skeleton scalar, fg-only
+    avg     [13, 16)    linear       L1 / MSE / Smooth-L1 vs normalised centroid (z, y, x), fg-only
                                      + 12-ch ``aff_avg`` (BCE + Dice on derived face-affinity)
-    emb     [14, 30)    linear       discriminative pull / push / norm (centroid-based)
+    emb     [16, 32)    linear       discriminative pull / push / norm (centroid-based)
                                      + 12-ch ``aff_emb`` (BCE + Dice on derived face-affinity)
 
 The two ``aff_*`` paths share the same 12-channel binary aff target
@@ -53,8 +56,9 @@ Output dict
                                            # value is comparable across
                                            # runs with different weights)
 
-with ``{field}`` ∈ ``{raw, sem, dir, cov, avg, emb, aff_avg, aff_emb}``
-and ``{sub}`` ∈ ``{ce, dice, pull, push, norm}`` where applicable.
+with ``{field}`` ∈ ``{raw, sem, skl, dir, cov, rad, avg, emb, aff_avg,
+aff_emb}`` and ``{sub}`` ∈ ``{ce, dice, pull, push, norm}`` where
+applicable.
 
 The Lightning module prefixes everything with ``{stage}/{mode}/`` so a
 TB tag like ``train/automatic/loss/aff_emb/dice`` sits next to its
@@ -79,8 +83,10 @@ from brainbow.losses._common import (
     EMB_SLICE,
     HEAD_CHANNELS,
     HEAD_LAYOUT,
+    RAD_SLICE,
     RAW_SLICE,
     SEM_SLICE,
+    SKL_SLICE,
     affinity_target,
     canonical_regression_name,
     regression_loss_fn,
@@ -154,10 +160,10 @@ def build_avg_target(labels: torch.Tensor) -> torch.Tensor:
 
 
 class CombinedLoss(nn.Module):
-    """Unified loss for the 30-channel head.
+    """Unified loss for the 32-channel head.
 
     Args:
-        weight_raw / _sem / _dir / _cov / _avg / _emb /
+        weight_raw / _sem / _skl / _dir / _cov / _rad / _avg / _emb /
             _aff_emb / _aff_avg:
             Field-level config -- scalar or
             ``{weight: ..., **sub_kwargs}``.  ``weight: 0`` disables
@@ -179,8 +185,10 @@ class CombinedLoss(nn.Module):
         self,
         weight_raw: HeadConfig = 1.0,
         weight_sem: HeadConfig = 1.0,
+        weight_skl: HeadConfig = 0.0,
         weight_dir: HeadConfig = 1.0,
         weight_cov: HeadConfig = 1.0,
+        weight_rad: HeadConfig = 0.0,
         weight_avg: HeadConfig = 1.0,
         weight_emb: HeadConfig = 1.0,
         weight_aff_emb: HeadConfig = 1.0,
@@ -217,7 +225,32 @@ class CombinedLoss(nn.Module):
             batch=True,
         )
 
-        # ----- dir / cov / avg (foreground-only L1 regression) -----
+        # ----- skl (sigmoid BCE + Dice on binary skeleton mask) -----
+        # Shares the activation policy and BCE/Dice schema with sem; the
+        # only knob that typically differs is ``weight_ce``, which the
+        # snemi3d config tunes down to ~0.1 because the 1-voxel-wide
+        # skeleton target is heavily negative-dominated.
+        self.weight_skl, skl_kw = _split_field(weight_skl)
+        self.skl_weight_ce = float(skl_kw.pop("weight_ce", 1.0))
+        self.skl_weight_dice = float(skl_kw.pop("weight_dice", 1.0))
+        self.skl_class_weights = skl_kw.pop("class_weights", None)
+        if self.skl_class_weights is not None:
+            pw = torch.tensor(
+                list(map(float, self.skl_class_weights)),
+                dtype=torch.float32,
+            ).view(1, -1, 1, 1, 1)
+            self.register_buffer("_skl_pos_weight", pw, persistent=False)
+        else:
+            self._skl_pos_weight = None
+        # Re-use the same DiceLoss config as sem; both heads consume a
+        # single-channel binary target post-sigmoid.
+        self._skl_dice = DiceLoss(
+            sigmoid=False, softmax=False,
+            include_background=True, reduction="mean",
+            batch=True,
+        )
+
+        # ----- dir / cov / rad / avg (foreground-only L1 regression) -----
         self.weight_dir, dir_kw = _split_field(weight_dir)
         self.loss_dir = canonical_regression_name(dir_kw.pop("loss", "l1"))
         self._dir_fn = regression_loss_fn(self.loss_dir)
@@ -225,6 +258,10 @@ class CombinedLoss(nn.Module):
         self.weight_cov, cov_kw = _split_field(weight_cov)
         self.loss_cov = canonical_regression_name(cov_kw.pop("loss", "l1"))
         self._cov_fn = regression_loss_fn(self.loss_cov)
+
+        self.weight_rad, rad_kw = _split_field(weight_rad)
+        self.loss_rad = canonical_regression_name(rad_kw.pop("loss", "l1"))
+        self._rad_fn = regression_loss_fn(self.loss_rad)
 
         self.weight_avg, avg_kw = _split_field(weight_avg)
         self.loss_avg = canonical_regression_name(avg_kw.pop("loss", "l1"))
@@ -282,8 +319,10 @@ class CombinedLoss(nn.Module):
         for path, kw in (
             ("weight_raw", raw_kw),
             ("weight_sem", sem_kw),
+            ("weight_skl", skl_kw),
             ("weight_dir", dir_kw),
             ("weight_cov", cov_kw),
+            ("weight_rad", rad_kw),
             ("weight_avg", avg_kw),
             ("weight_emb", emb_kw),
             ("weight_aff_emb", aff_emb_kw),
@@ -327,11 +366,15 @@ class CombinedLoss(nn.Module):
         * ``aff``  -- ``[B, 12, D, H, W]`` binary 2nd-order face-affinity
           target derived from labels (shared by ``aff_emb`` and
           ``aff_avg``).
+        * ``skl``  -- pulled from ``batch["label_skl"]`` if
+          ``compute_geometry`` was set in the datamodule.  When the
+          field is absent, the sub-loss short-circuits to zero.
         * ``dir``  -- pulled from ``batch["label_direction"]`` if
           ``compute_geometry`` was set in the datamodule.  When the
           field is absent, a zero target is built lazily inside
           :meth:`_loss_dir` (the loss short-circuits if no fg voxels).
         * ``cov``  -- ditto for ``batch["label_covariance"]``.
+        * ``rad``  -- ditto for ``batch["label_radius"]``.
 
         Returns a dict; keys absent here are interpreted by
         :meth:`forward` as "no cached target, build lazily".
@@ -345,10 +388,14 @@ class CombinedLoss(nn.Module):
             out["aff"] = affinity_target(labels.long(), background=self.background)
 
         if batch is not None:
+            if self.weight_skl > 0 and "label_skl" in batch:
+                out["skl"] = batch["label_skl"]
             if self.weight_dir > 0 and "label_direction" in batch:
                 out["dir"] = batch["label_direction"]
             if self.weight_cov > 0 and "label_covariance" in batch:
                 out["cov"] = batch["label_covariance"]
+            if self.weight_rad > 0 and "label_radius" in batch:
+                out["rad"] = batch["label_radius"]
 
         return out
 
@@ -396,6 +443,36 @@ class CombinedLoss(nn.Module):
             dice = self._sem_dice(probs, target * valid_mask)
 
         total = self.sem_weight_ce * ce + self.sem_weight_dice * dice
+        return {"loss": total, "ce": ce, "dice": dice}
+
+    def _loss_skl(
+        self, probs: torch.Tensor, target: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """BCE + Dice on the binary skeleton head (post-sigmoid).
+
+        Mirrors :meth:`_loss_sem`: ``probs`` are ``[B, 1, *spatial]``
+        sigmoided predictions, ``target`` is a ``[B, 1, *spatial]`` or
+        ``[B, *spatial]`` binary mask of skeleton voxels (typically
+        produced by :class:`SkeletonGeometryd` in the dataloader).
+
+        Returns a dict ``{loss, ce, dice}`` with un-weighted sub-values.
+        """
+        if target.dim() == probs.dim() - 1:
+            target = rearrange(target, "b ... -> b 1 ...")
+        target = (target > 0).to(probs.dtype)
+
+        ce = self._zero(probs.device)
+        if self.skl_weight_ce > 0:
+            per_voxel = stable_bce_on_probs(
+                probs, target, pos_weight=self._skl_pos_weight,
+            )
+            ce = per_voxel.mean()
+
+        dice = self._zero(probs.device)
+        if self.skl_weight_dice > 0:
+            dice = self._skl_dice(probs, target)
+
+        total = self.skl_weight_ce * ce + self.skl_weight_dice * dice
         return {"loss": total, "ce": ce, "dice": dice}
 
     def _loss_fg_regression(
@@ -622,12 +699,17 @@ class CombinedLoss(nn.Module):
         ):
             cached = self.build_targets(labels, batch=targets)
 
-        # Promote `targets` keys for direction / covariance into the
+        # Promote `targets` keys for skeleton-derived fields into the
         # cache; a fresh `cached` dict from `build_targets` already has
         # them but a user-supplied one might not.
-        for k in ("dir", "cov"):
+        for k in ("skl", "dir", "cov", "rad"):
             if k not in cached and self._field_active(k):
-                src = {"dir": "label_direction", "cov": "label_covariance"}[k]
+                src = {
+                    "skl": "label_skl",
+                    "dir": "label_direction",
+                    "cov": "label_covariance",
+                    "rad": "label_radius",
+                }[k]
                 if src in targets:
                     cached[k] = targets[src]
 
@@ -659,6 +741,25 @@ class CombinedLoss(nn.Module):
                 out["loss/sem/dice"] = sem["dice"]
             total = total + self.weight_sem * sem["loss"]
 
+        # skl
+        if self.weight_skl > 0:
+            skl_pred = head[:, SKL_SLICE]
+            skl_target = cached.get("skl")
+            if skl_target is None:
+                # No precomputed skeleton target; short-circuit to zero
+                # so the field is well-defined.  The datamodule should
+                # surface ``label_skl`` whenever ``weight_skl > 0``.
+                l_skl = zero
+            else:
+                skl = self._loss_skl(skl_pred, skl_target)
+                l_skl = skl["loss"]
+                if self.skl_weight_ce > 0:
+                    out["loss/skl/ce"] = skl["ce"]
+                if self.skl_weight_dice > 0:
+                    out["loss/skl/dice"] = skl["dice"]
+            out["loss/skl"] = l_skl
+            total = total + self.weight_skl * l_skl
+
         # dir
         if self.weight_dir > 0:
             dir_pred = head[:, DIR_SLICE]
@@ -688,6 +789,21 @@ class CombinedLoss(nn.Module):
                 )
             out["loss/cov"] = l_cov
             total = total + self.weight_cov * l_cov
+
+        # rad
+        if self.weight_rad > 0:
+            rad_pred = head[:, RAD_SLICE]
+            rad_target = cached.get("rad")
+            if rad_target is None:
+                l_rad = zero
+            else:
+                if rad_target.dim() == rad_pred.dim() - 1:
+                    rad_target = rearrange(rad_target, "b ... -> b 1 ...")
+                l_rad = self._loss_fg_regression(
+                    rad_pred, rad_target, fg, self._rad_fn,
+                )
+            out["loss/rad"] = l_rad
+            total = total + self.weight_rad * l_rad
 
         # avg
         if self.weight_avg > 0:

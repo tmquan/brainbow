@@ -2,7 +2,7 @@
 Cosmos-Predict 2.5 **3D** model wrapper for volumetric connectomics segmentation.
 
 Adapts the Cosmos-Predict 2.5 DiT backbone (2B or 14B) as a feature
-extractor for the unified 30-channel volumetric segmentation head:
+extractor for the unified 32-channel volumetric segmentation head:
 
 ``raw(1) | sem(1) | dir(3) | cov(6) | avg(3) | emb(16)``
 

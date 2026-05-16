@@ -35,7 +35,7 @@ flowchart LR
     DM -.batch.-> LOOP
     LOOP -.training_step.-> MOD
     MOD --> WRAP["model wrapper\n(forward)"]:::wrap
-    WRAP --> HEAD["unified 30-channel head\nraw|sem|dir|cov|avg|emb"]:::heads
+    WRAP --> HEAD["unified 32-channel head\nraw|sem|skl|dir|cov|rad|avg|emb"]:::heads
     HEAD --> LOSS["CombinedLoss"]:::loss
     LOSS --> METRICS["per-field\nscalars / metrics"]:::metric
     METRICS --> TB[("TensorBoard /\nW&B logs")]:::tb
@@ -114,13 +114,15 @@ flowchart LR
 
 Key decisions made here:
 
-* `compute_geometry` (lines `166-169`) is set to `True` if either
-  `loss.weight_dir` or `loss.weight_cov` is `> 0`.  This decides
-  whether the datamodule precomputes direction + covariance fields
-  via the `Directiond` / `Covarianced` MONAI transforms.  The rest of
-  the loss config is opaque to the data path.  See
-  [brainbow/datamodules/base.py](../brainbow/datamodules/base.py) for
-  the MONAI pipeline assembly.
+* `compute_geometry` (lines `166-169`) is set to `True` if any of
+  `loss.weight_skl`, `loss.weight_dir`, `loss.weight_cov`, or
+  `loss.weight_rad` is `> 0`.  This decides whether the datamodule
+  precomputes the skeleton-relative geometry quartet via the
+  `SkeletonGeometryd` MONAI transform (single per-instance EDT pass
+  emitting `label_skl`, `label_direction`, `label_covariance`, and
+  `label_radius`).  The rest of the loss config is opaque to the data
+  path.  See [brainbow/datamodules/base.py](../brainbow/datamodules/base.py)
+  for the MONAI pipeline assembly.
 * `inspect.signature(cls).parameters` (line `217`) filters kwargs so
   older datamodule signatures don't `TypeError` on a new YAML knob.
 

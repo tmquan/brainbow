@@ -31,7 +31,7 @@ class ImageLogger(pl.Callback):
 
         on_{train,validation}_epoch_end
             -> eval mode + autocast + no_grad
-            -> forward(images) -> [B, 30, ...] unified head
+            -> forward(images) -> [B, HEAD_CHANNELS, ...] unified head
             -> _log_predictions(tb, ctx, ...)   # heads.py orchestrator
 
     All tags live under ``{stage}/{mode}/...`` where
@@ -45,11 +45,17 @@ class ImageLogger(pl.Callback):
         {stage}/automatic/true/avg/val                          (3-D only)
         {stage}/automatic/true/image
         {stage}/automatic/true/label
+        {stage}/automatic/true/skl                              (when label_skl in batch)
+        {stage}/automatic/true/dir                              (when label_direction in batch)
+        {stage}/automatic/true/cov                              (when label_covariance in batch)
+        {stage}/automatic/true/rad                              (when label_radius in batch)
         {stage}/automatic/true/wan_decoder                      (Cosmos + VAE only)
         {stage}/automatic/pred/raw
         {stage}/automatic/pred/sem
+        {stage}/automatic/pred/skl
         {stage}/automatic/pred/dir
         {stage}/automatic/pred/cov
+        {stage}/automatic/pred/rad
         {stage}/automatic/pred/avg/val
         {stage}/automatic/pred/avg/aff/{01_t1,02_b1,03_u1,04_d1,
                                        05_l1,06_r1,07_t2,08_b2,
@@ -289,6 +295,28 @@ class ImageLogger(pl.Callback):
             _to_2d(wan_decoder_pred) if wan_decoder_pred is not None else None
         )
 
+        # Forward the precomputed skeleton-geometry targets (if any) so
+        # the orchestrator can emit ``true/skl`` / ``true/dir`` /
+        # ``true/cov`` / ``true/rad`` panels next to their ``pred/``
+        # counterparts.  Falls back to ``None`` when the field is not
+        # in the cached batch (e.g. ``compute_geometry: false``).
+        gt_fields_2d: Dict[str, Optional[torch.Tensor]] = {}
+        for key in ("label_skl", "label_direction",
+                    "label_covariance", "label_radius"):
+            arr = batch.get(key)
+            if arr is None:
+                gt_fields_2d[key] = None
+                continue
+            arr = arr.to(pl_module.device)
+            # Strip any extra leading dim that ``EnsureChannelFirstd``
+            # may have stacked on top of an already-channel-first
+            # field (defensive; matches the model's [B, C, *spatial]
+            # contract).
+            if arr.dim() == self.spatial_dims + 3:
+                arr = rearrange(arr, "b 1 c ... -> b c ...")
+            arr = arr[:n].float()
+            gt_fields_2d[key] = _to_2d(arr)
+
         ctx = TagContext(stage=stage, mode=self.mode)
         _log_predictions(
             tb, ctx, images_2d, labels_2d,
@@ -302,6 +330,10 @@ class ImageLogger(pl.Callback):
             normalize_embeddings=normalize_embeddings,
             wan_decoder_2d=wan_decoder_2d,
             geometry_style=self.geometry_style,
+            gt_skl_2d=gt_fields_2d.get("label_skl"),
+            gt_dir_2d=gt_fields_2d.get("label_direction"),
+            gt_cov_2d=gt_fields_2d.get("label_covariance"),
+            gt_rad_2d=gt_fields_2d.get("label_radius"),
         )
         del head_pred, wan_decoder_pred
 

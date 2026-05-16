@@ -92,7 +92,7 @@ data:
 
   # ---- Loader & batching ----
   batch_size: 4
-  num_workers: 8
+  num_workers: 4
   persistent_workers: true
   pin_memory: true
   cache_rate: 0.0                 # 0 = stream from disk; raise if RAM allows
@@ -231,7 +231,8 @@ model:
 
   # Unified output head (must match brainbow.losses._common.HEAD_CHANNELS):
   in_channels: 1                  # raw EM input -> 1 channel
-  head_channels: 30               # raw(1)+sem(1)+dir(3)+cov(6)+avg(3)+emb(16)
+  # raw(1)+sem(1)+skl(1)+dir(3)+cov(6)+rad(1)+avg(3)+emb(16)
+  head_channels: 32
   feature_size: 64
 
   # What to freeze.  Cosmos-Predict has no ControlNet residual branch
@@ -373,15 +374,17 @@ optimizer:
 # ---------------------------------------------------------------------
 # Loss
 # ---------------------------------------------------------------------
-# CombinedLoss = one 30-channel head scored by per-field losses.
+# CombinedLoss = one 32-channel head scored by per-field losses.
 #
 # Unified channel layout:
 #   raw: ch  0       -> L1 raw reconstruction
 #   sem: ch  1       -> sigmoid BCE + Dice foreground
-#   dir: ch  2- 4    -> L1 centroid direction
-#   cov: ch  5-10    -> L1 upper-triangle covariance
-#   avg: ch 11-13    -> L1 normalised centroid + derived 12-aff
-#   emb: ch 14-29    -> discriminative embedding + derived 12-aff
+#   skl: ch  2       -> sigmoid BCE + Dice binary skeleton
+#   dir: ch  3- 5    -> L1 skeleton direction
+#   cov: ch  6-11    -> L1 upper-triangle Voronoi-cell covariance
+#   rad: ch 12       -> L1 distance to nearest skeleton voxel
+#   avg: ch 13-15    -> L1 normalised centroid + derived 12-aff
+#   emb: ch 16-31    -> discriminative embedding + derived 12-aff
 #
 # Each weight_<field> mapping has:
 #   - weight: scalar multiplier (0 disables that field/path)
@@ -399,10 +402,22 @@ loss:
     class_weights: [0.1]
     weight_ce: 1.0
     weight_dice: 1.0
+  # Skeleton head supervision.  Dice carries the signal; CE is kept
+  # small because the 1-voxel-wide target is ~99.9% negative.
+  weight_skl:
+    weight: 1.0
+    weight_ce: 0.1
+    weight_dice: 1.0
   weight_dir:
     weight: 1.0
     loss: l1
   weight_cov:
+    weight: 1.0
+    loss: l1
+  # Distance-to-skeleton scalar.  The default ``data.radius_normalize: true``
+  # path gives a per-instance [0, 1] target, so the L1 loss is on the
+  # same scale as ``avg``.
+  weight_rad:
     weight: 1.0
     loss: l1
   weight_avg:

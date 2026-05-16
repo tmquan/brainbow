@@ -31,11 +31,11 @@ flowchart LR
 Three end-to-end backbones live under `brainbow/models/`:
 
 - **`CosmosTransfer3DWrapper`** — Cosmos-Transfer 2.5 (base DiT +
-  ControlNet residual branch + Wan VAE); one unified 30-channel head.
+  ControlNet residual branch + Wan VAE); one unified 32-channel head.
 - **`CosmosPredict3DWrapper`** — Cosmos-Predict 2.5 (base DiT + Wan
   VAE, no ControlNet); same unified head, shares all scaffolding with
   Transfer via `brainbow/models/cosmos_2_5_common/`.
-- **`Vista3DWrapper`** — SegResNetDS2; the same unified 30-channel head
+- **`Vista3DWrapper`** — SegResNetDS2; the same unified 32-channel head
   for fast local iteration.
 
 For the channel layout and the math behind the loss, see
@@ -44,16 +44,18 @@ For the channel layout and the math behind the loss, see
 ## What it does
 
 For every connected-component label `> 0` in a volumetric segmentation,
-`brainbow` trains one **30-channel per-voxel head**:
+`brainbow` trains one **32-channel per-voxel head**:
 
 | channels | field | meaning |
 |---:|---|---|
 | 0 | `raw` | raw image reconstruction |
-| 1 | `sem` | foreground probability |
-| 2-4 | `dir` | unit vector to the instance centroid |
-| 5-10 | `cov` | upper-triangle covariance field |
-| 11-13 | `avg` | normalised `(z, y, x)` instance centroid |
-| 14-29 | `emb` | 16-D discriminative embedding |
+| 1 | `sem` | foreground probability (sigmoid) |
+| 2 | `skl` | binary skeleton mask (sigmoid) |
+| 3-5 | `dir` | unit vector to the nearest same-instance skeleton voxel |
+| 6-11 | `cov` | upper-triangle Voronoi-cell covariance at the nearest skeleton vertex |
+| 12 | `rad` | distance to the nearest same-instance skeleton voxel (per-instance normalised by default) |
+| 13-15 | `avg` | normalised `(z, y, x)` instance centroid |
+| 16-31 | `emb` | 16-D discriminative embedding |
 
 The loss also derives **12-direction, second-order face affinity** from
 both `avg` and `emb` and supervises those soft affinities against a

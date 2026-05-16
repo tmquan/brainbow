@@ -65,7 +65,7 @@ End-to-end flow (rank-0 only, once per ``every_n_epochs``)::
         │ ._run_visualization    │   autocast, cast preds back to fp32
         └──────────┬─────────────┘
                    ▼
-        ┌────────────────────────┐   unified 30-channel head panels
+        ┌────────────────────────┐   unified 32-channel head panels
         │ heads._log_predictions │   (raw, sem, dir, cov, avg, emb,
         │                        │   derived 12-aff panels)
         └──────────┬─────────────┘

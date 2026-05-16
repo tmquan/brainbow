@@ -1,4 +1,4 @@
-"""TensorBoard panels for the unified 30-channel head."""
+"""TensorBoard panels for the unified 32-channel head."""
 
 from typing import Any
 
@@ -101,6 +101,10 @@ def _log_predictions(
     normalize_embeddings: bool = False,
     wan_decoder_2d: torch.Tensor | None = None,
     geometry_style: str = "glyph",
+    gt_skl_2d: torch.Tensor | None = None,
+    gt_dir_2d: torch.Tensor | None = None,
+    gt_cov_2d: torch.Tensor | None = None,
+    gt_rad_2d: torch.Tensor | None = None,
 ) -> None:
     """Log true panels plus the unified-head prediction panels.
 
@@ -112,13 +116,19 @@ def _log_predictions(
 
     * ``pred/raw``
     * ``pred/sem``
+    * ``pred/skl``
     * ``pred/dir``
     * ``pred/cov``
+    * ``pred/rad``
     * ``pred/avg/val`` and ``pred/avg/aff/{01_t1,02_b1,...,12_r2}``
     * ``pred/emb/_{pca|svd|umap}``, ``pred/emb/aff/{01_t1,...,12_r2}``,
       ``pred/label/{pre,mul}`` (``pre`` = raw clustering output;
       ``mul`` = same panel multiplied by the predicted sem mask)
     * ``true/image``, ``true/label``
+    * ``true/skl`` / ``true/dir`` / ``true/cov`` / ``true/rad``
+      (rendered only when the matching GT field is passed in -- the
+      ImageLogger threads them through from the cached batch when
+      ``compute_geometry`` is on)
     * ``true/avg/val`` and ``true/aff/{01_t1,...,12_r2}`` (3-D only)
     * ``true/wan_decoder`` (RGB pixel reconstruction from the original
       pretrained Wan decoder; only emitted when ``wan_decoder_2d`` is
@@ -154,6 +164,51 @@ def _log_predictions(
         global_step=epoch,
     )
 
+    # ----- true/skl, true/dir, true/cov, true/rad -----
+    # Each panel mirrors the rendering of its prediction counterpart so
+    # the user can eyeball convergence by laying the two side-by-side
+    # in TensorBoard.  When the GT is not threaded through (e.g. the
+    # datamodule was built with ``compute_geometry=False``) we skip the
+    # panel silently.
+    if gt_skl_2d is not None:
+        gt_skl = gt_skl_2d.clamp(0.0, 1.0)
+        gt_skl_rgb = repeat(gt_skl, "b 1 h w -> b 3 h w")
+        tb.add_images(head.tag("true/skl"), gt_skl_rgb, global_step=epoch)
+
+    if gt_rad_2d is not None:
+        # The radius field can briefly exceed 1 in voxel-units mode;
+        # clamp for display only -- same convention as ``pred/rad``.
+        gt_rad = gt_rad_2d.clamp(0.0, 1.0)
+        gt_rad_rgb = repeat(gt_rad, "b 1 h w -> b 3 h w")
+        tb.add_images(head.tag("true/rad"), gt_rad_rgb, global_step=epoch)
+
+    if gt_dir_2d is not None or gt_cov_2d is not None:
+        # Build a soft fg-weight from the labels so the renderers fade
+        # background voxels to black, matching how the prediction
+        # panels composite with the soft sem probability.
+        fg_soft = (labels[:n] > 0).float()
+        if gt_dir_2d is not None:
+            if geometry_style == "glyph":
+                gt_dir_rgb = _render_dir_quiver(
+                    gt_dir_2d, images[:n], fg_soft, spatial_dims,
+                )
+            else:
+                gt_dir_rgb = _render_dir_flow(
+                    gt_dir_2d, images[:n], fg_soft, spatial_dims,
+                )
+            tb.add_images(head.tag("true/dir"), gt_dir_rgb, global_step=epoch)
+        if gt_cov_2d is not None:
+            gt_cov_mat = upper_tri_to_matrix(gt_cov_2d, spatial_dims)
+            if geometry_style == "glyph":
+                gt_cov_rgb = _render_cov_glyphs(
+                    gt_cov_mat, images[:n], fg_soft, spatial_dims,
+                )
+            else:
+                gt_cov_rgb = _render_cov_flow(
+                    gt_cov_mat, images[:n], fg_soft, spatial_dims,
+                )
+            tb.add_images(head.tag("true/cov"), gt_cov_rgb, global_step=epoch)
+
     # Pretrained Wan decoder reconstruction (Cosmos only).  Wan emits
     # values in roughly ``[-1, 1]``; per-image min/max normalise to
     # ``[0, 1]`` for display so the panel reads naturally next to
@@ -177,6 +232,15 @@ def _log_predictions(
     sem_ids = (sem[:, 0] > 0.5).long()
     sem_rgb = repeat(sem, "b 1 h w -> b 3 h w")
     tb.add_images(head.tag("pred/sem"), sem_rgb, global_step=epoch)
+
+    # ----- skl (predicted skeleton mask, sigmoid head) -----
+    # 1-voxel-wide centerline prediction; rendered as a grayscale
+    # heatmap so the per-voxel probability is visible.  Modulated by
+    # the predicted ``sem`` so background voxels fade out the same way
+    # the avg / emb panels do.
+    skl = _to_2d(fields["skl"]).clamp(0.0, 1.0)
+    skl_rgb = repeat(skl, "b 1 h w -> b 3 h w") * sem_rgb
+    tb.add_images(head.tag("pred/skl"), skl_rgb, global_step=epoch)
 
     # ----- dir / cov -----
     # Two renderer styles are available; the active one is picked by
@@ -209,6 +273,14 @@ def _log_predictions(
 
     tb.add_images(head.tag("pred/dir"), dir_rgb, global_step=epoch)
     tb.add_images(head.tag("pred/cov"), cov_rgb, global_step=epoch)
+
+    # ----- rad (predicted distance to skeleton, regression head) -----
+    # Normalised target lives in [0, 1] per-instance; voxel-unit mode
+    # can exceed 1 (rare on small crops) so we clamp for display only.
+    # Modulated by the predicted ``sem`` to keep the panel readable.
+    rad = _to_2d(fields["rad"]).clamp(0.0, 1.0)
+    rad_rgb = repeat(rad, "b 1 h w -> b 3 h w") * sem_rgb
+    tb.add_images(head.tag("pred/rad"), rad_rgb, global_step=epoch)
 
     # ----- avg + avg-aff -----
     # Multiply by the predicted sem so background voxels fade to black

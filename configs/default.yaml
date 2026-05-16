@@ -55,6 +55,13 @@ data:
   slice_mode: true
   num_samples: null
   find_boundaries: 0.0
+  # Normalisation mode for the per-instance distance-to-skeleton field
+  # (``label_radius``).  ``true`` (default) divides each instance's
+  # radii by its own max so the target lives in [0, 1] per-instance;
+  # ``false`` leaves the value in voxel units.  Only consumed when the
+  # geometry pipeline is active (``compute_geometry=true``) and the
+  # ``weight_rad`` head is non-zero.
+  radius_normalize: true
   elastic_prob: 0.0            # probability of 3-D elastic deformation (0 = off)
   elastic_sigma_range: [35, 50]       # Gaussian smoothing σ — high = sparse, smooth warp
   elastic_magnitude_range: [10, 40]   # displacement magnitude range (kept low for gentle warps)
@@ -71,7 +78,10 @@ data:
 model:
   type: cosmostransfer3d  # Options: cosmostransfer3d, cosmospredict3d, vista3d
   in_channels: 1
-  head_channels: 30       # Unified head: raw(1)+sem(1)+dir(3)+cov(6)+avg(3)+emb(16)
+  # Unified head: raw(1)+sem(1)+skl(1)+dir(3)+cov(6)+rad(1)+avg(3)+emb(16)
+  # Sigmoid is applied to the contiguous (sem, skl) block at ch [1, 3);
+  # all other channels stay linear.
+  head_channels: 32
   feature_size: 64
   dropout: 0.2
   # If true, the wrapper will auto-pull pretrained weights from HuggingFace
@@ -113,10 +123,26 @@ loss:
     weight: 1.0
     weight_ce: 1.0
     weight_dice: 1.0
+  # Binary skeleton mask supervision (head ch 2, sigmoid BCE + Dice).
+  # The 1-voxel-wide target is heavily negative-dominated, so keep
+  # ``weight_ce`` small (e.g. 0.1) and let Dice carry the supervision
+  # when this field is enabled.
+  weight_skl:
+    weight: 0.0
+    weight_ce: 0.1
+    weight_dice: 1.0
   weight_dir:
     weight: 0.0
     loss: l1
   weight_cov:
+    weight: 0.0
+    loss: l1
+  # Distance to nearest same-instance skeleton voxel (head ch 12, L1
+  # foreground-only).  When precomputed by ``SkeletonGeometryd`` with
+  # ``radius_normalize=True`` (default), the target lives in [0, 1]
+  # per-instance; with ``radius_normalize=false`` it lives in voxel
+  # units.
+  weight_rad:
     weight: 0.0
     loss: l1
   weight_avg:

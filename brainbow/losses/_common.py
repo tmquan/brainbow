@@ -1,26 +1,34 @@
 """
 Shared helpers + canonical constants for the unified head loss.
 
-The Vista-style task head emits a single ``[B, 30, *spatial]`` tensor
-(in 3-D) whose 30 channels carry six fields::
+The Vista-style task head emits a single ``[B, 32, *spatial]`` tensor
+(in 3-D) whose 32 channels carry eight fields::
 
     ch  0       : raw      (1)   linear,  L1 vs raw image intensity
     ch  1       : sem      (1)   sigmoid, BCE + Dice vs (label > 0)
-    ch  2 -  4  : dir      (3)   linear,  L1 vs unit centroid-direction field
-    ch  5 - 10  : cov      (6)   linear,  L1 vs upper-triangle covariance
-    ch 11 - 13  : avg      (3)   linear,  L1 vs normalised centroid (z, y, x)
+    ch  2       : skl      (1)   sigmoid, BCE + Dice vs binary skeleton mask
+    ch  3 -  5  : dir      (3)   linear,  L1 vs unit skeleton-direction field
+    ch  6 - 11  : cov      (6)   linear,  L1 vs upper-triangle Voronoi-cell
+                                          local-segment covariance
+    ch 12       : rad      (1)   linear,  L1 vs distance to nearest skeleton
+                                          voxel (per-instance normalised by
+                                          default)
+    ch 13 - 15  : avg      (3)   linear,  L1 vs normalised centroid (z, y, x)
                                    + derived 12-channel face-affinity loss
-    ch 14 - 29  : emb      (16)  linear,  discriminative pull / push / norm
+    ch 16 - 31  : emb      (16)  linear,  discriminative pull / push / norm
                                    + derived 12-channel face-affinity loss
 
-The order puts the **fixed-width** fields first (raw, sem, dir, cov,
-avg = 14 channels) and the **wide embedding** last so anyone slicing
-``head[:, :14]`` gets the deterministic-target channels and
-``head[:, 14:]`` gets the embedding without having to thread the
+The order puts the **fixed-width** fields first (raw, sem, skl, dir,
+cov, rad, avg = 16 channels) and the **wide embedding** last so anyone
+slicing ``head[:, :16]`` gets the deterministic-target channels and
+``head[:, 16:]`` gets the embedding without having to thread the
 embedding width through every downstream consumer.
 
-Activation policy: **sigmoid only on ch 1** (sem; classification-supervised);
-linear on every other channel (regression / embedding).
+Activation policy: **sigmoid on ch 1 and ch 2** (sem + skl;
+classification-supervised); linear on every other channel
+(regression / embedding).  The two sigmoid channels are contiguous at
+``[1, 3)`` so :data:`SIGMOID_SLICE` is a single slice that wrappers
+hand to :func:`apply_head_activations`.
 
 The face-affinity kernel takes the per-voxel field (16-D for ``emb``,
 3-D for ``avg``) and shifts it along each of 12 directions to produce
@@ -86,29 +94,38 @@ from einops import rearrange
 
 
 # ---------------------------------------------------------------------------
-# Channel layout (single source of truth -- 30 channels in 3-D)
+# Channel layout (single source of truth -- 32 channels in 3-D)
 # ---------------------------------------------------------------------------
 
 # Per-field channel widths.
 CH_RAW: int = 1
 CH_SEM: int = 1
+CH_SKL: int = 1        # binary skeleton mask
 CH_DIR: int = 3        # 3-D (Z, Y, X)
 CH_COV: int = 6        # upper-triangle of a 3x3 symmetric matrix
+CH_RAD: int = 1        # scalar distance to nearest skeleton voxel
 CH_AVG: int = 3        # normalised centroid (z, y, x)
-CH_EMB: int = 16       # discriminative embedding -- last so head[:, 14:] is emb
+CH_EMB: int = 16       # discriminative embedding -- last so head[:, 16:] is emb
 
 # Slice indices: ``[start, end)`` per field.  The embedding lives at
 # the **end** of the channel dim so consumers that slice for the
-# clusterer / TB embedding-projection panel can read ``head[:, 14:]``
+# clusterer / TB embedding-projection panel can read ``head[:, 16:]``
 # without threading the embedding width through every call.
-RAW_SLICE: slice = slice(0, CH_RAW)                                   # [0, 1)
-SEM_SLICE: slice = slice(RAW_SLICE.stop, RAW_SLICE.stop + CH_SEM)     # [1, 2)
-DIR_SLICE: slice = slice(SEM_SLICE.stop, SEM_SLICE.stop + CH_DIR)     # [2, 5)
-COV_SLICE: slice = slice(DIR_SLICE.stop, DIR_SLICE.stop + CH_COV)     # [5, 11)
-AVG_SLICE: slice = slice(COV_SLICE.stop, COV_SLICE.stop + CH_AVG)     # [11, 14)
-EMB_SLICE: slice = slice(AVG_SLICE.stop, AVG_SLICE.stop + CH_EMB)     # [14, 30)
+RAW_SLICE: slice = slice(0, CH_RAW)                                    # [0, 1)
+SEM_SLICE: slice = slice(RAW_SLICE.stop, RAW_SLICE.stop + CH_SEM)      # [1, 2)
+SKL_SLICE: slice = slice(SEM_SLICE.stop, SEM_SLICE.stop + CH_SKL)      # [2, 3)
+DIR_SLICE: slice = slice(SKL_SLICE.stop, SKL_SLICE.stop + CH_DIR)      # [3, 6)
+COV_SLICE: slice = slice(DIR_SLICE.stop, DIR_SLICE.stop + CH_COV)      # [6, 12)
+RAD_SLICE: slice = slice(COV_SLICE.stop, COV_SLICE.stop + CH_RAD)      # [12, 13)
+AVG_SLICE: slice = slice(RAD_SLICE.stop, RAD_SLICE.stop + CH_AVG)      # [13, 16)
+EMB_SLICE: slice = slice(AVG_SLICE.stop, AVG_SLICE.stop + CH_EMB)      # [16, 32)
 
-HEAD_CHANNELS: int = EMB_SLICE.stop                                    # 30
+HEAD_CHANNELS: int = EMB_SLICE.stop                                     # 32
+
+# Activation policy: sigmoid is applied to the union of (sem, skl).  The
+# two slots are contiguous by construction so the wrapper-side concat
+# stays a single in/out split (see :func:`apply_head_activations`).
+SIGMOID_SLICE: slice = slice(SEM_SLICE.start, SKL_SLICE.stop)           # [1, 3)
 
 # Map from field name to slice.  Every consumer (loss, wrapper, TB
 # callback, sliding-window inference) reaches into this dict instead of
@@ -116,8 +133,10 @@ HEAD_CHANNELS: int = EMB_SLICE.stop                                    # 30
 HEAD_LAYOUT: Dict[str, slice] = {
     "raw": RAW_SLICE,
     "sem": SEM_SLICE,
+    "skl": SKL_SLICE,
     "dir": DIR_SLICE,
     "cov": COV_SLICE,
+    "rad": RAD_SLICE,
     "avg": AVG_SLICE,
     "emb": EMB_SLICE,
 }
@@ -155,16 +174,17 @@ def slice_head(
     *,
     channel_dim: int = 1,
 ) -> Dict[str, torch.Tensor]:
-    """Split a unified head tensor into the six named fields.
+    """Split a unified head tensor into the named fields.
 
     Args:
-        head: ``[B, 30, *spatial]`` (or ``[B, *spatial, 30]`` if you set
+        head: ``[B, 32, *spatial]`` (or ``[B, *spatial, 32]`` if you set
             ``channel_dim``).
-        channel_dim: Axis carrying the 30 channels.  Defaults to ``1``.
+        channel_dim: Axis carrying the 32 channels.  Defaults to ``1``.
 
     Returns:
-        Dict mapping ``"raw" / "sem" / "emb" / "dir" / "cov" / "avg"``
-        to the corresponding channel slice (a view of ``head``).
+        Dict mapping ``"raw" / "sem" / "skl" / "dir" / "cov" / "rad" /
+        "avg" / "emb"`` to the corresponding channel slice (a view of
+        ``head``).
     """
     if head.shape[channel_dim] != HEAD_CHANNELS:
         raise ValueError(
@@ -175,6 +195,40 @@ def slice_head(
         name: head.narrow(channel_dim, sl.start, sl.stop - sl.start)
         for name, sl in HEAD_LAYOUT.items()
     }
+
+
+# ---------------------------------------------------------------------------
+# Activation policy: sigmoid on sem + skl, linear elsewhere
+# ---------------------------------------------------------------------------
+
+def apply_head_activations(out: torch.Tensor) -> torch.Tensor:
+    """Apply the head's activation policy to a raw head tensor.
+
+    Splits ``out`` along the channel axis at :data:`SIGMOID_SLICE`,
+    applies ``sigmoid`` to that contiguous run (``sem`` and ``skl``),
+    and concatenates everything back together.  All other channels are
+    returned linear.
+
+    Wrappers call this exactly once at the end of their forward pass so
+    the loss receives ``[0, 1]`` probabilities on the classification
+    heads and raw logits everywhere else.
+
+    Args:
+        out: ``[B, HEAD_CHANNELS, *spatial]`` head tensor with no
+            activations applied yet.
+
+    Returns:
+        Tensor of the same shape, with the slot at :data:`SIGMOID_SLICE`
+        passed through ``sigmoid``.
+    """
+    return torch.cat(
+        [
+            out[:, :SIGMOID_SLICE.start],
+            out[:, SIGMOID_SLICE].sigmoid(),
+            out[:, SIGMOID_SLICE.stop:],
+        ],
+        dim=1,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -477,12 +531,16 @@ def stable_bce_on_probs(
 
 __all__ = [
     # Channel layout
-    "CH_RAW", "CH_SEM", "CH_DIR", "CH_COV", "CH_AVG", "CH_EMB",
+    "CH_RAW", "CH_SEM", "CH_SKL", "CH_DIR", "CH_COV", "CH_RAD",
+    "CH_AVG", "CH_EMB",
     "HEAD_CHANNELS", "HEAD_LAYOUT",
-    "RAW_SLICE", "SEM_SLICE", "DIR_SLICE", "COV_SLICE", "AVG_SLICE", "EMB_SLICE",
+    "RAW_SLICE", "SEM_SLICE", "SKL_SLICE", "DIR_SLICE", "COV_SLICE",
+    "RAD_SLICE", "AVG_SLICE", "EMB_SLICE",
+    "SIGMOID_SLICE",
     "DIRECTIONS", "AFF_NAMES", "AFF_CHANNELS",
     # Helpers
     "slice_head",
+    "apply_head_activations",
     "shift_replicate", "shift_replicate_np",
     "affinity_target", "affinity_target_np",
     "soft_aff_from_field",

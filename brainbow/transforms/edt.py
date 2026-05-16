@@ -81,6 +81,63 @@ def distance_transform_edt(
     return _scipy_edt(mask, sampling=sampling)
 
 
+def edt_with_indices(
+    mask: np.ndarray,
+    sampling: Optional[Union[float, Sequence[float]]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Euclidean distance + indices of the nearest zero (seed) voxel.
+
+    For each True voxel in ``mask`` returns:
+    * ``distance[*spatial]`` -- Euclidean distance to the nearest False
+      voxel.
+    * ``indices[ndim, *spatial]`` -- coordinates of the nearest False
+      voxel (one component per spatial axis, in axis order).
+
+    The False voxels themselves get ``distance == 0`` and
+    ``indices[..., v] == v``.
+
+    Used by the skeleton-relative geometry pipeline to compute, in a
+    single pass, both the per-voxel distance to the nearest skeleton
+    voxel (``rad``) and the index of that voxel (used by ``dir`` /
+    ``cov`` to derive the centripetal direction and the Voronoi-cell
+    assignment in :class:`brainbow.transforms.SkeletonGeometryd`).
+
+    GPU path: cucim's ``distance_transform_edt(..., return_indices=True)``;
+    CPU path: scipy's equivalent.  Same API on both, so callers don't
+    need to branch.
+
+    Args:
+        mask: Bool / 0-1 array ``[*spatial]``.  True = query voxel,
+            False = seed voxel.  Conventionally we pass ``~skel`` so the
+            seeds are skeleton voxels.
+        sampling: Voxel anisotropy (one value per axis) -- forwarded to
+            the underlying EDT call.  ``None`` means isotropic
+            voxel-unit distances.
+
+    Returns:
+        ``(distance, indices)`` numpy arrays.  ``distance`` has dtype
+        ``float32``; ``indices`` has dtype ``int32`` (cucim) or ``int64``
+        (scipy).
+    """
+    if _use_gpu():
+        try:
+            import cupy as cp
+            from cucim.core.operations.morphology import (
+                distance_transform_edt as _cucim_edt,
+            )
+            dist, idx = _cucim_edt(
+                cp.asarray(mask), return_indices=True, sampling=sampling,
+            )
+            return cp.asnumpy(dist).astype(np.float32, copy=False), cp.asnumpy(idx)
+        except Exception:
+            pass
+    from scipy.ndimage import distance_transform_edt as _scipy_edt
+    dist, idx = _scipy_edt(
+        mask, sampling=sampling, return_indices=True,
+    )
+    return dist.astype(np.float32, copy=False), idx
+
+
 # ------------------------------------------------------------------
 # Gaussian filter
 # ------------------------------------------------------------------

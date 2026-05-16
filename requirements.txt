@@ -71,6 +71,12 @@ scipy==1.17.0
 scikit-learn==1.8.0
 scikit-image==0.26.0
 
+# 3-D TEASAR skeletonization (brainbow.transforms.skeleton).  CPU-only;
+# runs inside DataLoader workers.  Falls back to
+# skimage.morphology.skeletonize on a per-instance basis when the
+# kimimaro import fails (e.g. wheel unavailable for the platform).
+kimimaro==5.4.0
+
 # Experiment tracking
 wandb==0.25.0
 tensorboard==2.20.0

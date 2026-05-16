@@ -165,8 +165,9 @@ def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
         "min_foreground": float(data_cfg.get("min_foreground", 0.0)),
         "compute_geometry": any(
             _field_weight(cfg.get("loss", {}), f, default=0.0) > 0
-            for f in ("dir", "cov")
+            for f in ("skl", "dir", "cov", "rad")
         ),
+        "radius_normalize": bool(data_cfg.get("radius_normalize", True)),
         "elastic_prob": float(data_cfg.get("elastic_prob", 0.0)),
         "elastic_sigma_range": tuple(data_cfg.get("elastic_sigma_range", [35, 50])),
         "elastic_magnitude_range": tuple(data_cfg.get("elastic_magnitude_range", [10, 40])),

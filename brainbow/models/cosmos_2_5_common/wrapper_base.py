@@ -7,7 +7,7 @@ and Cosmos-Predict 2.5 have in common:
   DiT + Wan-style VAE)
 * random-init ``_StandaloneDiT3D`` fallback for ``pretrained=False``
 * multi-layer DiT feature extraction via persistent forward hooks
-* Wan-VAE encode/decode + the unified 30-channel
+* Wan-VAE encode/decode + the unified 32-channel
   :class:`_DecoderAdapter3D` head
 * freeze plumbing for the DiT, VAE encoder and VAE decoder
 * gradient checkpointing on/off
@@ -28,6 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from brainbow.losses import HEAD_CHANNELS
 from brainbow.models.cosmos_2_5_common.decoder import (
     _DecoderAdapter3D,
     _FeatureProjector3D,
@@ -71,7 +72,7 @@ class _BaseCosmos25Wrapper(nn.Module):
     def __init__(
         self,
         in_channels: int = 1,
-        head_channels: int = 30,
+        head_channels: int = HEAD_CHANNELS,
         feature_size: int = 64,
         variant: str = "2B",
         checkpoint_variant: str = "post-trained",

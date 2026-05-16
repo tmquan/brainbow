@@ -219,8 +219,10 @@ brainbow/modules/<arch>/module.py         # concrete Lightning class
 * Inherit from `torch.nn.Module` (or `BaseModel` if you want the type
   guarantees).
 * `forward(x: Tensor) -> Tensor` returning the unified
-  `[B, HEAD_CHANNELS, *spatial]` tensor.  The wrapper applies sigmoid
-  only to `SEM_SLICE`; all other channels stay linear.
+  `[B, HEAD_CHANNELS, *spatial]` tensor.  Route the head output through
+  `brainbow.losses.apply_head_activations` so sigmoid lands on the
+  contiguous `SIGMOID_SLICE` (sem + skl) and every other channel stays
+  linear.
 * If your backbone has frozen modules under DDP, follow Cosmos's
   approach: `requires_grad_(False)` + `.eval()` + `.detach()` on the
   output of the frozen subgraph (see `cosmos_transfer_2_5/wrapper.py`).

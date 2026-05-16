@@ -31,7 +31,7 @@ def small_predict_wrapper() -> CosmosPredict3DWrapper:
 
 
 def test_wrapper_output_shape_and_finite(small_predict_wrapper):
-    """Forward returns [B, 30, D, H, W] with finite values."""
+    """Forward returns [B, HEAD_CHANNELS, D, H, W] with finite values."""
     model = small_predict_wrapper
     x = torch.randn(1, 1, 16, 32, 32)
     out = model(x)

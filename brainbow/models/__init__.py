@@ -4,14 +4,14 @@ Model architectures for connectomics segmentation.
 Three end-to-end backbone wrappers live here:
 
 * :class:`CosmosTransfer3DWrapper` -- Cosmos-Transfer 2.5 (base DiT +
-  ControlNet residual branch + VAE) with a single unified 30-channel
+  ControlNet residual branch + VAE) with a single unified 32-channel
   head (``raw|sem|dir|cov|avg|emb``).
 * :class:`CosmosPredict3DWrapper` -- Cosmos-Predict 2.5 (base DiT +
-  VAE, no ControlNet) with the same unified 30-channel head.  Shares
+  VAE, no ControlNet) with the same unified 32-channel head.  Shares
   all scaffolding with Transfer via
   :mod:`brainbow.models.cosmos_2_5_common`.
 * :class:`Vista3DWrapper` -- SegResNetDS2 backbone with the same
-  unified 30-channel head, for fast local iteration.
+  unified 32-channel head, for fast local iteration.
 
 All three wrappers project their backbone features through
 :class:`brainbow.models.vista.VistaTaskHead3D` so the post-backbone
@@ -19,7 +19,7 @@ refinement stack is shared.
 
 The abstract :class:`BaseModel` lays out the common contract every
 wrapper honours: ``forward`` returns a single tensor of shape
-``[B, HEAD_CHANNELS, ...]`` (default ``HEAD_CHANNELS = 30``) and
+``[B, HEAD_CHANNELS, ...]`` (default ``HEAD_CHANNELS = 32``) and
 ``get_output_channels()`` returns that integer width for downstream
 code that needs to know the head shape without running a forward
 pass.  The fixed-slice layout is owned by

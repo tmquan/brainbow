@@ -51,7 +51,7 @@ class CosmosTransfer3DWrapper(_BaseCosmos25Wrapper):
 
     Args:
         in_channels: Number of input channels (1 for EM volumes).
-        head_channels: Unified head width (default 30).
+        head_channels: Unified head width (default 32).
         feature_size: Internal feature map channel count after projection.
         variant: ``"2B"`` or ``"14B"`` model variant.
         checkpoint_variant: HuggingFace revision string.

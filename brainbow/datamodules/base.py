@@ -50,13 +50,12 @@ from monai.transforms import (
 
 from brainbow.datasets.base import CircuitDataset
 from brainbow.transforms import (
-    FindBoundariesd, 
-    Labeld, 
-    Directiond, 
-    Covarianced,
+    FindBoundariesd,
+    Labeld,
     RandTransposeXYd,
-    RandResolutionZoomd, 
-    RandSpatialCropForegroundd, 
+    RandResolutionZoomd,
+    RandSpatialCropForegroundd,
+    SkeletonGeometryd,
 )
 
 
@@ -118,6 +117,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         persistent_workers: bool = True,
         prefetch_factor: int = 6,
         compute_geometry: bool = True,
+        radius_normalize: bool = True,
         find_boundaries: float = 0.0,
         min_foreground: float = 0.0,
         pixel_size: Optional[Tuple[float, ...]] = None,
@@ -144,6 +144,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         self.persistent_workers = persistent_workers and num_workers > 0
         self.prefetch_factor = int(prefetch_factor)
         self.compute_geometry = compute_geometry
+        self.radius_normalize = bool(radius_normalize)
         self.find_boundaries = float(find_boundaries)
         self.min_foreground = float(min_foreground)
         self.pixel_size = tuple(pixel_size) if pixel_size is not None else None
@@ -308,16 +309,23 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         return [Labeld(keys=["label"], spatial_dims=spatial_dims)]
 
     def _geometry_transforms(self, spatial_dims: int) -> list:
-        """Direction and covariance targets for the geometry loss head.
+        """Skeleton-relative geometry targets (``skl`` / ``dir`` / ``cov``
+        / ``rad``) emitted by a single :class:`SkeletonGeometryd` pass.
 
         Runs after spatial augmentations so targets are consistent with
-        the augmented label layout.  Skipped when ``compute_geometry=False``.
+        the augmented label layout.  Skipped when
+        ``compute_geometry=False``.  All four fields share one
+        per-instance EDT call: see :func:`compute_skeleton_geometry` in
+        :mod:`brainbow.transforms.skeleton` for the algorithm.
         """
         if not self.compute_geometry:
             return []
         return [
-            Directiond(keys=["label"], spatial_dims=spatial_dims),
-            Covarianced(keys=["label"], spatial_dims=spatial_dims),
+            SkeletonGeometryd(
+                keys=["label"],
+                spatial_dims=spatial_dims,
+                radius_normalize=self.radius_normalize,
+            ),
         ]
 
     # ------------------------------------------------------------------
@@ -328,7 +336,12 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         """All keys that must pass through ``EnsureTyped``."""
         keys = ["image", "label"]
         if self.compute_geometry:
-            keys.extend(["label_direction", "label_covariance"])
+            keys.extend([
+                "label_skl",
+                "label_radius",
+                "label_direction",
+                "label_covariance",
+            ])
         return keys
 
     def get_train_transforms(self) -> Compose:

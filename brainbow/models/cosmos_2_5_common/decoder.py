@@ -1,9 +1,11 @@
 """Decoder-side modules shared by the Cosmos 2.5 wrappers.
 
 The decoder hosts one unified Vista-style task head that emits the
-canonical ``[B, 30, D, H, W]`` tensor consumed by
+canonical ``[B, 32, D, H, W]`` tensor consumed by
 ``brainbow.losses.CombinedLoss``.  Activation policy is applied exactly
-once here: sigmoid on the semantic channel only, linear everywhere else.
+once here via :func:`brainbow.losses.apply_head_activations`: sigmoid on
+the semantic and skeleton channels (the contiguous run
+:data:`brainbow.losses.SIGMOID_SLICE`), linear everywhere else.
 """
 
 import logging
@@ -20,7 +22,7 @@ from brainbow.models.cosmos_2_5_common.layers import (
     _PointwiseLinear,
 )
 from brainbow.models.vista import VistaTaskHead3D
-from brainbow.losses import HEAD_CHANNELS, SEM_SLICE
+from brainbow.losses import HEAD_CHANNELS, apply_head_activations
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +100,7 @@ class _DecoderAdapter3D(nn.Module):
     """Reuses pretrained VAE decoder for multi-head volumetric segmentation.
 
     Replaces the decoder's final output convolution with the unified
-    30-channel task head while preserving all pretrained upsampling
+    32-channel task head while preserving all pretrained upsampling
     weights.  The pretrained ``conv_out`` itself is kept on the side as
     :attr:`original_conv_out` (frozen) so the original Wan pixel
     reconstruction can still be emitted for diagnostic visualisation
@@ -155,7 +157,7 @@ class _DecoderAdapter3D(nn.Module):
         # ``ClassMappingClassify.image_post_mapping`` (2× residual
         # UnetrBasicBlock at a shared refinement width with instance
         # norm) and replaces the class-embedding mask-attention with a
-        # 1×1 conv so we can emit the 30-channel dense field.  Refinement
+        # 1×1 conv so we can emit the 32-channel dense field.  Refinement
         # runs at ``feature_size`` so parameter cost stays
         # independent of the VAE decoder's output width (``_hidden_ch``
         # can be much larger on the 14B variant).
@@ -225,14 +227,7 @@ class _DecoderAdapter3D(nn.Module):
     ) -> torch.Tensor:
         decoded = self._decode_body(features, target_size)
         out = self.head(decoded)
-        return torch.cat(
-            [
-                out[:, :SEM_SLICE.start],
-                out[:, SEM_SLICE].sigmoid(),
-                out[:, SEM_SLICE.stop:],
-            ],
-            dim=1,
-        )
+        return apply_head_activations(out)
 
     def _decode_body(
         self, features: torch.Tensor, target_size: tuple,

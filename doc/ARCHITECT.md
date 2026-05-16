@@ -2,9 +2,9 @@
 
 Three end-to-end wrappers live under `brainbow/models/`:
 
-1. [`CosmosTransfer3DWrapper`](#1-cosmostransfer3dwrapper) — EM → pretrained Wan VAE → Cosmos-Transfer 2.5 (base DiT **+ ControlNet residual branch**) → one VISTA-style **30-channel unified head**.
+1. [`CosmosTransfer3DWrapper`](#1-cosmostransfer3dwrapper) — EM → pretrained Wan VAE → Cosmos-Transfer 2.5 (base DiT **+ ControlNet residual branch**) → one VISTA-style **32-channel unified head**.
 2. `CosmosPredict3DWrapper` — same data flow as Transfer **without** the ControlNet residual branch (Predict is the upstream base DiT in NVIDIA's Cosmos 2.5 stack).  Shares all scaffolding with Transfer via `brainbow/models/cosmos_2_5_common/`; the only difference is the variant registry (HF repo `nvidia/Cosmos-Predict2.5-2B`) and the absence of `controlnet_revision` / `freeze_controlnet`.  When evaluating the parameter budget, drop the ControlNet row from §1.2.
-3. [`Vista3DWrapper`](#2-vista3dwrapper) — EM → SegResNetDS2 → the same **30-channel unified head**.
+3. [`Vista3DWrapper`](#2-vista3dwrapper) — EM → SegResNetDS2 → the same **32-channel unified head**.
 
 Every channel count below mirrors `configs/default.yaml`. Parameter counts are
 approximate; use `model.get_num_parameters(trainable_only=…)` on a loaded
@@ -77,7 +77,7 @@ instance for exact numbers.
 | `feature_projector` output   | **64**   | 1 / (4, 8, 8)           |
 | `to_latent` back to VAE      | **16**   | 1 / (4, 8, 8)           |
 | Decoder output (trilinear up)| **64**   | 1                       |
-| `head`                       | `head_channels = 30` = raw(1) + sem(1) + dir(3) + cov(6) + avg(3) + emb(16). Sigmoid only on sem; all other channels linear. |
+| `head`                       | `head_channels = 32` = raw(1) + sem(1) + skl(1) + dir(3) + cov(6) + rad(1) + avg(3) + emb(16). Sigmoid on the contiguous (sem, skl) block at ch [1, 3); all other channels linear. |
 
 ### 1.3 The DiT variant (2B)
 
@@ -129,7 +129,7 @@ totals.
 The adapter adds, on top of the shared decoder:
 
 - `to_latent` — 1×1×1 conv, `feature_size → latent_channels` (~1 K params).
-- One `VistaTaskHead3D` unified 30-channel head (~0.7 M).
+- One `VistaTaskHead3D` unified 32-channel head (~0.7 M).
 - Optional trilinear upsample to input resolution (0 params).
 
 ### 1.5 `VistaTaskHead3D`
@@ -147,7 +147,51 @@ in         → (optional 1×1 conv to refine_channels)
 No internal upsampler — spatial resolution is preserved. At
 `refine_channels=64` and `out_channels ≤ 16`, each head is **~0.7 M** params.
 
-### 1.6 Freeze flags → what actually moves
+### 1.6 Skeleton-relative geometry (`skl` / `dir` / `cov` / `rad`)
+
+Four of the eight head fields (`skl`, `dir`, `cov`, `rad`) are
+supervised by **per-instance skeleton-relative** targets precomputed
+inside the DataLoader by
+[`SkeletonGeometryd`](../brainbow/transforms/skeleton.py) in a single
+pass per crop:
+
+1. **Skeletonize each foreground instance** using `kimimaro`
+   (3-D TEASAR) or `skimage.morphology.skeletonize` as a fallback.
+   Union the per-instance skeletons into a binary mask
+   (`label_skl`).  Voxel-space, no anisotropy passed — we keep the
+   skeleton in voxel coordinates so downstream per-voxel quantities
+   line up with the model's grid.
+2. **One per-instance Euclidean distance transform**
+   (`distance_transform_edt(..., return_indices=True)` via cucim on
+   GPU or scipy on CPU) seeded at the instance's skeleton voxels.
+   For every foreground voxel `v` of instance `i` we get both the
+   distance to the nearest skeleton voxel and the coordinates `s*(v)`
+   of that voxel.
+3. **Derive all four targets** from the per-voxel `(s*(v), v)` pair:
+   - `dir(v) = (s*(v) − v) / ||s*(v) − v||` (unit centripetal vector;
+     zero at skeleton voxels themselves).
+   - `rad(v) = ||s*(v) − v||`, per-instance-normalised to `[0, 1]` by
+     default (controlled by `data.radius_normalize`).
+   - `cov(v) = M_{s*(v)}` — the upper-tri of the Voronoi-cell
+     2nd-moment matrix at the nearest skeleton vertex, centered at
+     the vertex.  Cells with `population < 2` carry the zero matrix.
+     Trace-normalised by default.
+
+The per-voxel **reconstruction identity** `rad(v) * dir(v) ==
+(s*(v) − v) / R_i` holds by construction in both normalisation modes
+and doubles as a unit test for the pipeline (see
+`tests/test_skeleton_transform.py::test_rad_times_dir_recovers_offset`).
+
+Eigendecomposing the Voronoi-cell covariance gives the geometric
+interpretation of `cov`: for a roughly cylindrical neurite segment of
+local radius `r` and inter-vertex spacing `Δℓ`, eigenvalues are
+approximately `(r², r², Δℓ²)` with the **tangent** as the **smallest**
+eigenvector (the Voronoi cell is "wide" across the cross-section and
+"narrow" along the centerline because the next vertex's cell bounds
+it).  At branch points and somas the cell deviates from rank-1 in a
+way the 6-channel head can express.
+
+### 1.7 Freeze flags → what actually moves
 
 | Flag                       | Target module(s)                                    | Effect when `True` |
 |----------------------------|-----------------------------------------------------|--------------------|
@@ -171,7 +215,7 @@ the natural ControlNet pattern, and what NVIDIA's own training recipe uses.
 The phased-schedule machinery lives in
 `brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start`.
 
-### 1.7 Default parameter budget (snemi3d / combine recipes)
+### 1.8 Default parameter budget (snemi3d / combine recipes)
 
 With `configs/snemi3d.yaml` (inherited by `configs/combine.yaml`):
 `freeze_vae_encoder: true`, **`freeze_dit_backbone: true`**,
@@ -200,7 +244,7 @@ The `_fallback_down` module (`brainbow/modules/cosmos_transfer_2_5/base.py`:
 73-74) is only active when no HF VAE is loaded — in the pretrained path it is
 frozen and contributes zero trainable params.
 
-### 1.8 Practical training implications
+### 1.9 Practical training implications
 
 - Default snemi3d trains **~0.31 B params** (ControlNet + heads + decoder
   shim). One forward still runs the full ~2.6 B-param base + control stack,
@@ -251,7 +295,7 @@ upsampling internally.
 | Input (EM)                   | **1**    |
 | `init_filters`               | **64** (default; MONAI pretrained weights require **48**) |
 | Backbone output / head input | **`feature_size` = 64** |
-| `head`                       | `head_channels = 30` = raw(1) + sem(1) + dir(3) + cov(6) + avg(3) + emb(16). |
+| `head`                       | `head_channels = 32` = raw(1) + sem(1) + skl(1) + dir(3) + cov(6) + rad(1) + avg(3) + emb(16). |
 
 ### 2.3 Pretraining
 
@@ -270,7 +314,7 @@ individually if needed via `backbone.requires_grad_(False)` etc.
 
 ### 2.5 Same head as Cosmos
 
-Vista and Cosmos now expose the same unified 30-channel head.  The only
+Vista and Cosmos now expose the same unified 32-channel head.  The only
 difference is the backbone / decoder that produces the feature map before
 the head.
 

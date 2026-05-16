@@ -7,9 +7,9 @@ Provides:
 - Preprocessors for common data formats (TIFF, HDF5, NRRD, NIfTI)
 - Cosmos-Transfer3D model wrapper (DiT + VAE backbone) for volumetric
   segmentation, together with a Vista3D reference implementation
-- A unified 30-channel head supervised by ``CombinedLoss``:
-  raw(1), sem(1), dir(3), cov(6), avg(3), emb(16), plus derived
-  12-direction affinity losses on avg and emb.
+- A unified 32-channel head supervised by ``CombinedLoss``:
+  raw(1), sem(1), skl(1), dir(3), cov(6), rad(1), avg(3), emb(16),
+  plus derived 12-direction affinity losses on avg and emb.
 """
 
 import warnings
