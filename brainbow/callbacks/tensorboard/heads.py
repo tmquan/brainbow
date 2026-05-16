@@ -171,8 +171,16 @@ def _log_predictions(
     # datamodule was built with ``compute_geometry=False``) we skip the
     # panel silently.
     if gt_skl_2d is not None:
+        # Display-only 3x3 dilation: 1-voxel-wide centerlines collapse
+        # to invisibility once TB downscales the panel for the web UI,
+        # so we widen the GT skeleton by one voxel for the visualisation
+        # only.  The underlying ``label_skl`` tensor (and every loss
+        # that consumes it) is unchanged.
         gt_skl = gt_skl_2d.clamp(0.0, 1.0)
-        gt_skl_rgb = repeat(gt_skl, "b 1 h w -> b 3 h w")
+        gt_skl_disp = torch.nn.functional.max_pool2d(
+            gt_skl, kernel_size=3, stride=1, padding=1,
+        )
+        gt_skl_rgb = repeat(gt_skl_disp, "b 1 h w -> b 3 h w")
         tb.add_images(head.tag("true/skl"), gt_skl_rgb, global_step=epoch)
 
     if gt_rad_2d is not None:
