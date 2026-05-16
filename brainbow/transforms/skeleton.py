@@ -19,21 +19,41 @@ transform whose seeds are the instance's skeleton voxels:
   skeleton voxel is ``s_j``.  Trace-normalised by default
   (scale-invariant).  Broadcast to every voxel in the cell.
   Supervised by foreground-only L1 on the head's ``cov`` slot.
-* ``rad`` -- the per-voxel Euclidean distance to the nearest skeleton
-  voxel of the same instance.  Supervised by foreground-only L1 on the
-  head's ``rad`` slot.  Two normalization modes::
+* ``rad`` -- per-voxel ridge field encoding distance to the nearest
+  same-instance skeleton voxel.  Supervised by foreground-only L1 on
+  the head's ``rad`` slot.  Two orthogonal knobs:
 
-    radius_normalize=True   (default): divide each instance's rad
-                                      field by its own max, giving a
-                                      scale-invariant [0, 1] target.
-    radius_normalize=False             : leave in voxel units.
+    radius_normalize=True   (default): divide the per-instance EDT by
+                                      its own max so the field is
+                                      scale-invariant.
+    radius_normalize=False             : keep raw EDT in voxel units.
+
+    radius_invert=True      (default, only honoured when
+                            ``radius_normalize=True``): emit the
+                            **inverted** field ``rad(v) = 1 - dist/R_i``
+                            so the skeleton is the peak (``rad = 1``),
+                            the instance boundary tapers to ``rad ≈ 0``,
+                            and background is also ``0`` -- continuous
+                            across the foreground / background
+                            interface, which is what the foreground-only
+                            L1 actually wants to see.
+    radius_invert=False                 : keep the raw distance field
+                            (skeleton == 0, boundary == 1, background
+                            == 0) -- the legacy behaviour.
+
+In voxel units (``radius_normalize=False``) ``radius_invert`` is
+ignored and the field is always the raw distance, since
+``1 - dist`` only makes sense once you've divided by ``R_i``.
 
 The four fields satisfy the per-voxel reconstruction identity::
 
     rad(v) * dir(v) == s*(v) - v             (un-normalised mode)
-    rad(v) * dir(v) == (s*(v) - v) / R_i     (normalised mode)
+    rad(v) * dir(v) == (s*(v) - v) / R_i     (normalised, invert=False)
 
-which doubles as a unit test for the per-instance pipeline.
+which doubles as a unit test for the per-instance pipeline.  The
+inverted-normalised mode breaks this identity by construction
+(``rad`` is now ``1 - dist/R_i``); in that mode the offset is
+recovered via ``(1 - rad) * R_i * dir``.
 
 Backends
 --------
@@ -325,6 +345,7 @@ def compute_radius_field(
     skl: np.ndarray,
     *,
     normalize: bool = True,
+    invert: bool = True,
 ) -> np.ndarray:
     """Compute the per-voxel distance to the nearest same-instance skeleton.
 
@@ -345,6 +366,13 @@ def compute_radius_field(
             field is divided by its own max so values land in ``[0, 1]``
             per-instance (scale-invariant).  When ``False``, the field
             stays in voxel units.
+        invert: When ``True`` (default) and ``normalize=True``, emit
+            the inverted ridge field ``1 - dist/R_i`` so the skeleton
+            is the peak and the field decays continuously to ``0`` at
+            the instance boundary -- matching the background's ``0``
+            and removing the boundary discontinuity that the legacy
+            distance-from-skeleton field had.  Ignored when
+            ``normalize=False``.
 
     Returns:
         Radius field ``[1, *spatial]`` float32 with the leading channel
@@ -391,6 +419,11 @@ def compute_radius_field(
             max_r = float(inside.max()) if inside.size else 0.0
             if max_r > 1e-8:
                 sub_dist = sub_dist / max_r
+            if invert:
+                # 1 - dist/R_i clipped to [0, 1] -- skeleton == 1,
+                # boundary == 0, background == 0 (continuous across
+                # the foreground / background interface).
+                sub_dist = np.clip(1.0 - sub_dist, 0.0, 1.0)
 
         out_sub = out[(0,) + slices]
         out_sub[sub_m] = sub_dist[sub_m]
@@ -403,6 +436,7 @@ def compute_skeleton_geometry(
     *,
     dust_threshold: int = 0,
     radius_normalize: bool = True,
+    radius_invert: bool = True,
     cov_normalized: bool = True,
 ) -> Dict[str, np.ndarray]:
     """Compute the full skeleton-relative geometry quartet in one pass.
@@ -433,6 +467,11 @@ def compute_skeleton_geometry(
             radius field is divided by its own max so values land in
             ``[0, 1]``.  When ``False`` the field stays in voxel
             units.
+        radius_invert: When ``True`` (default) and ``radius_normalize
+            =True``, emit ``rad = 1 - dist/R_i`` (skeleton-peaked
+            ridge) so background and instance-boundary both sit at 0.
+            See module docstring for the rationale.  Ignored when
+            ``radius_normalize=False``.
         cov_normalized: When ``True`` (default), each Voronoi-cell
             covariance matrix is divided by its trace, making the
             field scale-invariant.
@@ -578,12 +617,17 @@ def compute_skeleton_geometry(
         for k in range(S):
             dir_sub[k][sub_m] = unit[k]
 
-        # ----- rad: per-voxel distance, optionally normalised -----
+        # ----- rad: per-voxel distance, optionally normalised + inverted -----
         rad_fg = mags.astype(np.float32, copy=True)
         if radius_normalize:
             max_r = float(rad_fg.max())
             if max_r > 1e-8:
                 rad_fg = rad_fg / max_r
+            if radius_invert:
+                # Skeleton-peaked ridge: 1 at skeleton, 0 at boundary,
+                # 0 at background -- continuous across fg/bg interface
+                # so the foreground-only L1 isn't fighting a step.
+                rad_fg = np.clip(1.0 - rad_fg, 0.0, 1.0)
         rad_sub = rad_field[(0,) + slices]
         rad_sub[sub_m] = rad_fg
 
@@ -670,6 +714,12 @@ class SkeletonGeometryd(MapTransform):
         radius_normalize: Per-instance-normalise the radius field to
             ``[0, 1]`` (default ``True``).  ``False`` keeps it in voxel
             units.
+        radius_invert: When ``True`` (default) and ``radius_normalize
+            =True``, emit ``1 - dist/R_i`` so the skeleton is the
+            peak (``rad = 1``) and background / boundary are both
+            ``0``.  Removes the boundary discontinuity that the raw
+            distance-from-skeleton field had.  See the module
+            docstring for the full rationale.
         cov_normalized: Trace-normalise each Voronoi-cell covariance
             matrix (default ``True``).
     """
@@ -685,12 +735,14 @@ class SkeletonGeometryd(MapTransform):
         spatial_dims: int = 3,
         dust_threshold: int = 0,
         radius_normalize: bool = True,
+        radius_invert: bool = True,
         cov_normalized: bool = True,
     ) -> None:
         super().__init__(keys)
         self.spatial_dims = int(spatial_dims)
         self.dust_threshold = int(dust_threshold)
         self.radius_normalize = bool(radius_normalize)
+        self.radius_invert = bool(radius_invert)
         self.cov_normalized = bool(cov_normalized)
 
     def __call__(self, data: Dict) -> Dict:
@@ -714,6 +766,7 @@ class SkeletonGeometryd(MapTransform):
                 label_np,
                 dust_threshold=self.dust_threshold,
                 radius_normalize=self.radius_normalize,
+                radius_invert=self.radius_invert,
                 cov_normalized=self.cov_normalized,
             )
 

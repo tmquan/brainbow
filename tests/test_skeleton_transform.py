@@ -249,7 +249,13 @@ class TestComputeRadiusField:
     def test_cylinder_radius_normalized(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Default-normalised radius lives in [0, 1] per-instance."""
+        """Default-normalised + inverted radius lives in [0, 1].
+
+        Under the inverted ridge convention (the default) the
+        skeleton is the peak (``rad = 1``) and the instance boundary
+        decays to ``rad ≈ 0`` -- matching the background's ``0`` so
+        the field is continuous across the fg/bg interface.
+        """
         _force_skimage_backend(monkeypatch)
 
         D, H, W = 16, 32, 32
@@ -260,13 +266,48 @@ class TestComputeRadiusField:
         fg = label > 0
         assert rad.shape == (1, D, H, W)
         assert float(rad.min()) >= 0.0
-        # Per-instance normalisation forces the max inside the
-        # instance to be exactly 1 (the surface voxel furthest from
-        # the skeleton).
+        # Per-instance normalisation + inversion forces the max inside
+        # the instance to be exactly 1 (the skeleton itself).
         assert float(rad[0][fg].max()) == pytest.approx(1.0, abs=1e-5)
-        # And the per-voxel scalar is bounded above by 1 + numerical
-        # slack.
         assert float(rad.max()) <= 1.0 + 1e-5
+
+    def test_inverted_radius_peaks_at_skeleton(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Skeleton voxels carry rad == 1; boundary voxels ≈ 0."""
+        _force_skimage_backend(monkeypatch)
+
+        label = _cylinder_label((16, 32, 32), radius=4)
+        skl = compute_skeleton_field(label)
+        rad = compute_radius_field(label, skl, normalize=True, invert=True)
+
+        skel_mask = skl[0] > 0
+        # The skeleton ridge is at the peak of the field.
+        np.testing.assert_allclose(
+            rad[0][skel_mask], 1.0, atol=1e-5,
+        )
+        # Background carries 0, just like the un-inverted version --
+        # making the fg/bg interface continuous.
+        bg = label == 0
+        assert float(rad[0][bg].max()) == 0.0
+
+    def test_invert_false_returns_legacy_distance(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``invert=False`` opts back into the legacy distance field
+        (skeleton == 0, boundary == 1)."""
+        _force_skimage_backend(monkeypatch)
+
+        label = _cylinder_label((16, 32, 32), radius=4)
+        skl = compute_skeleton_field(label)
+        rad = compute_radius_field(label, skl, normalize=True, invert=False)
+
+        skel_mask = skl[0] > 0
+        np.testing.assert_allclose(
+            rad[0][skel_mask], 0.0, atol=1e-5,
+        )
+        fg = label > 0
+        assert float(rad[0][fg].max()) == pytest.approx(1.0, abs=1e-5)
 
     def test_radius_zero_outside_instance(
         self, monkeypatch: pytest.MonkeyPatch,
