@@ -30,6 +30,7 @@ override :meth:`_extra_model_kwargs` to add them; the base
 """
 
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -38,6 +39,19 @@ from brainbow.losses import HEAD_CHANNELS
 from brainbow.modules.base import BaseCircuitModule
 
 logger = logging.getLogger(__name__)
+
+# Log level for the per-step non-finite-gradient guard in
+# ``BaseCosmosModule.configure_gradient_clipping``.  Default DEBUG keeps
+# it silent under the usual INFO/WARNING root logger -- bf16-mixed +
+# ``gradient_clip_val=1.0`` triggers a handful of harmless guard fires
+# per run, each previously duplicated across DDP ranks.  Override via
+# ``BRAINBOW_GRAD_GUARD_LOG=warning`` (or ``info`` / ``error``) when
+# investigating loss spikes.
+_GRAD_GUARD_LOG_FN = getattr(
+    logger,
+    os.environ.get("BRAINBOW_GRAD_GUARD_LOG", "debug").lower(),
+    logger.debug,
+)
 
 
 class BaseCosmosModule(BaseCircuitModule):
@@ -148,6 +162,14 @@ class BaseCosmosModule(BaseCircuitModule):
         non-finite batch every gradient is zeroed before the clipper
         runs, so the optimiser sees a no-op step rather than NaN
         weights.
+
+        Non-finite-batch events are emitted at DEBUG level (silent by
+        default) -- the bf16-mixed + ``gradient_clip_val=1.0`` stack
+        triggers a handful per run that are otherwise harmless, and
+        each event was being duplicated per DDP rank.  Raise the
+        ``brainbow.modules.cosmos_2_5_common.base`` logger to DEBUG
+        (or set ``BRAINBOW_GRAD_GUARD_LOG=warning`` -- see
+        :data:`_GRAD_GUARD_LOG_FN`) to surface them again.
         """
         grads = []
         for group in optimizer.param_groups:
@@ -159,7 +181,7 @@ class BaseCosmosModule(BaseCircuitModule):
             norm_stack = torch.stack(norms)
             if not bool(torch.isfinite(norm_stack).all()):
                 torch._foreach_zero_(grads)
-                logger.warning(
+                _GRAD_GUARD_LOG_FN(
                     "Zeroed all %d gradients at step %d (one or more "
                     "non-finite per-tensor norms).",
                     len(grads), self.global_step,
