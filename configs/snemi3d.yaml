@@ -93,9 +93,26 @@ data:
   # ---- Loader & batching ----
   batch_size: 4
   num_workers: 4
-  persistent_workers: true
+  # persistent_workers=false (was true). Lazy datasets in this recipe
+  # ignore MONAI's cache_rate, so workers carry no useful warm state across
+  # epochs; what they DO carry is shmem fragmentation. The previous run
+  # OOM-killed at 2026-05-16 19:02:49 UTC (~11 h in) after one rank's
+  # shmem-RSS drifted to ~24 GB; non-persistent workers free their shmem
+  # segments at epoch end, capping accumulation.
+  persistent_workers: false
   pin_memory: true
-  cache_rate: 0.0                 # 0 = stream from disk; raise if RAM allows
+  # cache_rate=0: LazyVolDataset bypasses MONAI's CacheDataset path
+  # entirely (~0 MB base RAM per rank per the loader log), so the knob is
+  # effectively a no-op here -- kept explicit for clarity.
+  cache_rate: 0.0
+  # prefetch_factor=1 (was 2). Per-rank steady-state shmem budget:
+  #   in-flight batches = num_workers * prefetch_factor
+  # Each batch carries the 13-channel geometry quartet at 80x256x256x4 ~=
+  # 314 MB. 4*1 = 4 batches in flight x 314 MB ~= 1.3 GB/rank, well below
+  # the ~6 GB/rank we saw drifting to OOM. Bump back to 2 if the loader
+  # ever becomes the bottleneck (it isn't right now: geometry transform is
+  # CPU-fast post warmup).
+  prefetch_factor: 1
 
   # ---- Sampling & patch geometry ----
   slice_mode: false               # false = volumetric crops; true = 2-D slices
@@ -256,7 +273,17 @@ model:
   # ``brainbow/modules/cosmos_2_5_common/base.py``;
   # see ``doc/ARCHITECT.md`` for the parameter-budget table.
   freeze_vae_encoder: true
-  freeze_dit_backbone: false          # 5-epoch frozen warm-up, then unfreeze
+  # Why a 1-epoch warm-up here (was ``false``):
+  # On B300/NVL hardware, the very first multi-GPU all-reduce of the full
+  # 2B-param DiT in bf16 has historically tripped an Xid 145 NVLink-SHARP
+  # fault on this node (see scripts/train.py top-of-file NCCL env block for
+  # the post-mortem). Freezing the DiT for epoch 0 means step 0's
+  # all-reduce only covers the heads (~10M params); the fabric warms up on
+  # a small reduction, NCCL pins a stable algorithm, then the DiT unfreezes
+  # at the start of epoch 1 and the big reductions happen on an already-
+  # warm comm path. Bump back to ``false`` once you've confirmed a few
+  # clean DDP runs.
+  freeze_dit_backbone: 1
   freeze_vae_decoder: true
 
   gradient_checkpointing: false
@@ -294,7 +321,13 @@ training:
   #   true             -> "reduce-overhead"  (~1 min compile, good runtime)
   #   "max-autotune"   -> best runtime, but 5-15 min first-run compile
   compile: true
-  compile_fullgraph: true
+  # fullgraph=true forces a single monolithic Inductor compile (multi-minute
+  # stall on the 2B DiT). Under DDP the stall is synchronous across ranks,
+  # and combined with the cold-train-loader first batch (kimimaro + EDT)
+  # routinely overshoots the NCCL heartbeat. fullgraph=false lets compile
+  # proceed incrementally with graph breaks, surrendering ~10 % runtime for
+  # a much shorter first-step and recoverable DDP execution.
+  compile_fullgraph: false
 
   # -------------------------------------------------------------------
   # Validation-time clusterer

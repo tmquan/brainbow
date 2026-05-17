@@ -38,7 +38,58 @@ from __future__ import annotations
 import collections
 import datetime
 import inspect
+import os
 import warnings
+
+
+# NCCL / torch.distributed env vars must be set BEFORE torch.distributed is
+# initialised by Lightning's DDPStrategy. Setting them at module import time
+# (rather than inside ``_install_runtime_patches``) ensures they are in place
+# even when Lightning spawns child processes that re-import this script.
+#
+# Why these values:
+#   * TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC -- the watchdog's "is anyone alive?"
+#     check. Default 480s (8 min). The cold first training batch on this
+#     recipe runs kimimaro + per-instance EDT on 80x256x256 crops with
+#     hundreds of segments (see brainbow/transforms/skeleton.py); on a
+#     fresh forkserver worker that can take 5-10 min before NCCL sees any
+#     collective from that rank. 1800s gives the loader time to warm up
+#     without making real hangs invisible.
+#   * TORCH_NCCL_TRACE_BUFFER_SIZE -- enables the C10D flight recorder so a
+#     post-mortem trace (timeouts, in-flight collectives) is dumped when
+#     the watchdog does fire. Tiny memory cost; huge debugging win.
+#   * TORCH_NCCL_ASYNC_ERROR_HANDLING -- raise a Python exception instead
+#     of SIGABRT when a collective errors, so Lightning's crash-recovery
+#     hook can checkpoint before tearing down.
+os.environ.setdefault("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC", "1800")
+os.environ.setdefault("TORCH_NCCL_TRACE_BUFFER_SIZE", "2048")
+os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+
+# NVLink-fabric hardening on B300 / NVSwitch nodes.
+# Symptom on this node (umb-b300-dp-129, driver 580.x) is an Xid 145
+# `RLW_SRC_TRACK Nonfatal XC1` storm on NVLink lanes 11-15 firing during
+# the very first bf16 all-reduce, which cascades to Xid 45 channel
+# tear-downs and surfaces in Python as
+# `CUDA error: uncorrectable NVLink error detected during the execution`
+# (a.k.a. `cudaErrorNvlinkUncorrectable`). The links themselves are
+# healthy (zero Tx/Rx errors, zero link-recovery events post-mortem); the
+# fault sits on the NVLink-SHARP in-network reduction path that NCCL's
+# auto-tuner chooses for big collectives on first warm-up. Forcing the
+# classical Ring + Simple protocol path side-steps it without measurably
+# hurting steady-state throughput on a single 8-GPU node.
+#   * NCCL_NVLS_ENABLE=0  -- disable NVLink-SHARP / NVLS reductions.
+#   * NCCL_ALGO=Ring       -- avoid NVLSTree / CollNet algorithm choices.
+#   * NCCL_PROTO=Simple    -- avoid LL128 which has tickled the same Xid
+#                              on this driver at the start-of-training
+#                              warm-up burst.
+#   * NCCL_ASYNC_ERROR_HANDLING=1 -- NCCL's own variant of the C10D knob
+#                              above; raise instead of abort on collective
+#                              error so Lightning's crash hook can run.
+# All four are `setdefault` so a user can override them at the shell.
+os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
+os.environ.setdefault("NCCL_ALGO", "Ring")
+os.environ.setdefault("NCCL_PROTO", "Simple")
+os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -411,9 +462,29 @@ def setup_strategy(cfg: DictConfig):
     use_compile = cfg.get("training", {}).get("compile", False)
 
     if strategy_name == "ddp":
+        # 30-min collective timeout matches TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+        # (set at module top). The first training batch on this recipe runs
+        # the full kimimaro + EDT geometry pipeline cold on every rank; the
+        # default 30-min torch.distributed timeout is sometimes shaved down
+        # by Lightning, so we pin it explicitly here.
+        #
+        # ``gradient_as_bucket_view=True`` makes DDP store each bucket as a
+        # view into a single contiguous flat tensor instead of as a freshly-
+        # allocated bf16 buffer per bucket. Two consequences relevant here:
+        #
+        #   * The expandable-segments allocator
+        #     (``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``) keeps the
+        #     bucket storage contiguous in VA space, so the NCCL kernel's
+        #     load/store pattern matches one of the well-tested fast paths
+        #     instead of falling into a misaligned slow path that has tripped
+        #     Xid 145 on this driver.
+        #   * Compile + DDP-with-views used to deadlock on Lightning < 2.2;
+        #     that's been fixed upstream, so the historical
+        #     ``not use_compile`` conditional is no longer needed.
         return DDPStrategy(
             find_unused_parameters=True,
-            gradient_as_bucket_view=not use_compile,
+            gradient_as_bucket_view=True,
+            timeout=datetime.timedelta(minutes=30),
         )
     if strategy_name == "fsdp":
         return FSDPStrategy(
