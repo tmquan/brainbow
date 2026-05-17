@@ -16,8 +16,11 @@
 # range Z = 30-40 nm, XY = 6-8 nm so the three sources are interchangeable.
 #
 # Splits used below:
-#   train : AC4 + neurons cylinder + 10 MICrONS minnie65 crops
-#   val   : AC4 + neurons cylinder + 2  MICrONS minnie65 crops
+#   train : AC4 + 2 neurons cylinders + 10 MICrONS minnie65 crops
+#   val   : AC4 + 2 neurons cylinders + 2  MICrONS minnie65 crops
+#          (the SNEMI3D-family entries overlap with ``train`` -- only
+#          the MICrONS crops are held out; see the ``val_volumes``
+#          comment block below for the rationale)
 #   test  : same as val
 #
 # Quick start
@@ -92,32 +95,38 @@ data:
 
   # ---- Loader & batching ----
   batch_size: 4
-  num_workers: 4
-  # persistent_workers=true. We previously toggled this to false thinking
-  # the 2026-05-16 19:02 OOM came from steady-state shmem accumulation in
-  # PyTorch's worker IPC. That diagnosis was wrong: the actual leak was
-  # ``kimimaro-shm-{dbf,cc-labels}-*`` segments in /dev/shm, caused by
-  # ``parallel=0`` in our kimimaro call (which kimimaro 5.x maps to
-  # ``cpu_count()`` pathos subprocesses, not to "serial"). Non-persistent
-  # workers MADE IT WORSE: every epoch teardown SIGKILL'd in-flight pathos
-  # children, orphaning their shm segments. The transform-side fix
-  # (``parallel=1`` in brainbow/transforms/skeleton.py) closes the leak;
-  # restoring persistent workers keeps worker churn (and thus residual
-  # leak risk from any future un-cleaned subprocess) to a minimum.
+  num_workers: 8
+  # persistent_workers=true.  The earlier ``/dev/shm`` blow-up that
+  # tempted us to disable this was actually a kimimaro pathos leak
+  # (``kimimaro-shm-{dbf,cc-labels}-*`` segments orphaned on worker
+  # SIGKILL when kimimaro 5.x interpreted ``parallel=0`` as "fork
+  # ``cpu_count()`` subprocesses").  The leak is closed at the
+  # transform layer by ``parallel=1`` in
+  # ``brainbow/transforms/skeleton.py::_skeletonize_all_kimimaro``,
+  # which short-circuits kimimaro's parallel code path entirely.  With
+  # that fix in place, persistent workers are the cheaper choice:
+  # disabling them re-spawns the forkserver pool every epoch and
+  # re-pays the kimimaro-import / MONAI-setup cost on every restart.
   persistent_workers: true
   pin_memory: true
   # cache_rate=0: LazyVolDataset bypasses MONAI's CacheDataset path
   # entirely (~0 MB base RAM per rank per the loader log), so the knob is
   # effectively a no-op here -- kept explicit for clarity.
   cache_rate: 0.0
-  # prefetch_factor=1 (was 2). Per-rank steady-state shmem budget:
-  #   in-flight batches = num_workers * prefetch_factor
-  # Each batch carries the 13-channel geometry quartet at 80x256x256x4 ~=
-  # 314 MB. 4*1 = 4 batches in flight x 314 MB ~= 1.3 GB/rank, well below
-  # the ~6 GB/rank we saw drifting to OOM. Bump back to 2 if the loader
-  # ever becomes the bottleneck (it isn't right now: geometry transform is
-  # CPU-fast post warmup).
-  prefetch_factor: 1
+  # prefetch_factor=2 (PyTorch's documented default for
+  # ``DataLoader``).  Per-rank steady-state in-flight budget:
+  #   in_flight_batches/rank = num_workers * prefetch_factor = 8*2 = 16
+  # Each in-flight item carries the 13-channel geometry quartet
+  # (skl + dir + cov + rad) at 80x256x256 float32 ~= 314 MB, so the
+  # geometry pool tops out near 16 * 314 MB ~= 5 GB/rank -- comfortably
+  # under the ~6 GB/rank ceiling we hit when the kimimaro shm leak
+  # (now fixed in ``brainbow/transforms/skeleton.py``) was also
+  # competing for ``/dev/shm``.  Picking ``2`` over ``1`` keeps one
+  # extra batch queued per worker so a momentarily-slow geometry
+  # transform doesn't stall the GPU step; drop to ``1`` if you need to
+  # claw back a few GB/rank and the loader is no longer the
+  # bottleneck.
+  prefetch_factor: 2
 
   # ---- Sampling & patch geometry ----
   slice_mode: false               # false = volumetric crops; true = 2-D slices
@@ -202,7 +211,18 @@ data:
       root: data/MICRONS
 
   # -------------------------------------------------------------------
-  # Val / test volumes  (same set; held out from train)
+  # Val / test volumes
+  # -------------------------------------------------------------------
+  # ``val_volumes`` and ``test_volumes`` are the same list (anchored
+  # via ``&eval_volumes`` / ``*eval_volumes`` below).  Only the two
+  # MICrONS minnie65 crops are held out from training; the three
+  # SNEMI3D-family entries (AC4 + the two neurons / neurite11
+  # cylinders) are deliberately shared with ``train_volumes`` so the
+  # val-time clusterer / image-logger panels stay anchored to the same
+  # cropped neighbourhoods we see in training (cheap eyeball check
+  # against memorisation -- a healthy run still produces qualitatively
+  # different predictions per crop because each val draw is a fresh
+  # ``RandSpatialCropd`` sample).
   # -------------------------------------------------------------------
   val_volumes: &eval_volumes
     - vol: AC4_inputs
@@ -258,37 +278,37 @@ model:
   feature_size: 64
 
   # What to freeze.  Cosmos-Predict has no ControlNet residual branch
-  # to absorb the trainable load, so leaving the DiT permanently frozen
-  # would mean only the heads + last VAE-decoder up-block train.  The
-  # default below freezes the DiT for a 5-epoch warm-up so the heads
-  # find a reasonable init at ``optimizer.lr``, then unfreezes at
-  # epoch 5 so the much larger DiT param group can adapt to the EM
-  # domain at the smaller ``optimizer.dit_backbone_lr``.  Set to
-  # ``true`` for a heads-only run or ``false`` to train end-to-end
-  # from step 0.
+  # to absorb the trainable load, so leaving the DiT permanently
+  # frozen would mean only the heads + last VAE-decoder up-block
+  # train.  ``freeze_dit_backbone`` is applied **once at construction**
+  # (see ``brainbow/models/cosmos_2_5_common/wrapper_base.py``):
   #
-  # ``freeze_dit_backbone`` accepts:
-  #   true  -> permanently frozen (heads-only training)
-  #   false -> permanently trainable
-  #   N     -> freeze the **entire** DiT during epochs 0 .. N-1, then
-  #            unfreeze at the start of epoch N (optimizer rebuilt so
-  #            the new param group picks up ``optimizer.dit_backbone_lr``).
-  # i.e. the integer is an **epoch count, not a layer count**.  The
-  # phased-schedule machinery lives in
-  # ``brainbow/modules/cosmos_2_5_common/base.py``;
-  # see ``doc/ARCHITECT.md`` for the parameter-budget table.
+  #   true  -> base DiT permanently frozen (heads-only training; only
+  #            ~10M params receive gradients).
+  #   false -> base DiT permanently trainable; the DiT param group
+  #            picks up ``optimizer.dit_backbone_lr`` (10x lower than
+  #            the head ``optimizer.lr``).
+  #
+  # Note: the historical integer-N "freeze for epochs 0..N-1, then
+  # unfreeze" interpretation was removed in the Phase 1 cleanup
+  # (see ``doc/GOTCHAS.md`` items #5 and #27); the per-epoch thaw
+  # branch in ``on_train_epoch_start`` no longer exists.  Non-zero
+  # integers are now silently truthy (treated as ``true``).  See
+  # ``doc/ARCHITECT.md`` for the parameter-budget table.
   freeze_vae_encoder: true
-  # Why a 1-epoch warm-up here (was ``false``):
-  # On B300/NVL hardware, the very first multi-GPU all-reduce of the full
-  # 2B-param DiT in bf16 has historically tripped an Xid 145 NVLink-SHARP
-  # fault on this node (see scripts/train.py top-of-file NCCL env block for
-  # the post-mortem). Freezing the DiT for epoch 0 means step 0's
-  # all-reduce only covers the heads (~10M params); the fabric warms up on
-  # a small reduction, NCCL pins a stable algorithm, then the DiT unfreezes
-  # at the start of epoch 1 and the big reductions happen on an already-
-  # warm comm path. Bump back to ``false`` once you've confirmed a few
-  # clean DDP runs.
-  freeze_dit_backbone: 1
+  # Current value: end-to-end training of the base DiT from step 0.
+  #
+  # Consider flipping to ``true`` (heads-only warm-up) if the very
+  # first multi-GPU all-reduce trips an Xid 145 NVLink-SHARP fault on
+  # this node -- the failure mode that motivated the NCCL env block
+  # at the top of ``scripts/train.py`` (``NCCL_NVLS_ENABLE=0`` +
+  # ``NCCL_ALGO=Ring`` + ``NCCL_PROTO=Simple``).  Freezing the DiT
+  # shrinks the cold first all-reduce from ~2B params to the head
+  # group (~10M params), giving the fabric a small warm-up
+  # collective before the big reductions start; once you have a few
+  # clean DDP runs you can flip back to ``false`` for an end-to-end
+  # fine-tune.
+  freeze_dit_backbone: false
   freeze_vae_decoder: true
 
   gradient_checkpointing: false
@@ -326,13 +346,19 @@ training:
   #   true             -> "reduce-overhead"  (~1 min compile, good runtime)
   #   "max-autotune"   -> best runtime, but 5-15 min first-run compile
   compile: true
-  # fullgraph=true forces a single monolithic Inductor compile (multi-minute
-  # stall on the 2B DiT). Under DDP the stall is synchronous across ranks,
-  # and combined with the cold-train-loader first batch (kimimaro + EDT)
-  # routinely overshoots the NCCL heartbeat. fullgraph=false lets compile
-  # proceed incrementally with graph breaks, surrendering ~10 % runtime for
-  # a much shorter first-step and recoverable DDP execution.
-  compile_fullgraph: false
+  # compile_fullgraph=true forces a single monolithic Inductor compile
+  # of the 2B DiT (no graph breaks), which gives the best steady-state
+  # runtime but pays for it with a multi-minute first-step stall.
+  # Under DDP that stall is synchronous across ranks, and combined
+  # with the cold-train-loader first batch (kimimaro + per-instance
+  # EDT, see ``brainbow/transforms/skeleton.py``) it can overshoot
+  # ``TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC`` -- which is why we already
+  # bump that env var to 1800s in ``scripts/train.py``.  Flip to
+  # ``false`` (the safer default) if the watchdog still fires before
+  # the first step lands: ``false`` lets Inductor compile
+  # incrementally with graph breaks, trading ~10% runtime for a much
+  # shorter first-step.
+  compile_fullgraph: true
 
   # -------------------------------------------------------------------
   # Validation-time clusterer
@@ -344,44 +370,63 @@ training:
   # Choices (in rough order from "pretty early, misleading later" to
   # "honest, neuron-appropriate"):
   #
-  #   soft_meanshift -- differentiable, mode-based.  Over-segments
-  #                     random embeddings, so panels look pretty but
-  #                     misleading before ~2k steps.  [current default]
-  #
-  #   hdbscan        -- density-based, auto-K.  Honest but silent until
-  #                     the embedding actually separates.  Ignores
-  #                     spatial connectivity, so two disconnected cells
-  #                     with similar mean embedding can merge.
-  #
-  #   spatial_cc     -- connected components on the per-voxel
-  #                     embedding-affinity graph (6-connectivity).
-  #                     Respects spatial connectivity, runs at full
-  #                     resolution, and accepts per-axis embedding
-  #                     thresholds (a list instead of a scalar) for
-  #                     anisotropic EM.  On 5:1 Z:XY stacks like
-  #                     SNEMI3D, neurons routinely touch across Z
-  #                     while being distinct cells; a tighter Z entry
+  #   spatial_cc     -- [current default] connected components on the
+  #                     per-voxel embedding-affinity graph
+  #                     (face-connectivity by default).  Respects
+  #                     spatial connectivity, runs at full resolution,
+  #                     and accepts per-axis ``bandwidth`` thresholds
+  #                     (a list instead of a scalar) for anisotropic
+  #                     EM.  On 5:1 Z:XY stacks like SNEMI3D, neurons
+  #                     routinely touch across Z while being distinct
+  #                     cells; a tighter Z entry in ``bandwidth``
   #                     stops them merging through one borderline-
   #                     similar Z neighbour -- the dominant failure
   #                     mode of isotropic spatial_cc / HDBSCAN here.
+  #                     See ``brainbow/inference/clusterer.py``'s
+  #                     :class:`SpatialCCClusterer`.
   #
-  # Backend picker (`backend: auto`) prefers, in order:
+  #   hdbscan        -- density-based, auto-K.  Honest but silent
+  #                     until the embedding actually separates.
+  #                     Ignores spatial connectivity, so two
+  #                     disconnected cells with similar mean
+  #                     embedding can merge.
+  #
+  #   soft_meanshift -- differentiable, mode-based; was the previous
+  #                     default before ``spatial_cc`` landed.
+  #                     Over-segments random embeddings, so panels
+  #                     look pretty but misleading before ~2k steps.
+  #                     Still the only option usable inside the
+  #                     training loop (gradient-preserving).
+  #
+  # ``spatial_cc`` knob semantics (see
+  # ``brainbow/inference/clusterer.py::SpatialCCClusterer``):
+  #   bandwidth         -- scalar or per-axis list; embedding-distance
+  #                        threshold for linking spatial neighbours.
+  #                        When omitted, defaults to ``loss.delta_v``.
+  #   min_cluster_size  -- clusters smaller than this are mapped back
+  #                        to background (applied at full resolution).
+  #   connectivity      -- ``1`` -> face (6-nbr in 3D, 4-nbr in 2D);
+  #                        any other value -> full (26 / 8).
+  #
+  # ``backend`` picker for the connected-components pass
+  # (``backend: auto`` is the default and prefers, in order):
   #   1. self  -- our self-contained CuPy RawKernel union-find
-  #               (Shiloach-Vishkin hook + pointer-jumping). No
-  #               pylibcugraph / cusparse round-trip; faster than 2
-  #               and robust to cuML installs missing pylibcugraph.
-  #   2. cupy  -- cupyx.scipy.sparse.csgraph.connected_components
-  #               (needs pylibcugraph; kept for debugging parity).
-  #   3. scipy -- CPU round-trip.
-  # Force the kernel path with `backend: self` (e.g. for DDP
-  # reproducibility).
+  #               (Shiloach-Vishkin hook + pointer-jumping).  No
+  #               ``pylibcugraph`` dependency; fastest path and the
+  #               option taken on CUDA when ``auto`` is selected.
+  #   2. cupy  -- ``cupyx.scipy.sparse.csgraph.connected_components``
+  #               (needs ``pylibcugraph``; kept for debugging parity).
+  #   3. scipy -- CPU ``scipy.sparse.csgraph`` round-trip; the
+  #               ``auto`` choice when CUDA is unavailable.
+  # Pin to ``backend: self`` (as below) to keep the kernel path
+  # deterministic across cuML installs of varying completeness.
   # -------------------------------------------------------------------
   clusterer:
+    # Previous default (kept for reference; uncomment to roll back):
     # name: soft_meanshift
     # min_cluster_size: 50
     # connectivity: 1               # 1 -> 6-neighbour, else 26-neighbour
     # backend: auto                 # auto -> self on CUDA, scipy on CPU
-    # Alternative config (uncomment to try spatial_cc):
     name: spatial_cc
     backend: self
     min_cluster_size: 50
@@ -402,6 +447,15 @@ optimizer:
   controlnet_lr: 2e-5
                                   # (defaults to ``dit_backbone_lr`` if unset)
   weight_decay: 1.0e-4
+  # Cosine schedule is built in
+  # ``brainbow/modules/base.py::_maybe_wrap_scheduler``: a 2-epoch
+  # LinearLR warm-up (``start_factor=0.01``), then a CosineAnnealingLR
+  # over ``max(T_max - warmup_epochs, 1) = 48`` epochs, stepped per
+  # epoch.  Note ``T_max: 50`` is shorter than ``training.max_epochs:
+  # 101`` -- the LR reaches ``eta_min`` around epoch 50 and stays
+  # pinned there for the remaining ~50 epochs (long low-LR refinement
+  # tail).  If you want the cosine to extend across the whole run,
+  # set ``T_max`` to ``training.max_epochs``.
   scheduler:
     type: cosine_warmup
     warmup_epochs: 2

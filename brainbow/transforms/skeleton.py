@@ -60,10 +60,17 @@ Backends
 Two skeletonization backends are supported and tried in order:
 
 1. ``kimimaro.skeletonize`` -- 3-D TEASAR.  Used when available and the
-   array is 3-D.  Runs single-threaded (``parallel=0``) so it is safe
-   inside MONAI's forked DataLoader workers.  Anisotropy is **not**
-   passed in: we keep the skeleton in voxel coordinates so the rest of
-   the pipeline (per-voxel direction, radius, etc.) stays consistent.
+   array is 3-D.  Runs **single-process** (``parallel=1``, NOT ``0``;
+   see the SHM invariant in :func:`_skeletonize_all_kimimaro` and
+   ``doc/GOTCHAS.md`` items #42-#43) so it is safe inside MONAI's
+   ``forkserver`` DataLoader workers.  ``parallel=0`` would be a
+   ``/dev/shm`` leak vector: kimimaro 5.x interprets that as "fork
+   ``cpu_count()`` pathos subprocesses", each of which mmaps two
+   POSIX named-shm segments that only get unlinked on a clean exit.
+   ``parallel=1`` short-circuits that branch entirely.  Anisotropy is
+   **not** passed in: we keep the skeleton in voxel coordinates so
+   the rest of the pipeline (per-voxel direction, radius, etc.) stays
+   consistent.
 2. ``skimage.morphology.skeletonize`` -- pure-CPU, works in both 2-D and
    3-D.  Used as the fallback when kimimaro is unavailable, or for 2-D
    slice-mode inputs where kimimaro is not applicable.

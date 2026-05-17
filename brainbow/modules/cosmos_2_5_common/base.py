@@ -10,8 +10,11 @@ this module adds:
 * static freeze of the VAE encoder, DiT backbone and VAE decoder
   applied once at construction via the model wrapper's ``freeze_*``
   kwargs
-* NaN/Inf gradient zeroing + backbone-specific AdamW learning rate
-* param-group split (backbone vs ControlNet vs heads) in
+* fused-norm NaN/Inf gradient guard (one device->host sync per step
+  via :func:`torch._foreach_norm` rather than one per parameter --
+  see :meth:`BaseCosmosModule.configure_gradient_clipping`)
+* backbone-specific AdamW learning rate and param-group split
+  (backbone vs ControlNet vs heads) in
   :meth:`configure_optimizers` -- the ``model.controlnet.*`` group
   is naturally empty for backbones without a ControlNet branch
   (e.g. Cosmos-Predict) and is filtered out before AdamW sees it.
@@ -124,18 +127,43 @@ class BaseCosmosModule(BaseCircuitModule):
     def configure_gradient_clipping(
         self, optimizer, gradient_clip_val=None, gradient_clip_algorithm=None,
     ) -> None:
-        """Zero NaN/Inf gradients before clipping so bad batches don't poison weights."""
-        bad = 0
+        """Zero every gradient when any is non-finite, then clip.
+
+        Hot-path version of the previous per-parameter scan (which
+        called ``p.grad.isnan().any()`` and ``.isinf().any()`` on every
+        parameter and forced one device->host sync per call -- O(P) in
+        the 2 B-param DiT, ~thousands of syncs per step).  The new path
+        builds the gradient list once, computes a fused stack of
+        per-tensor L2 norms with ``torch._foreach_norm`` (single fused
+        kernel over all tensors), and bails out only when
+        ``torch.isfinite(norm_stack).all()`` is False -- one scalar
+        sync per step instead of O(P).
+
+        On a clean step the cost is one ``_foreach_norm`` call plus a
+        single ``isfinite`` reduction + bool cast (a few microseconds);
+        on a bad step we additionally zero every gradient with
+        ``_foreach_zero_``, which is itself a fused kernel.
+
+        Behaviour is otherwise identical to the previous path: on a
+        non-finite batch every gradient is zeroed before the clipper
+        runs, so the optimiser sees a no-op step rather than NaN
+        weights.
+        """
+        grads = []
         for group in optimizer.param_groups:
             for p in group["params"]:
-                if p.grad is not None and (p.grad.isnan().any() or p.grad.isinf().any()):
-                    p.grad.zero_()
-                    bad += 1
-        if bad:
-            logger.warning(
-                "Zeroed NaN/Inf gradients in %d parameters at step %d.",
-                bad, self.global_step,
-            )
+                if p.grad is not None:
+                    grads.append(p.grad)
+        if grads:
+            norms = torch._foreach_norm(grads)
+            norm_stack = torch.stack(norms)
+            if not bool(torch.isfinite(norm_stack).all()):
+                torch._foreach_zero_(grads)
+                logger.warning(
+                    "Zeroed all %d gradients at step %d (one or more "
+                    "non-finite per-tensor norms).",
+                    len(grads), self.global_step,
+                )
         self.clip_gradients(
             optimizer,
             gradient_clip_val=gradient_clip_val,

@@ -32,6 +32,27 @@ defaults:
 experiment_name: combine
 project_name: brainbow
 
+
+# ---------------------------------------------------------------------
+# Training overrides
+# ---------------------------------------------------------------------
+training:
+  # ``compile_fullgraph: false`` overrides the snemi3d.yaml default of
+  # ``true``.  Combine has 11 train volumes (neurons cylinder + 10
+  # MICrONS minnie65 crops) versus snemi3d's 3, so the cold first
+  # batch on every rank pays a heavier kimimaro + per-instance EDT
+  # bill (the lazy reader has more volumes to probe; MICrONS crops
+  # are 4096x4096x800 with denser instance counts).  Combined with
+  # the synchronous DDP first-step compile stall, ``true`` here can
+  # overshoot ``TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC`` even with the
+  # 1800 s bump in ``scripts/train.py``.  ``false`` lets Inductor
+  # break the graph at problem ops, trading ~10 percent steady-state
+  # runtime for a much shorter first-step landing -- the safer
+  # DDP-heartbeat choice the snemi3d.yaml comment block flags.  Flip
+  # back to ``true`` once you have a clean run on this hardware and
+  # want the last bit of throughput.
+  compile_fullgraph: false
+
 # Post-processing override: SNEMI3D + MICrONS are both ~5:1 anisotropic
 # (30-40 nm Z, 6-8 nm XY).  Neurons routinely touch across Z slices
 # while being genuinely distinct cells (by design of the dataset), so

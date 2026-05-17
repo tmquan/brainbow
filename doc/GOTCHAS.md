@@ -941,7 +941,7 @@ batched path.
 
 ---
 
-## kimimaro skeletonization runs inside DataLoader workers (CPU only)
+## 42. kimimaro skeletonization runs inside DataLoader workers (CPU only)
 
 **Symptom (debugging mode).** With `data.num_workers: 0`, every
 training step blocks for ~100 ms on the main process while
@@ -952,12 +952,16 @@ Euclidean distance transform.  Throughput is much lower than expected.
 [`brainbow/transforms/skeleton.py`](../brainbow/transforms/skeleton.py)
 inside :class:`SkeletonGeometryd` and :func:`compute_skeleton_geometry`.
 
-**Why.**  kimimaro is CPU-only and we call it with `parallel=0` so it
-stays single-threaded under MONAI's `forkserver` DataLoader workers
-(any `parallel>0` would fork-bomb when MONAI itself forks workers).
-With `num_workers > 0` this cost is hidden by the dataloader prefetch
-queue; with `num_workers: 0` it lands directly on the training loop's
-critical path.
+**Why.**  kimimaro is CPU-only and we call it with `parallel=1` (NOT
+`0`) so it stays single-threaded under MONAI's `forkserver` DataLoader
+workers.  kimimaro 5.x interprets `parallel <= 0` as "fork
+`cpu_count()` subprocesses" via pathos, each backed by named POSIX
+shm segments `kimimaro-shm-{dbf,cc-labels}-*` (see entry #43 below
+for the original `/dev/shm` blow-up).  `parallel=1` short-circuits
+that branch entirely.  With `num_workers > 0` the per-crop kimimaro
+cost is hidden by the dataloader prefetch queue; with
+`num_workers: 0` it lands directly on the training loop's critical
+path.
 
 **Remediation.**
 - For real training, leave `data.num_workers >= 4` so kimimaro overlaps
@@ -976,3 +980,61 @@ transform silently downgrades to
 `skimage.morphology.skeletonize` per instance.  Topology is preserved
 but the centerline can be 1-2 voxels off where the two algorithms
 disagree (most prominent at branch points).
+
+---
+
+## 43. `/dev/shm` invariant: kimimaro must run with `parallel=1`
+
+**Symptom (historical -- 2026-05-17 04:26:50).**  The user session was
+OOM-killed after a multi-day combine.yaml run; `/dev/shm` was
+filled with ~50 k orphaned `kimimaro-shm-{dbf,cc-labels}-*` POSIX
+named-shm segments totalling ~984 GB.  Every DataLoader worker
+restart leaked another ~2 segments per crop.
+
+**Where.**
+[`brainbow/transforms/skeleton.py::_skeletonize_all_kimimaro`](../brainbow/transforms/skeleton.py)
+-- the multi-label kimimaro call inside MONAI's `forkserver`
+DataLoader workers.
+
+**Why.** kimimaro 5.x maps `parallel <= 0` to "spawn `cpu_count()`
+pathos subprocesses" (see `kimimaro/intake.py` ~line 195).  Each
+pathos child mmaps two named POSIX shm segments for its
+distance-field and CC-labels scratch space.  Those segments are
+only `shm_unlink()`-ed on the success / SIGINT / SIGTERM paths of
+the **parent** kimimaro call.  Under MONAI's `forkserver` workers,
+abnormal exits are common (DataLoader tear-down, SIGKILL from
+systemd, unhandled exceptions in `compute_skeleton_geometry`, etc.)
+and orphan the segments in `/dev/shm`, where nothing else cleans
+them up.  At 8 workers x ~2 leaks/crop x 16 000 crops/epoch, a single
+overnight run can fill a 1 TB `tmpfs`.
+
+**Invariant.** Brainbow's `forkserver`-based DataLoader workers
+**must not** spawn additional pathos / multiprocessing pools.  The
+single source of truth is
+`brainbow/transforms/skeleton.py::_skeletonize_all_kimimaro`, which
+hard-codes `parallel=1` in the kimimaro call.  Anywhere else that
+intends to parallelise CPU work inside a worker must use
+`np.vectorize` / numpy ufuncs / threadpoolctl-bounded BLAS rather
+than spawning subprocesses.
+
+**Audit checklist (2026-05 sweep).**
+
+| Vector                                     | Current state                               |
+| ------------------------------------------ | ------------------------------------------- |
+| `kimimaro.skeletonize`                     | `parallel=1` (skeleton.py L195) -- safe     |
+| `pathos` / `multiprocessing.Pool`          | not imported anywhere in `brainbow/`        |
+| `multiprocessing.shared_memory`            | not imported anywhere in `brainbow/`        |
+| MONAI `CacheDataset` / `SmartCacheDataset` | not used (lazy path bypasses it; `cache_rate=0` in snemi3d.yaml is a no-op) |
+| `torch.multiprocessing.set_sharing_strategy` | not called -- defaults to `file_descriptor` under `forkserver` |
+| cuPy IPC handles                           | not used; cucim/cupy run only inside the GPU-bound path of `_use_gpu()` |
+| DataLoader `multiprocessing_context`       | `forkserver` (datamodules/base.py L537/550/562) |
+
+**Remediation.** Don't touch `parallel=` in `skeleton.py` without
+re-doing the audit.  If you add a new transform that wants pathos /
+multiprocessing parallelism, gate it behind a check that the worker
+isn't already a forkserver child (e.g. test
+`multiprocessing.parent_process() is None`) -- otherwise you will
+re-create this leak.  And before merging anything that imports
+`pathos` / `multiprocessing.Pool` / `multiprocessing.shared_memory`
+into a hot DataLoader path, run the combine.yaml recipe overnight
+and check `df -h /dev/shm`.
