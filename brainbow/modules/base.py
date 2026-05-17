@@ -391,10 +391,25 @@ class BaseCircuitModule(pl.LightningModule):
         del ins_pred
 
     def _reduce_and_log_accum(self, stage: str) -> None:
-        if not self._eval_accum:
+        # Note: ranks may legitimately accumulate different key sets per epoch
+        # (e.g. _accumulate_instance_metrics early-returns on all-background
+        # batches; conditional loss terms similarly skip insertion). Building
+        # tensors from `sorted(self._eval_accum)` per rank would then create
+        # length-mismatched allreduces and a silent NCCL hang. Union the keys
+        # across ranks first so every rank reduces the same fixed shape; a
+        # rank that never saw key K contributes (0.0, 0.0) -- caught by the
+        # `counts[i] > 0` filter below.
+        if self.trainer.world_size > 1:
+            local_names: List[str] = list(self._eval_accum.keys())
+            gathered: List[List[str]] = [None] * self.trainer.world_size  # type: ignore[list-item]
+            dist.all_gather_object(gathered, local_names)
+            names = sorted({n for sub in gathered for n in sub})
+        else:
+            names = sorted(self._eval_accum)
+
+        if not names:
             return
 
-        names = sorted(self._eval_accum)
         sums = torch.tensor(
             [self._eval_accum[n][0] for n in names], device=self.device,
         )
