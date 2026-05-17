@@ -308,7 +308,7 @@ model:
   # collective before the big reductions start; once you have a few
   # clean DDP runs you can flip back to ``false`` for an end-to-end
   # fine-tune.
-  freeze_dit_backbone: 1
+  freeze_dit_backbone: 2
   freeze_vae_decoder: true
 
   gradient_checkpointing: false
