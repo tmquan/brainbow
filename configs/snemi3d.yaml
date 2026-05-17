@@ -93,13 +93,18 @@ data:
   # ---- Loader & batching ----
   batch_size: 4
   num_workers: 4
-  # persistent_workers=false (was true). Lazy datasets in this recipe
-  # ignore MONAI's cache_rate, so workers carry no useful warm state across
-  # epochs; what they DO carry is shmem fragmentation. The previous run
-  # OOM-killed at 2026-05-16 19:02:49 UTC (~11 h in) after one rank's
-  # shmem-RSS drifted to ~24 GB; non-persistent workers free their shmem
-  # segments at epoch end, capping accumulation.
-  persistent_workers: false
+  # persistent_workers=true. We previously toggled this to false thinking
+  # the 2026-05-16 19:02 OOM came from steady-state shmem accumulation in
+  # PyTorch's worker IPC. That diagnosis was wrong: the actual leak was
+  # ``kimimaro-shm-{dbf,cc-labels}-*`` segments in /dev/shm, caused by
+  # ``parallel=0`` in our kimimaro call (which kimimaro 5.x maps to
+  # ``cpu_count()`` pathos subprocesses, not to "serial"). Non-persistent
+  # workers MADE IT WORSE: every epoch teardown SIGKILL'd in-flight pathos
+  # children, orphaning their shm segments. The transform-side fix
+  # (``parallel=1`` in brainbow/transforms/skeleton.py) closes the leak;
+  # restoring persistent workers keeps worker churn (and thus residual
+  # leak risk from any future un-cleaned subprocess) to a minimum.
+  persistent_workers: true
   pin_memory: true
   # cache_rate=0: LazyVolDataset bypasses MONAI's CacheDataset path
   # entirely (~0 MB base RAM per rank per the loader log), so the knob is

@@ -176,11 +176,23 @@ def _skeletonize_all_kimimaro(
         # Disabling them roughly halves the kimimaro runtime.
         fix_branching=False,
         fix_borders=False,
-        # ``parallel=0`` keeps the skeletonize call single-threaded
-        # (``max(min(0, cpu_count()), 1) == 1``) -- safe under MONAI's
-        # ``forkserver`` DataLoader workers.  Anisotropy intentionally
-        # omitted (we keep the skeleton in voxel coordinates).
-        parallel=0,
+        # IMPORTANT: ``parallel=1`` (NOT 0). kimimaro 5.x interprets
+        # ``parallel <= 0`` as "fork ``cpu_count()`` subprocesses" (see
+        # ``kimimaro/intake.py`` line ~195), which under DataLoader workers
+        # spawns thousands of pathos children, each backed by named POSIX
+        # shm segments ``kimimaro-shm-{dbf,cc-labels}-*``. Those segments
+        # only get unlinked on the success/SIGINT/SIGTERM paths of the
+        # parent; any abnormal exit (DataLoader worker tear-down, SIGKILL
+        # from systemd, an exception in ``compute_skeleton_geometry``, etc.)
+        # orphans them in ``/dev/shm``. Under MONAI's ``forkserver`` workers
+        # this leaks at ~2 segments per crop and rapidly fills the
+        # ``tmpfs``: a previous run accumulated ~50 k segments in /dev/shm
+        # (~984 GB) before OOM-killing the user session at 2026-05-17
+        # 04:26:50. ``parallel=1`` short-circuits the parallel codepath
+        # entirely (line ~198: ``if parallel == 1: ... return``), no shm
+        # ever allocated. Anisotropy intentionally omitted (skeleton stays
+        # in voxel coordinates).
+        parallel=1,
         progress=False,
     )
 
