@@ -487,18 +487,33 @@ loss:
   background: -1
 
   weight_raw:
-    weight: 2.0
+    weight: 1.0
     loss: l1
   weight_sem:
-    weight: 2.0
+    weight: 1.0
     class_weights: [0.1]
     weight_ce: 1.0
     weight_dice: 1.0
-  # Skeleton head supervision.  Dice carries the signal; CE is kept
-  # small because the 1-voxel-wide target is ~99.9% negative.
+  # Skeleton head supervision.  Mirrors ``weight_sem`` above, but with
+  # the imbalance flipped: the 1-voxel-wide skeleton target is
+  # ~99.9% negative (black dominates), so ``class_weights`` is set
+  # **high** to upweight the rare positive -- the opposite direction
+  # from sem's ``[0.1]`` (which downweights the dominant positive).
+  # ``class_weights`` is the ``pos_weight`` of BCE (see
+  # ``brainbow/losses/_common.py::stable_bce_on_probs``); it
+  # multiplies only the ``t == 1`` term.  ``10`` is a conservative
+  # value -- the true ``N_neg / N_pos`` ratio for a 1-voxel
+  # centerline is closer to ``10^3``, but ``pos_weight >> 10`` makes
+  # the BCE gradient very spiky (a handful of skeleton voxels
+  # dominate the batch).  Tune up to ``50`` if recall is still poor
+  # after a few thousand steps, or down to ``3-5`` if the head
+  # produces wide false-positive blobs.  Dice still carries the bulk
+  # of the signal; ``class_weights`` just makes CE informative again
+  # so we can keep ``weight_ce: 1.0``.
   weight_skl:
     weight: 1.0
-    weight_ce: 0.1
+    class_weights: [10.]
+    weight_ce: 1.0
     weight_dice: 1.0
   weight_dir:
     weight: 1.0
@@ -525,12 +540,12 @@ loss:
     normalize_embeddings: false
     max_hard_pairs: 4096
   weight_aff_emb:
-    weight: 2.0
+    weight: 1.0
     weight_ce: 0.0
     weight_dice: 1.0
     tau: 1.0
   weight_aff_avg:
-    weight: 2.0
+    weight: 1.0
     weight_ce: 0.0
     weight_dice: 1.0
     tau: 1.0
