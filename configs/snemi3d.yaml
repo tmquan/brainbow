@@ -525,13 +525,13 @@ loss:
     max_hard_pairs: 4096
   weight_aff_emb:
     weight: 1.0
-    class_weights: [0.1]
+    # class_weights: [0.1]
     weight_ce: 0.0
     weight_dice: 1.0
     tau: 1.0
   weight_aff_avg:
     weight: 1.0
-    class_weights: [0.1]
+    # class_weights: [0.1]
     weight_ce: 0.0
     weight_dice: 1.0
     tau: 1.0
