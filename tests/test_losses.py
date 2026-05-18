@@ -26,7 +26,7 @@ def _sample_batch():
     B, D, H, W = 2, 4, 8, 8
     head = torch.randn(B, HEAD_CHANNELS, D, H, W, requires_grad=True)
     # The wrappers apply sigmoid to the semantic + skeleton channels
-    # before the loss; mimic that here so the BCE/Dice terms see
+    # before the loss; mimic that here so the Dice terms see
     # already-sigmoided probabilities.
     with torch.no_grad():
         head[:, SIGMOID_SLICE] = head[:, SIGMOID_SLICE].sigmoid()
@@ -140,8 +140,6 @@ def test_combined_loss_forward_backward() -> None:
         "loss",
         "loss/raw",
         "loss/sem",
-        "loss/sem/ce",
-        "loss/sem/dice",
         "loss/dir",
         "loss/cov",
         "loss/avg",
@@ -150,11 +148,17 @@ def test_combined_loss_forward_backward() -> None:
         "loss/emb/push",
         "loss/emb/norm",
         "loss/aff_emb",
-        "loss/aff_emb/dice",
         "loss/aff_avg",
-        "loss/aff_avg/dice",
     }
     assert required.issubset(out)
+    # Dice-only heads no longer emit a per-sub-loss breakdown.
+    assert "loss/sem/ce" not in out
+    assert "loss/sem/dice" not in out
+    assert "loss/skl/ce" not in out
+    assert "loss/aff_emb/ce" not in out
+    assert "loss/aff_emb/dice" not in out
+    assert "loss/aff_avg/ce" not in out
+    assert "loss/aff_avg/dice" not in out
     assert torch.isfinite(out["loss"])
     out["loss"].backward()
     assert head.grad is not None

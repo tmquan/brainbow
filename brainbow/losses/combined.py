@@ -14,18 +14,26 @@ Field summary
     field   ch slice    activation   sub-loss             extras
     -----   ---------   ----------   ------------------   ----------------
     raw     [ 0,  1)    linear       L1 / MSE / Smooth-L1 vs the (clipped) input image
-    sem     [ 1,  2)    sigmoid      BCE + Dice           vs (label > 0)
-    skl     [ 2,  3)    sigmoid      BCE + Dice           vs binary skeleton mask
+    sem     [ 1,  2)    sigmoid      Dice                 vs (label > 0)
+    skl     [ 2,  3)    sigmoid      Dice                 vs binary skeleton mask
     dir     [ 3,  6)    linear       L1 / MSE / Smooth-L1 vs skeleton-direction field, fg-only
     cov     [ 6, 12)    linear       L1 / MSE / Smooth-L1 vs upper-triangle Voronoi-cell covariance, fg-only
     rad     [12, 13)    linear       L1 / MSE / Smooth-L1 vs distance-to-skeleton scalar, fg-only
     avg     [13, 16)    linear       L1 / MSE / Smooth-L1 vs normalised centroid (z, y, x), fg-only
-                                     + 12-ch ``aff_avg`` (BCE + Dice on derived face-affinity)
+                                     + 12-ch ``aff_avg`` (Dice on derived face-affinity)
     emb     [16, 32)    linear       discriminative pull / push / norm (centroid-based)
-                                     + 12-ch ``aff_emb`` (BCE + Dice on derived face-affinity)
+                                     + 12-ch ``aff_emb`` (Dice on derived face-affinity)
 
 The two ``aff_*`` paths share the same 12-channel binary aff target
 ``aff_target = label_aff(label, background=self.background)``.
+
+Cross-entropy / BCE was removed for ``sem``, ``skl``, ``aff_emb`` and
+``aff_avg`` in May 2026.  All four are now Dice-only -- the
+``weight_ce``, ``weight_dice`` and ``class_weights`` sub-knobs are
+gone, and a single field-level ``weight`` scales the Dice term.  Dice
+is naturally imbalance-robust on the binary positive class, so
+removing BCE eliminates the per-config ``pos_weight`` / ``weight_ce``
+tuning loop the imbalanced ``skl`` target used to require.
 
 Configuration schema
 --------------------
@@ -34,11 +42,11 @@ Each ``weight_<field>`` argument is either a scalar (only the field
 weight) or a mapping ``{weight: ..., **sub_kwargs}`` whose entries are
 forwarded into the field's sub-loss configuration::
 
-    weight_sem:
-      weight: 1.0          # 0 disables the field entirely
-      weight_ce: 1.0
-      weight_dice: 1.0
-      class_weights: [0.1]
+    weight_sem: 1.0                        # scalar -> {weight: 1.0}
+    weight_skl: { weight: 1.0 }            # explicit mapping (no sub-knobs)
+    weight_aff_emb:
+      weight: 2.0
+      tau: 1.0                             # only aff_* take ``tau`` / ``aff_eps``
 
 A nested mapping that omits ``weight`` defaults to ``weight: 1.0`` --
 a user who wrote a nested block clearly intended to enable the field;
@@ -57,12 +65,12 @@ Output dict
                                            # runs with different weights)
 
 with ``{field}`` ∈ ``{raw, sem, skl, dir, cov, rad, avg, emb, aff_avg,
-aff_emb}`` and ``{sub}`` ∈ ``{ce, dice, pull, push, norm}`` where
-applicable.
+aff_emb}`` and ``{sub}`` ∈ ``{pull, push, norm}`` (only emit by the
+``emb`` head; the Dice-only heads emit only ``loss/{field}``).
 
 The Lightning module prefixes everything with ``{stage}/{mode}/`` so a
-TB tag like ``train/automatic/loss/aff_emb/dice`` sits next to its
-image counterpart ``train/automatic/pred/emb/aff/01_t1`` etc.
+TB tag like ``train/automatic/loss/aff_emb`` sits next to its image
+counterpart ``train/automatic/pred/emb/aff/01_t1`` etc.
 """
 
 from __future__ import annotations
@@ -75,7 +83,6 @@ from einops import rearrange, reduce, repeat
 from monai.losses import DiceLoss
 
 from brainbow.losses._common import (
-    AFF_CHANNELS,
     AVG_SLICE,
     COV_SLICE,
     DIR_SLICE,
@@ -92,7 +99,6 @@ from brainbow.losses._common import (
     regression_loss_fn,
     shift_replicate,
     soft_aff_from_field,
-    stable_bce_on_probs,
 )
 
 
@@ -176,7 +182,9 @@ class CombinedLoss(nn.Module):
             artifact along instance edges that ``background=0``
             otherwise produces.  Pass ``None`` to disable masking
             entirely.
-        ignore_index: label value excluded from the semantic BCE term.
+        ignore_index: label value masked out of the semantic Dice
+            target (voxels with this label contribute ``0`` to both
+            numerator and denominator of the sem Dice term).
     """
 
     num_channels: int = HEAD_CHANNELS
@@ -206,44 +214,27 @@ class CombinedLoss(nn.Module):
         self.loss_raw = canonical_regression_name(raw_kw.pop("loss", "l1"))
         self._raw_fn = regression_loss_fn(self.loss_raw)
 
-        # ----- sem (sigmoid BCE + Dice) -----
+        # ----- sem (sigmoid + Dice) -----
+        # Dice-only since May 2026 -- BCE / CE was removed because Dice
+        # already handles the binary-foreground imbalance and the
+        # ``pos_weight`` / ``class_weights`` tuning loop wasn't paying
+        # for its cognitive overhead.  Field-level ``weight`` is the
+        # only sub-knob.
         self.weight_sem, sem_kw = _split_field(weight_sem)
-        self.sem_weight_ce = float(sem_kw.pop("weight_ce", 1.0))
-        self.sem_weight_dice = float(sem_kw.pop("weight_dice", 1.0))
-        self.sem_class_weights = sem_kw.pop("class_weights", None)
-        if self.sem_class_weights is not None:
-            pw = torch.tensor(
-                list(map(float, self.sem_class_weights)),
-                dtype=torch.float32,
-            ).view(1, -1, 1, 1, 1)
-            self.register_buffer("_sem_pos_weight", pw, persistent=False)
-        else:
-            self._sem_pos_weight = None
         self._sem_dice = DiceLoss(
             sigmoid=False, softmax=False,
             include_background=True, reduction="mean",
             batch=True,
         )
 
-        # ----- skl (sigmoid BCE + Dice on binary skeleton mask) -----
-        # Shares the activation policy and BCE/Dice schema with sem; the
-        # only knob that typically differs is ``weight_ce``, which the
-        # snemi3d config tunes down to ~0.1 because the 1-voxel-wide
-        # skeleton target is heavily negative-dominated.
+        # ----- skl (sigmoid + Dice on binary skeleton mask) -----
+        # Identical schema to sem.  Despite the 1-voxel-wide target
+        # being ~99.9% negative, Dice's normalisation by foreground
+        # volume keeps the gradient informative -- the old
+        # ``weight_ce: 0.1`` knob (which dialled CE down to a small
+        # tie-breaker) was the natural admission that CE was
+        # contributing little here, so it's now gone outright.
         self.weight_skl, skl_kw = _split_field(weight_skl)
-        self.skl_weight_ce = float(skl_kw.pop("weight_ce", 1.0))
-        self.skl_weight_dice = float(skl_kw.pop("weight_dice", 1.0))
-        self.skl_class_weights = skl_kw.pop("class_weights", None)
-        if self.skl_class_weights is not None:
-            pw = torch.tensor(
-                list(map(float, self.skl_class_weights)),
-                dtype=torch.float32,
-            ).view(1, -1, 1, 1, 1)
-            self.register_buffer("_skl_pos_weight", pw, persistent=False)
-        else:
-            self._skl_pos_weight = None
-        # Re-use the same DiceLoss config as sem; both heads consume a
-        # single-channel binary target post-sigmoid.
         self._skl_dice = DiceLoss(
             sigmoid=False, softmax=False,
             include_background=True, reduction="mean",
@@ -277,36 +268,16 @@ class CombinedLoss(nn.Module):
         self.normalize_embeddings = bool(emb_kw.pop("normalize_embeddings", False))
         self.max_hard_pairs = int(emb_kw.pop("max_hard_pairs", 0))
 
-        # ----- aff_emb / aff_avg (BCE + Dice on derived face-aff) -----
+        # ----- aff_emb / aff_avg (Dice on derived face-aff) -----
+        # Dice-only since May 2026.  Each path keeps ``tau`` (the
+        # softness of the ``exp(-tau * L1)`` kernel that turns the
+        # continuous field into a soft 12-channel affinity) and
+        # shares a single ``aff_eps`` for the Dice numerator /
+        # denominator smoothing.
         self.weight_aff_emb, aff_emb_kw = _split_field(weight_aff_emb)
         self.weight_aff_avg, aff_avg_kw = _split_field(weight_aff_avg)
-        # Defaults: BCE off, Dice on -- matches the tested configuration in
-        # the previous boundary-head loss.  Each path can override.
-        self.aff_emb_weight_ce = float(aff_emb_kw.pop("weight_ce", 0.0))
-        self.aff_emb_weight_dice = float(aff_emb_kw.pop("weight_dice", 1.0))
         self.aff_emb_tau = float(aff_emb_kw.pop("tau", 1.0))
-        self.aff_avg_weight_ce = float(aff_avg_kw.pop("weight_ce", 0.0))
-        self.aff_avg_weight_dice = float(aff_avg_kw.pop("weight_dice", 1.0))
         self.aff_avg_tau = float(aff_avg_kw.pop("tau", 1.0))
-        # Optional per-direction class_weights (12 channels) for the BCE
-        # path; broadcastable over [B, 12, D, H, W].
-        for path, kw, attr in (
-            ("aff_emb", aff_emb_kw, "_aff_emb_pos_weight"),
-            ("aff_avg", aff_avg_kw, "_aff_avg_pos_weight"),
-        ):
-            cw = kw.pop("class_weights", None)
-            if cw is not None:
-                if len(cw) != AFF_CHANNELS:
-                    raise ValueError(
-                        f"{path}.class_weights must have length "
-                        f"{AFF_CHANNELS}; got {len(cw)}."
-                    )
-                pw = torch.tensor(
-                    list(map(float, cw)), dtype=torch.float32,
-                ).view(1, AFF_CHANNELS, 1, 1, 1)
-                self.register_buffer(attr, pw, persistent=False)
-            else:
-                setattr(self, attr, None)
         self.aff_eps = float(aff_emb_kw.pop("aff_eps", 1e-5))
         self._aff_dice = DiceLoss(
             sigmoid=False, softmax=False,
@@ -418,62 +389,35 @@ class CombinedLoss(nn.Module):
 
     def _loss_sem(
         self, probs: torch.Tensor, labels: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        """BCE + Dice on the binary semantic head (post-sigmoid).
+    ) -> torch.Tensor:
+        """Dice on the binary semantic head (post-sigmoid).
 
-        Returns a dict ``{loss, ce, dice}`` with un-weighted sub-values.
+        ``probs`` is ``[B, 1, *spatial]`` already-sigmoided
+        predictions; the target is ``(labels > 0)`` masked to ``0``
+        at ``ignore_index`` voxels (so those positions contribute as
+        background and don't pull the prediction toward either class).
         """
         target = rearrange(
             (labels > 0).float(), "b ... -> b 1 ...",
         )
         valid = (labels != self.ignore_index).float()
         valid_mask = rearrange(valid, "b ... -> b 1 ...")
-
-        ce = self._zero(probs.device)
-        if self.sem_weight_ce > 0:
-            per_voxel = stable_bce_on_probs(
-                probs, target, pos_weight=self._sem_pos_weight,
-            )
-            per_voxel = per_voxel * valid_mask.to(per_voxel.dtype)
-            denom = valid_mask.sum().clamp(min=1.0) * per_voxel.shape[1]
-            ce = per_voxel.sum() / denom
-
-        dice = self._zero(probs.device)
-        if self.sem_weight_dice > 0:
-            dice = self._sem_dice(probs, target * valid_mask)
-
-        total = self.sem_weight_ce * ce + self.sem_weight_dice * dice
-        return {"loss": total, "ce": ce, "dice": dice}
+        return self._sem_dice(probs, target * valid_mask)
 
     def _loss_skl(
         self, probs: torch.Tensor, target: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        """BCE + Dice on the binary skeleton head (post-sigmoid).
+    ) -> torch.Tensor:
+        """Dice on the binary skeleton head (post-sigmoid).
 
         Mirrors :meth:`_loss_sem`: ``probs`` are ``[B, 1, *spatial]``
         sigmoided predictions, ``target`` is a ``[B, 1, *spatial]`` or
         ``[B, *spatial]`` binary mask of skeleton voxels (typically
         produced by :class:`SkeletonGeometryd` in the dataloader).
-
-        Returns a dict ``{loss, ce, dice}`` with un-weighted sub-values.
         """
         if target.dim() == probs.dim() - 1:
             target = rearrange(target, "b ... -> b 1 ...")
         target = (target > 0).to(probs.dtype)
-
-        ce = self._zero(probs.device)
-        if self.skl_weight_ce > 0:
-            per_voxel = stable_bce_on_probs(
-                probs, target, pos_weight=self._skl_pos_weight,
-            )
-            ce = per_voxel.mean()
-
-        dice = self._zero(probs.device)
-        if self.skl_weight_dice > 0:
-            dice = self._skl_dice(probs, target)
-
-        total = self.skl_weight_ce * ce + self.skl_weight_dice * dice
-        return {"loss": total, "ce": ce, "dice": dice}
+        return self._skl_dice(probs, target)
 
     def _loss_fg_regression(
         self,
@@ -593,13 +537,10 @@ class CombinedLoss(nn.Module):
         labels: torch.Tensor,
         aff_target: torch.Tensor,
         tau: float,
-        weight_ce: float,
-        weight_dice: float,
-        pos_weight: Optional[torch.Tensor],
         *,
         normalize_field: bool = False,
-    ) -> Dict[str, torch.Tensor]:
-        """Generic 12-channel derived-affinity loss for a continuous field.
+    ) -> torch.Tensor:
+        """Generic 12-channel derived-affinity Dice loss for a continuous field.
 
         Used by both ``aff_emb`` (field = embedding, 16-D) and
         ``aff_avg`` (field = avg, 3-D).  The kernel
@@ -630,21 +571,7 @@ class CombinedLoss(nn.Module):
                 for _, axis, shift in DIRECTIONS
             ], dim=1)                                         # [B, 12, D, H, W]
 
-        ce = self._zero(field.device)
-        if weight_ce > 0:
-            per_voxel = stable_bce_on_probs(
-                aff_pred, aff_t, pos_weight=pos_weight,
-            )
-            per_voxel = per_voxel * pair_mask.to(per_voxel.dtype)
-            denom = pair_mask.sum().clamp(min=1.0)
-            ce = per_voxel.sum() / denom
-
-        dice = self._zero(field.device)
-        if weight_dice > 0:
-            dice = self._aff_dice(aff_pred * pair_mask, aff_t * pair_mask)
-
-        total = weight_ce * ce + weight_dice * dice
-        return {"loss": total, "ce": ce, "dice": dice}
+        return self._aff_dice(aff_pred * pair_mask, aff_t * pair_mask)
 
     # ------------------------------------------------------------------
     # Forward
@@ -733,13 +660,9 @@ class CombinedLoss(nn.Module):
         # sem
         if self.weight_sem > 0:
             sem_pred = head[:, SEM_SLICE]
-            sem = self._loss_sem(sem_pred, labels)
-            out["loss/sem"] = sem["loss"]
-            if self.sem_weight_ce > 0:
-                out["loss/sem/ce"] = sem["ce"]
-            if self.sem_weight_dice > 0:
-                out["loss/sem/dice"] = sem["dice"]
-            total = total + self.weight_sem * sem["loss"]
+            l_sem = self._loss_sem(sem_pred, labels)
+            out["loss/sem"] = l_sem
+            total = total + self.weight_sem * l_sem
 
         # skl
         if self.weight_skl > 0:
@@ -751,12 +674,7 @@ class CombinedLoss(nn.Module):
                 # surface ``label_skl`` whenever ``weight_skl > 0``.
                 l_skl = zero
             else:
-                skl = self._loss_skl(skl_pred, skl_target)
-                l_skl = skl["loss"]
-                if self.skl_weight_ce > 0:
-                    out["loss/skl/ce"] = skl["ce"]
-                if self.skl_weight_dice > 0:
-                    out["loss/skl/dice"] = skl["dice"]
+                l_skl = self._loss_skl(skl_pred, skl_target)
             out["loss/skl"] = l_skl
             total = total + self.weight_skl * l_skl
 
@@ -837,20 +755,13 @@ class CombinedLoss(nn.Module):
                 )
                 cached["aff"] = aff_target
             emb_pred = head[:, EMB_SLICE]
-            ae = self._loss_aff_path(
+            l_ae = self._loss_aff_path(
                 emb_pred, labels, aff_target,
                 tau=self.aff_emb_tau,
-                weight_ce=self.aff_emb_weight_ce,
-                weight_dice=self.aff_emb_weight_dice,
-                pos_weight=self._aff_emb_pos_weight,
                 normalize_field=self.normalize_embeddings,
             )
-            out["loss/aff_emb"] = ae["loss"]
-            if self.aff_emb_weight_ce > 0:
-                out["loss/aff_emb/ce"] = ae["ce"]
-            if self.aff_emb_weight_dice > 0:
-                out["loss/aff_emb/dice"] = ae["dice"]
-            total = total + self.weight_aff_emb * ae["loss"]
+            out["loss/aff_emb"] = l_ae
+            total = total + self.weight_aff_emb * l_ae
 
         if self.weight_aff_avg > 0:
             if aff_target is None:
@@ -859,20 +770,13 @@ class CombinedLoss(nn.Module):
                 )
                 cached["aff"] = aff_target
             avg_pred = head[:, AVG_SLICE]
-            aa = self._loss_aff_path(
+            l_aa = self._loss_aff_path(
                 avg_pred, labels, aff_target,
                 tau=self.aff_avg_tau,
-                weight_ce=self.aff_avg_weight_ce,
-                weight_dice=self.aff_avg_weight_dice,
-                pos_weight=self._aff_avg_pos_weight,
                 normalize_field=False,
             )
-            out["loss/aff_avg"] = aa["loss"]
-            if self.aff_avg_weight_ce > 0:
-                out["loss/aff_avg/ce"] = aa["ce"]
-            if self.aff_avg_weight_dice > 0:
-                out["loss/aff_avg/dice"] = aa["dice"]
-            total = total + self.weight_aff_avg * aa["loss"]
+            out["loss/aff_avg"] = l_aa
+            total = total + self.weight_aff_avg * l_aa
 
         out["loss"] = total
         return out

@@ -113,24 +113,22 @@ optimizer:
 # nested mapping without ``weight:`` defaults to ``weight: 1.0``; set
 # ``weight: 0`` (scalar or nested) to disable a head entirely.
 loss:
-  ignore_index: -100              # semantic label value excluded from BCE
+  ignore_index: -100              # semantic label voxels masked out of sem Dice
   background: -1                  # aff target background mask; -1 = keep every voxel
 
   weight_raw:
     weight: 1.0
     loss: l1
+  # Sigmoid + Dice on the binary foreground head (ch 1).  Dice-only
+  # since May 2026; ``weight`` is the sole sub-knob.
   weight_sem:
     weight: 1.0
-    weight_ce: 1.0
-    weight_dice: 1.0
-  # Binary skeleton mask supervision (head ch 2, sigmoid BCE + Dice).
-  # The 1-voxel-wide target is heavily negative-dominated, so keep
-  # ``weight_ce`` small (e.g. 0.1) and let Dice carry the supervision
-  # when this field is enabled.
+  # Sigmoid + Dice on the 1-voxel-wide skeleton mask (ch 2).  Dice
+  # handles the ~99.9% negative imbalance natively (the BCE branch
+  # this head used to carry was removed -- see ``GOTCHAS.md`` entry
+  # on the May-2026 CE/BCE removal).
   weight_skl:
     weight: 0.0
-    weight_ce: 0.1
-    weight_dice: 1.0
   weight_dir:
     weight: 0.0
     loss: l1
@@ -157,15 +155,14 @@ loss:
     delta_d: 1.5
     normalize_embeddings: false
     max_hard_pairs: 0
+  # Derived 12-channel face-affinity Dice heads.  ``tau`` controls the
+  # softness of the ``exp(-tau * L1)`` kernel that turns the
+  # continuous emb / avg field into a soft affinity score.
   weight_aff_emb:
     weight: 0.0
-    weight_ce: 0.0
-    weight_dice: 1.0
     tau: 1.0
   weight_aff_avg:
     weight: 0.0
-    weight_ce: 0.0
-    weight_dice: 1.0
     tau: 1.0
 
 # Training configuration

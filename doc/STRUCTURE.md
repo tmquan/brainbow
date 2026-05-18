@@ -118,7 +118,7 @@ and the loss targets.  No learnable state.
 
 | File            | Purpose                                                                        |
 | --------------- | ------------------------------------------------------------------------------ |
-| `_common.py`    | Single source of truth for the unified head layout (`raw|sem|skl|dir|cov|rad|avg|emb`), the contiguous `SIGMOID_SLICE` over (sem, skl), `apply_head_activations` helper, 12-direction affinity geometry, slicing helpers, regression/BCE utilities. |
+| `_common.py`    | Single source of truth for the unified head layout (`raw|sem|skl|dir|cov|rad|avg|emb`), the contiguous `SIGMOID_SLICE` over (sem, skl), `apply_head_activations` helper, 12-direction affinity geometry, slicing helpers, regression utilities. The Dice-only sem / skl / aff_* heads consume probabilities directly (post-sigmoid in the wrapper), so there is no longer a BCE helper here. |
 | `combined.py`   | `CombinedLoss` — one monolithic loss over the 32-channel head: raw, sem, skl, dir, cov, rad, avg, emb, derived `aff_avg`, derived `aff_emb`. |
 
 ### `brainbow/metrics/` — per-head eval metrics

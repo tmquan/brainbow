@@ -5,8 +5,8 @@ The Vista-style task head emits a single ``[B, 32, *spatial]`` tensor
 (in 3-D) whose 32 channels carry eight fields::
 
     ch  0       : raw      (1)   linear,  L1 vs raw image intensity
-    ch  1       : sem      (1)   sigmoid, BCE + Dice vs (label > 0)
-    ch  2       : skl      (1)   sigmoid, BCE + Dice vs binary skeleton mask
+    ch  1       : sem      (1)   sigmoid, Dice vs (label > 0)
+    ch  2       : skl      (1)   sigmoid, Dice vs binary skeleton mask
     ch  3 -  5  : dir      (3)   linear,  L1 vs unit skeleton-direction field
     ch  6 - 11  : cov      (6)   linear,  L1 vs upper-triangle Voronoi-cell
                                           local-segment covariance
@@ -79,8 +79,13 @@ Public helpers
 * :func:`canonical_regression_name` / :func:`regression_loss_fn` --
   resolve user-facing names (``mse`` / ``l1`` / ``smooth_l1`` plus
   aliases) to a canonical string or ``F.*`` callable.
-* :func:`stable_bce_on_probs` -- per-voxel BCE on already-sigmoided
-  probabilities, with fp32 log math safe under bf16-mixed autocast.
+
+The (sem, skl) sigmoid block plus the two derived ``aff_*`` paths are
+all Dice-only since May 2026; the previous per-voxel BCE helper
+(``stable_bce_on_probs``) was removed along with the
+``weight_ce`` / ``class_weights`` sub-knobs.  Dice is naturally
+imbalance-robust on a binary positive target, so the BCE term was
+just adding a tuning knob without changing the converged solution.
 """
 
 from __future__ import annotations
@@ -488,47 +493,6 @@ def regression_loss_fn(name: str) -> Callable:
     return _REGRESSION_FNS[canonical_regression_name(name)]
 
 
-# ---------------------------------------------------------------------------
-# Numerically-stable BCE on probabilities (semantic + any other [0, 1] head)
-# ---------------------------------------------------------------------------
-
-def stable_bce_on_probs(
-    probs: torch.Tensor,
-    target: torch.Tensor,
-    *,
-    pos_weight: Optional[torch.Tensor] = None,
-    eps: float = 1e-7,
-) -> torch.Tensor:
-    """Per-voxel binary cross-entropy on **probabilities** (not logits).
-
-    The model wrapper applies a single sigmoid to the semantic channel
-    before the loss sees it, so BCE here consumes ``[0, 1]`` probabilities.
-    The log math runs in fp32 with explicit clamping so ``log(p)`` and
-    ``log(1 - p)`` stay finite under ``bf16-mixed`` autocast (bf16 has
-    only ~3 decimal digits of mantissa near 1, so any ``p > ~0.992``
-    rounds to exactly ``1`` and would otherwise yield ``-inf``).
-
-    Args:
-        probs:      ``[B, C, *spatial]`` already-sigmoided predictions.
-        target:     ``[B, C, *spatial]`` binary target (0 / 1 floats).
-        pos_weight: Optional ``[1, C, 1, ..., 1]`` per-channel positive
-            weight, semantically equivalent to
-            ``BCEWithLogitsLoss(pos_weight=...)`` -- it re-weights only
-            the ``t == 1`` term.
-        eps:        Clamp bound for numerical stability.
-
-    Returns:
-        ``[B, C, *spatial]`` per-voxel BCE.  The caller reduces (mean,
-        masked sum / valid_mask, ...) as it sees fit.
-    """
-    p = probs.float().clamp(eps, 1.0 - eps)
-    t = target.float()
-    if pos_weight is not None:
-        pw = pos_weight.to(p.dtype)
-        return -(pw * t * p.log() + (1.0 - t) * (1.0 - p).log())
-    return -(t * p.log() + (1.0 - t) * (1.0 - p).log())
-
-
 __all__ = [
     # Channel layout
     "CH_RAW", "CH_SEM", "CH_SKL", "CH_DIR", "CH_COV", "CH_RAD",
@@ -546,5 +510,4 @@ __all__ = [
     "soft_aff_from_field",
     "upper_tri_to_matrix",
     "canonical_regression_name", "regression_loss_fn",
-    "stable_bce_on_probs",
 ]

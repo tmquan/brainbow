@@ -5,8 +5,9 @@ fields, all keyed off a single per-instance Euclidean distance
 transform whose seeds are the instance's skeleton voxels:
 
 * ``skl`` -- the 1-voxel-wide centerline ("skeleton"), unioned across
-  instances into a single binary mask.  Supervised by BCE + Dice on
-  the head's ``skl`` slot.
+  instances into a single binary mask.  Supervised by Dice on the
+  head's ``skl`` slot (BCE was dropped in May 2026; see
+  ``doc/GOTCHAS.md`` entry on the CE/BCE removal).
 * ``dir`` -- per-voxel **unit centripetal vector** to the nearest
   same-instance skeleton voxel ``s*(v)``.  Zero at skeleton voxels
   themselves.  Supervised by foreground-only L1 on the head's ``dir``

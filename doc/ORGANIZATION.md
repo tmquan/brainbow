@@ -222,16 +222,19 @@ both live under the same `<field>` subgroup in TB.  Concrete pairs
 
 | image tag                                          | scalar tag(s)                                                          |
 | -------------------------------------------------- | ----------------------------------------------------------------------- |
-| `pred/emb/aff/{01_t1,...,12_r2}`                   | `loss/aff_emb`, `loss/aff_emb/{ce,dice}`                                |
-| `pred/avg/aff/{01_t1,...,12_r2}`                   | `loss/aff_avg`, `loss/aff_avg/{ce,dice}`                                |
+| `pred/emb/aff/{01_t1,...,12_r2}`                   | `loss/aff_emb`                                                          |
+| `pred/avg/aff/{01_t1,...,12_r2}`                   | `loss/aff_avg`                                                          |
 | `pred/dir`, `pred/cov`, `pred/raw`, `pred/avg/val` | `loss/dir`, `loss/cov`, `loss/raw`, `loss/avg`                          |
 | `true/avg/val`, `true/aff/{01_t1,...,12_r2}` (3-D only)| (target side of `loss/avg`, `loss/aff_*`)                           |
 
 This way, when TensorBoard alphabetically sorts tags, each field's
-scalars cluster next to its images — e.g. `train/automatic/loss/aff_emb/dice`
-sits beside `train/automatic/pred/emb/aff/{01_t1,...}`.  The
-per-sub-component scalars let you debug "why is dice high but CE low?"
-without keeping disabled-sub scalars in the TB tree.
+scalars cluster next to its images — e.g. `train/automatic/loss/aff_emb`
+sits beside `train/automatic/pred/emb/aff/{01_t1,...}`.
+
+Note: the previous `loss/{sem,skl,aff_emb,aff_avg}/{ce,dice}`
+sub-component scalars are gone since the May-2026 CE/BCE removal
+(see `GOTCHAS.md` #44).  Only the discriminative `emb` head still
+emits a per-sub-component breakdown (`loss/emb/{pull,push,norm}`).
 
 **Affinity tag ordering.**  Each affinity panel is prefixed with its
 1-based position in `brainbow.losses.DIRECTIONS`, zero-padded to two

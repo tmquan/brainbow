@@ -208,23 +208,25 @@ sequenceDiagram
 
 ### 5.1 Where the unified head comes from
 
-Both wrappers return one tensor, not a dict of four heads:
+Both wrappers return one tensor, not a dict of seven heads:
 
 | Wrapper | Source | Output |
 | ------- | ------ | ------ |
-| Cosmos  | `decoder_adapter.head(decoder_features)` | `[B, 30, D, H, W]` |
-| Vista   | `head(backbone_features)`                | `[B, 30, D, H, W]` |
+| Cosmos  | `decoder_adapter.head(decoder_features)` | `[B, 32, D, H, W]` |
+| Vista   | `head(backbone_features)`                | `[B, 32, D, H, W]` |
 
 Channel layout is owned by `brainbow.losses._common`:
 
-| Field | Slice | Channels | Activation |
-| ----- | ----- | -------- | ---------- |
-| raw | `[0, 1)` | 1 | linear |
-| sem | `[1, 2)` | 1 | sigmoid |
-| dir | `[2, 5)` | 3 | linear |
-| cov | `[5, 11)` | 6 | linear |
-| avg | `[11, 14)` | 3 | linear |
-| emb | `[14, 30)` | 16 | linear |
+| Field | Slice | Channels | Activation | Supervision |
+| ----- | ----- | -------- | ---------- | ----------- |
+| raw | `[0, 1)`  | 1  | linear | L1 / MSE / Smooth-L1 |
+| sem | `[1, 2)`  | 1  | sigmoid | Dice |
+| skl | `[2, 3)`  | 1  | sigmoid | Dice |
+| dir | `[3, 6)`  | 3  | linear | L1 / MSE / Smooth-L1 (fg-only) |
+| cov | `[6, 12)` | 6  | linear | L1 / MSE / Smooth-L1 (fg-only) |
+| rad | `[12, 13)`| 1  | linear | L1 / MSE / Smooth-L1 (fg-only) |
+| avg | `[13, 16)`| 3  | linear | L1 (fg-only) + derived 12-aff Dice |
+| emb | `[16, 32)`| 16 | linear | pull / push / norm + derived 12-aff Dice |
 
 ### 5.2 What `CombinedLoss` returns
 
@@ -235,19 +237,25 @@ whose keys mirror the image-tag layout used by the `ImageLogger`
 ```
 loss                                       # scalar total (we backprop this)
 loss/raw
-loss/sem[/ce|/dice]
+loss/sem
+loss/skl
 loss/dir
 loss/cov
+loss/rad
 loss/avg
 loss/emb[/pull|/push|/norm]
-loss/aff_emb[/ce|/dice]
-loss/aff_avg[/ce|/dice]
+loss/aff_emb
+loss/aff_avg
 ```
 
-So e.g. `loss/aff_emb/dice` accompanies
+The Dice-only heads (sem, skl, aff_emb, aff_avg) emit only the
+field-level total; the prior `loss/{head}/{ce,dice}` breakdown is
+gone since the May-2026 CE/BCE removal (see GOTCHAS entry #44).
+
+So e.g. `loss/aff_emb` accompanies
 `pred/emb/aff/{01_t1,02_b1,03_u1,04_d1,05_l1,06_r1,07_t2,08_b2,09_u2,10_d2,11_l2,12_r2}`,
 both produced from the embedding via `soft_aff_from_field`;
-`loss/aff_avg/dice` pairs with `pred/avg/aff/{...}`.  The 1-based
+`loss/aff_avg` pairs with `pred/avg/aff/{...}`.  The 1-based
 index prefix matches the order of `brainbow.losses.DIRECTIONS` and
 keeps each axis-aligned pair (T/B, U/D, L/R) on consecutive
 panels under TensorBoard's alphabetical tag sort.

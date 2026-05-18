@@ -58,9 +58,16 @@ than calling `main()`.
 
 ## 2. Loss-config schema is silently both flat and nested
 
-**Symptom.** Two YAML files mix `weight_semantic: 0.5` with
-`weight_semantic: { weight: 0.5, dice: 0.3, ce: 0.2 }` and both work,
-but you can't tell which one is in effect from the config alone.
+**Symptom.** Two YAML files mix `weight_sem: 0.5` with
+`weight_sem: { weight: 0.5 }` and both work, but you can't tell which
+one is in effect from the config alone.
+
+Historical note: prior to May 2026 the nested form also accepted
+`weight_ce`, `weight_dice`, and `class_weights` on the sem / skl /
+aff_* heads.  Those keys are now silently dropped (the CE branch was
+removed -- see entry #44).  An old config that still carries them
+will trigger a `CombinedLoss: ignoring unknown weight_sem keys:
+['class_weights', 'weight_ce', 'weight_dice']` warning at construction.
 
 **Where.**
 [`brainbow/losses/combined.py`](../brainbow/losses/combined.py),
@@ -832,28 +839,36 @@ produces nonsense on those channels.
 (field docstrings document the linear regression contract).
 
 **Why.** The previous policy was "sigmoid everywhere we could".  For
-the **classification-supervised** channels (semantic) that's correct
--- BCE and Dice / IoU consume probabilities by construction.  For the
-**regression-supervised** channels (raw, dir, cov, avg) sigmoid + L1
-has a saturation problem: the chain-rule factor through
-``sigmoid'(x) = p(1-p)`` collapses to ~0 whenever the target is near
-``0`` or ``1``, so very dark / very bright voxels get effectively
-zero gradient and the loss stalls.  Moving those heads to linear
-gives the regression loss a constant gradient magnitude (``±1`` for
-L1 everywhere except the kink) and lets the model actually reach the
-extremes.
+the **classification-supervised** channels (semantic, skeleton, and
+the two derived affinities) that's correct -- Dice / IoU consume
+probabilities by construction.  For the **regression-supervised**
+channels (raw, dir, cov, avg) sigmoid + L1 has a saturation problem:
+the chain-rule factor through ``sigmoid'(x) = p(1-p)`` collapses to
+~0 whenever the target is near ``0`` or ``1``, so very dark / very
+bright voxels get effectively zero gradient and the loss stalls.
+Moving those heads to linear gives the regression loss a constant
+gradient magnitude (``±1`` for L1 everywhere except the kink) and
+lets the model actually reach the extremes.
 
-The current rule is **sigmoid only where the loss is BCE / Dice**:
+The current rule is **sigmoid only where the loss is Dice**:
 
 | Field        | Slice         | Supervision     | Activation |
 | ------------ | ------------- | --------------- | ---------- |
 | `raw`        | `[0, 1)`      | L1 / MSE        | linear     |
-| `sem`        | `[1, 2)`      | BCE / Dice      | sigmoid    |
-| `dir`        | `[2, 5)`      | L1 / MSE        | linear     |
-| `cov`        | `[5, 11)`     | L1 / MSE        | linear     |
-| `avg`        | `[11, 14)`    | L1 / MSE        | linear     |
-| `emb`        | `[14, 30)`    | discriminative  | linear     |
-| `aff_avg`/`aff_emb` (derived) | n/a | BCE / Dice | applied internally by `soft_aff_from_field` |
+| `sem`        | `[1, 2)`      | Dice            | sigmoid    |
+| `skl`        | `[2, 3)`      | Dice            | sigmoid    |
+| `dir`        | `[3, 6)`      | L1 / MSE        | linear     |
+| `cov`        | `[6, 12)`     | L1 / MSE        | linear     |
+| `rad`        | `[12, 13)`    | L1 / MSE        | linear     |
+| `avg`        | `[13, 16)`    | L1 / MSE        | linear     |
+| `emb`        | `[16, 32)`    | discriminative  | linear     |
+| `aff_avg`/`aff_emb` (derived) | n/a | Dice | applied internally by `soft_aff_from_field` |
+
+The sem / skl / aff_* heads were BCE + Dice prior to May 2026; the
+BCE half (and the ``weight_ce`` / ``class_weights`` / ``pos_weight``
+sub-knobs) was dropped because Dice alone is naturally robust to
+positive-class imbalance and the extra knob never moved the
+converged solution.  See entry on the May-2026 CE/BCE removal below.
 
 **Remediation.** Old four-head checkpoints can't be loaded under the
 unified head -- train fresh.  Inside the unified head, regression
@@ -884,8 +899,8 @@ shortest path forward.
 | ``InstanceLoss(anchor_to_centroid=..., centroid_scale=...)`` | sinusoidal-encoding centroid anchor; experimental, never enabled in any config |
 | ``InstanceLoss(... semantic_ids=...)`` multi-class branch | no datamodule populated ``semantic_ids``; the loss is single-class only |
 | ``CombinedLoss(... learned_task_weights=True)``          | Kendall-Gal uncertainty weighting; never enabled in any shipped config |
-| ``SemanticLoss(label_smoothing=...)``                    | sigmoid BCE has no native smoothing knob; the param was stored but never used |
-| Flat-form loss config schema (``weight_ce`` at top level, ``boundary_*`` prefix) | nested form (``weight_<head>: { weight: ..., ... }``) is now the only schema |
+| ``SemanticLoss(label_smoothing=...)``                    | sigmoid BCE has no native smoothing knob; the param was stored but never used (and BCE itself is gone -- see May-2026 entry below) |
+| Flat-form loss config schema (``weight_ce`` at top level, ``boundary_*`` prefix) | nested form (``weight_<head>: { weight: ..., ... }``) is the only schema, and ``weight_ce`` / ``weight_dice`` / ``class_weights`` are gone from sem / skl / aff_* entirely (Dice-only since May 2026) |
 | ``data.include_clefts`` / ``data.include_mito``          | placeholders for a multi-channel MICrONS pipeline that was never wired in |
 | Vista ``PointPromptEncoder`` + ``sample_point_prompts`` + ``forward(... point_prompts=...)`` | interactive proofreading was never wired into a training loop; the encoder was added then frozen on every step |
 | ``CosmosTransfer3DWrapper._try_load_raw_checkpoint``     | the dead third loader path that loaded HF safetensors into a ``_StandaloneDiT3D`` (different architecture) -- the `_try_load_diffusers` and `_try_load_cosmos_package` paths cover the production path; if both fail the wrapper now uses the random-init standalone DiT explicitly |
@@ -1038,3 +1053,59 @@ re-create this leak.  And before merging anything that imports
 `pathos` / `multiprocessing.Pool` / `multiprocessing.shared_memory`
 into a hot DataLoader path, run the combine.yaml recipe overnight
 and check `df -h /dev/shm`.
+
+---
+
+## 44. May-2026 CE/BCE removal -- sem / skl / aff_* are Dice-only
+
+**Symptom (post-migration).** Old configs that set `weight_ce`,
+`weight_dice`, or `class_weights` under `weight_sem` / `weight_skl` /
+`weight_aff_emb` / `weight_aff_avg` emit a `CombinedLoss: ignoring
+unknown weight_<head> keys: [...]` warning at construction and the
+sub-knobs have no effect.  TensorBoard tags
+`{stage}/{mode}/loss/sem/ce`, `loss/sem/dice`, `loss/skl/ce`,
+`loss/aff_emb/ce`, `loss/aff_emb/dice`, `loss/aff_avg/ce`,
+`loss/aff_avg/dice` no longer appear; only the field-level
+`loss/{sem,skl,aff_emb,aff_avg}` totals are logged.
+
+**Where.**
+[`brainbow/losses/combined.py`](../brainbow/losses/combined.py)
+(`_loss_sem`, `_loss_skl`, `_loss_aff_path`, the four head blocks
+in `__init__`) and
+[`brainbow/losses/_common.py`](../brainbow/losses/_common.py)
+(removed `stable_bce_on_probs`).
+
+**Why.** Dice is naturally robust to positive-class imbalance on a
+binary target -- its normalisation by foreground volume keeps the
+gradient informative whether the positive class is ~50% (sem) or
+~0.1% (skl) of the voxels.  The historical setup paired Dice with a
+per-voxel BCE term that needed a per-config tuning loop
+(`class_weights` / `pos_weight` to balance the imbalance,
+`weight_ce` to dial CE down so it didn't overwhelm Dice).  Empirically
+the converged solution was driven by Dice with CE acting as a small
+tie-breaker, so the tuning loop wasn't paying for its cognitive
+overhead.  Removing it gives a much simpler schema:
+
+```yaml
+weight_sem: { weight: 2.0 }                 # or scalar: weight_sem: 2.0
+weight_skl: { weight: 1.0 }
+weight_aff_emb: { weight: 2.0, tau: 1.0 }   # tau is the aff kernel softness
+weight_aff_avg: { weight: 2.0, tau: 1.0 }
+```
+
+The dual-head heads (raw, dir, cov, rad, avg) still take `loss:`
+because they have a real choice (`l1` / `mse` / `smooth_l1`); the
+Dice-only heads have no such choice and the schema collapsed
+accordingly.
+
+**Remediation.** Strip `weight_ce`, `weight_dice`, and
+`class_weights` from any local config that overrides these heads.
+`stable_bce_on_probs` was removed from
+`brainbow.losses._common`; if you imported it directly (it was never
+re-exported via `brainbow.losses`), replace it with
+`monai.losses.DiceLoss` on probabilities or with a
+`torch.nn.BCEWithLogitsLoss` on the *pre-sigmoid* head before the
+wrapper's `apply_head_activations` runs.
+
+**See also.** Entry #2 (loss-config schema) and entry #39
+(activation policy) for the broader context.

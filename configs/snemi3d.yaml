@@ -470,17 +470,23 @@ optimizer:
 #
 # Unified channel layout:
 #   raw: ch  0       -> L1 raw reconstruction
-#   sem: ch  1       -> sigmoid BCE + Dice foreground
-#   skl: ch  2       -> sigmoid BCE + Dice binary skeleton
+#   sem: ch  1       -> sigmoid Dice foreground
+#   skl: ch  2       -> sigmoid Dice binary skeleton
 #   dir: ch  3- 5    -> L1 skeleton direction
 #   cov: ch  6-11    -> L1 upper-triangle Voronoi-cell covariance
 #   rad: ch 12       -> L1 distance to nearest skeleton voxel
-#   avg: ch 13-15    -> L1 normalised centroid + derived 12-aff
-#   emb: ch 16-31    -> discriminative embedding + derived 12-aff
+#   avg: ch 13-15    -> L1 normalised centroid + derived 12-aff (Dice)
+#   emb: ch 16-31    -> discriminative embedding + derived 12-aff (Dice)
 #
 # Each weight_<field> mapping has:
 #   - weight: scalar multiplier (0 disables that field/path)
-#   - all other keys: sub-loss knobs for that field.
+#   - all other keys: sub-loss knobs (``loss`` for L1-style heads,
+#     ``tau`` for derived aff heads, ``delta_v`` etc. for ``emb``).
+#
+# The (sem, skl, aff_emb, aff_avg) heads are Dice-only since the May
+# 2026 CE/BCE removal -- ``weight_ce`` and ``class_weights`` are gone,
+# Dice's natural imbalance robustness handles the 1-voxel-wide
+# skeleton mask without a per-config tuning loop.
 # ---------------------------------------------------------------------
 loss:
   ignore_index: -100
@@ -491,14 +497,8 @@ loss:
     loss: l1
   weight_sem:
     weight: 1.0
-    # class_weights: [0.1]
-    weight_ce: 0.0
-    weight_dice: 1.0
   weight_skl:
     weight: 1.0
-    # class_weights: [10.]
-    weight_ce: 0.0
-    weight_dice: 1.0
   weight_dir:
     weight: 1.0
     loss: l1
@@ -523,15 +523,12 @@ loss:
     delta_d: 1.5
     normalize_embeddings: false
     max_hard_pairs: 4096
+  # Derived face-affinity Dice heads.  ``tau`` controls the softness
+  # of the ``exp(-tau * L1)`` kernel that turns the continuous
+  # emb / avg field into a soft 12-channel affinity score.
   weight_aff_emb:
     weight: 1.0
-    # class_weights: [0.1]
-    weight_ce: 0.0
-    weight_dice: 1.0
     tau: 1.0
   weight_aff_avg:
     weight: 1.0
-    # class_weights: [0.1]
-    weight_ce: 0.0
-    weight_dice: 1.0
     tau: 1.0
