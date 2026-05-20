@@ -59,15 +59,18 @@ than calling `main()`.
 ## 2. Loss-config schema is silently both flat and nested
 
 **Symptom.** Two YAML files mix `weight_sem: 0.5` with
-`weight_sem: { weight: 0.5 }` and both work, but you can't tell which
-one is in effect from the config alone.
+`weight_sem: { weight: 0.5, lambda_dice: 1.0, lambda_bce: 1.0,
+lambda_focal: 1.0, gamma: 2.0 }` and both work, but you can't tell
+which one is in effect from the config alone.
 
-Historical note: prior to May 2026 the nested form also accepted
-`weight_ce`, `weight_dice`, and `class_weights` on the sem / skl /
-aff_* heads.  Those keys are now silently dropped (the CE branch was
-removed -- see entry #44).  An old config that still carries them
-will trigger a `CombinedLoss: ignoring unknown weight_sem keys:
-['class_weights', 'weight_ce', 'weight_dice']` warning at construction.
+Historical note: the supervision regime for sem / skl / aff_* has
+churned three times.  Pre-May-2026 took `weight_ce` / `weight_dice` /
+`class_weights`; the brief Dice-only window (entry #44) took only
+`weight`; the present composite-loss regime (entry #45) takes
+`weight` + `lambda_{dice,bce,focal}` + `gamma`.  Any config still
+carrying the old pre-May-2026 keys (`weight_ce`, `class_weights`)
+will trigger a `CombinedLoss: ignoring unknown weight_sem keys: [...]`
+warning at construction.
 
 **Where.**
 [`brainbow/losses/combined.py`](../brainbow/losses/combined.py),
@@ -840,35 +843,39 @@ produces nonsense on those channels.
 
 **Why.** The previous policy was "sigmoid everywhere we could".  For
 the **classification-supervised** channels (semantic, skeleton, and
-the two derived affinities) that's correct -- Dice / IoU consume
-probabilities by construction.  For the **regression-supervised**
-channels (raw, dir, cov, avg) sigmoid + L1 has a saturation problem:
-the chain-rule factor through ``sigmoid'(x) = p(1-p)`` collapses to
-~0 whenever the target is near ``0`` or ``1``, so very dark / very
-bright voxels get effectively zero gradient and the loss stalls.
-Moving those heads to linear gives the regression loss a constant
-gradient magnitude (``±1`` for L1 everywhere except the kink) and
-lets the model actually reach the extremes.
+the two derived affinities) that's correct -- Dice / IoU / BCE on
+probabilities all consume probabilities by construction.  For the
+**regression-supervised** channels (raw, dir, cov, avg) sigmoid + L1
+has a saturation problem: the chain-rule factor through
+``sigmoid'(x) = p(1-p)`` collapses to ~0 whenever the target is near
+``0`` or ``1``, so very dark / very bright voxels get effectively
+zero gradient and the loss stalls.  Moving those heads to linear
+gives the regression loss a constant gradient magnitude (``±1`` for
+L1 everywhere except the kink) and lets the model actually reach the
+extremes.
 
-The current rule is **sigmoid only where the loss is Dice**:
+The current rule is **sigmoid only where the loss is the composite
+``DiceBCEFocalLoss``**:
 
-| Field        | Slice         | Supervision     | Activation |
-| ------------ | ------------- | --------------- | ---------- |
-| `raw`        | `[0, 1)`      | L1 / MSE        | linear     |
-| `sem`        | `[1, 2)`      | Dice            | sigmoid    |
-| `skl`        | `[2, 3)`      | Dice            | sigmoid    |
-| `dir`        | `[3, 6)`      | L1 / MSE        | linear     |
-| `cov`        | `[6, 12)`     | L1 / MSE        | linear     |
-| `rad`        | `[12, 13)`    | L1 / MSE        | linear     |
-| `avg`        | `[13, 16)`    | L1 / MSE        | linear     |
-| `emb`        | `[16, 32)`    | discriminative  | linear     |
-| `aff_avg`/`aff_emb` (derived) | n/a | Dice | applied internally by `soft_aff_from_field` |
+| Field        | Slice         | Supervision                | Activation |
+| ------------ | ------------- | -------------------------- | ---------- |
+| `raw`        | `[0, 1)`      | L1 / MSE                   | linear     |
+| `sem`        | `[1, 2)`      | Dice + BCE + Focal         | sigmoid    |
+| `skl`        | `[2, 3)`      | Dice + BCE + Focal         | sigmoid    |
+| `dir`        | `[3, 6)`      | L1 / MSE                   | linear     |
+| `cov`        | `[6, 12)`     | L1 / MSE                   | linear     |
+| `rad`        | `[12, 13)`    | L1 / MSE                   | linear     |
+| `avg`        | `[13, 16)`    | L1 / MSE                   | linear     |
+| `emb`        | `[16, 32)`    | discriminative             | linear     |
+| `aff_avg`/`aff_emb` (derived) | n/a | Dice + BCE + Focal | applied internally by `soft_aff_from_field` (``exp(-tau * L1) ∈ (0, 1]``) |
 
-The sem / skl / aff_* heads were BCE + Dice prior to May 2026; the
-BCE half (and the ``weight_ce`` / ``class_weights`` / ``pos_weight``
-sub-knobs) was dropped because Dice alone is naturally robust to
-positive-class imbalance and the extra knob never moved the
-converged solution.  See entry on the May-2026 CE/BCE removal below.
+The sem / skl / aff_* heads' supervision has been: BCE + Dice (pre-
+May 2026) → Dice-only (briefly, see entry #44) → Dice + BCE + Focal
+(current; see entry #45 below).  The activation contract (sigmoid /
+``exp(-tau * L1)`` into the loss) has remained constant throughout
+because all three supervision regimes consume probabilities; the
+composite simply adds the BCE and Focal terms back on the same
+``[0, 1]`` inputs that Dice has been seeing all along.
 
 **Remediation.** Old four-head checkpoints can't be loaded under the
 unified head -- train fresh.  Inside the unified head, regression
@@ -899,8 +906,8 @@ shortest path forward.
 | ``InstanceLoss(anchor_to_centroid=..., centroid_scale=...)`` | sinusoidal-encoding centroid anchor; experimental, never enabled in any config |
 | ``InstanceLoss(... semantic_ids=...)`` multi-class branch | no datamodule populated ``semantic_ids``; the loss is single-class only |
 | ``CombinedLoss(... learned_task_weights=True)``          | Kendall-Gal uncertainty weighting; never enabled in any shipped config |
-| ``SemanticLoss(label_smoothing=...)``                    | sigmoid BCE has no native smoothing knob; the param was stored but never used (and BCE itself is gone -- see May-2026 entry below) |
-| Flat-form loss config schema (``weight_ce`` at top level, ``boundary_*`` prefix) | nested form (``weight_<head>: { weight: ..., ... }``) is the only schema, and ``weight_ce`` / ``weight_dice`` / ``class_weights`` are gone from sem / skl / aff_* entirely (Dice-only since May 2026) |
+| ``SemanticLoss(label_smoothing=...)``                    | sigmoid BCE has no native smoothing knob; the param was stored but never used.  BCE itself was briefly dropped (entry #44) then reinstated inside the composite ``DiceBCEFocalLoss`` (entry #45) -- the new ``gamma`` knob plays a similar "soften the per-voxel signal" role to label-smoothing if you set ``gamma > 0`` (default ``2.0``). |
+| Flat-form loss config schema (``weight_ce`` at top level, ``boundary_*`` prefix) | nested form (``weight_<head>: { weight: ..., ... }``) is the only schema; sem / skl / aff_* now take ``lambda_{dice,bce,focal}`` + ``gamma`` (see entry #45).  The legacy ``weight_ce`` / ``weight_dice`` / ``class_weights`` keys are silently dropped with a typo-defence warning. |
 | ``data.include_clefts`` / ``data.include_mito``          | placeholders for a multi-channel MICrONS pipeline that was never wired in |
 | Vista ``PointPromptEncoder`` + ``sample_point_prompts`` + ``forward(... point_prompts=...)`` | interactive proofreading was never wired into a training loop; the encoder was added then frozen on every step |
 | ``CosmosTransfer3DWrapper._try_load_raw_checkpoint``     | the dead third loader path that loaded HF safetensors into a ``_StandaloneDiT3D`` (different architecture) -- the `_try_load_diffusers` and `_try_load_cosmos_package` paths cover the production path; if both fail the wrapper now uses the random-init standalone DiT explicitly |
@@ -1056,56 +1063,110 @@ and check `df -h /dev/shm`.
 
 ---
 
-## 44. May-2026 CE/BCE removal -- sem / skl / aff_* are Dice-only
+## 44. May-2026 brief Dice-only window for sem / skl / aff_* (superseded by #45)
 
-**Symptom (post-migration).** Old configs that set `weight_ce`,
-`weight_dice`, or `class_weights` under `weight_sem` / `weight_skl` /
-`weight_aff_emb` / `weight_aff_avg` emit a `CombinedLoss: ignoring
-unknown weight_<head> keys: [...]` warning at construction and the
-sub-knobs have no effect.  TensorBoard tags
-`{stage}/{mode}/loss/sem/ce`, `loss/sem/dice`, `loss/skl/ce`,
-`loss/aff_emb/ce`, `loss/aff_emb/dice`, `loss/aff_avg/ce`,
-`loss/aff_avg/dice` no longer appear; only the field-level
-`loss/{sem,skl,aff_emb,aff_avg}` totals are logged.
+**Status.**  Reverted by entry #45 (composite ``DiceBCEFocalLoss``)
+within the same release cycle.  This entry is kept for archaeological
+reasons -- the brief Dice-only window is why some intermediate
+configs in version control carry only ``weight_<head>: { weight: N }``
+with no ``lambda_*`` sub-knobs.
+
+**Symptom (during the Dice-only window).** Configs setting
+`weight_ce`, `weight_dice`, or `class_weights` under `weight_sem` /
+`weight_skl` / `weight_aff_emb` / `weight_aff_avg` emitted a
+`CombinedLoss: ignoring unknown weight_<head> keys: [...]` warning,
+and TB tags ``loss/{sem,skl,aff_emb,aff_avg}/{ce,dice}`` disappeared.
+
+**Why we backed out.** Dice alone is imbalance-robust, but the
+gradient through ``DiceLoss`` collapses at saturation (when the head
+predicts ``p ≈ 1`` or ``p ≈ 0``) because ``∂Dice/∂p`` shrinks with
+foreground volume.  On the 1-voxel-wide skeleton target the head
+would saturate early and the per-voxel gradient on positives faded
+faster than we wanted.  Adding BCE back gives the head a constant
+per-voxel signal that survives saturation; adding Focal sharpens
+that signal on the rare hard positives.
+
+**Where the revert lives.**
+[`brainbow/losses/dice_bce_focal.py`](../brainbow/losses/dice_bce_focal.py)
+(``DiceBCEFocalLoss`` -- the composite supervisor),
+[`brainbow/losses/combined.py`](../brainbow/losses/combined.py)
+(``_pop_composite_loss`` + per-head ``_sem_loss`` / ``_skl_loss`` /
+``_aff_emb_loss`` / ``_aff_avg_loss`` instances), and
+[`brainbow/losses/_common.py`](../brainbow/losses/_common.py)
+(reinstated ``stable_bce_on_probs``).
+
+**See also.** Entry #45 (the present supervision regime) and entry
+#39 (activation policy that has been stable across all three
+regimes).
+
+---
+
+## 45. Composite ``DiceBCEFocalLoss`` is the current sem / skl / aff_* supervisor
+
+**Symptom (running configs).** TensorBoard tags for the
+classification-style heads collapse to just ``loss/sem``,
+``loss/skl``, ``loss/aff_emb``, ``loss/aff_avg`` -- no per-sub-term
+``/ce``, ``/dice``, or ``/focal`` breakdown -- even though the
+composite mixes three terms.  The per-head config now takes a
+nested mapping with ``lambda_{dice,bce,focal}`` + ``gamma``.
 
 **Where.**
-[`brainbow/losses/combined.py`](../brainbow/losses/combined.py)
-(`_loss_sem`, `_loss_skl`, `_loss_aff_path`, the four head blocks
-in `__init__`) and
-[`brainbow/losses/_common.py`](../brainbow/losses/_common.py)
-(removed `stable_bce_on_probs`).
+[`brainbow/losses/dice_bce_focal.py`](../brainbow/losses/dice_bce_focal.py)
+defines the composite; ``CombinedLoss`` (in
+[`brainbow/losses/combined.py`](../brainbow/losses/combined.py))
+instantiates one per composite-loss head via the
+``_pop_composite_loss`` helper.  Default schema in
+[`configs/default.yaml`](../configs/default.yaml).
 
-**Why.** Dice is naturally robust to positive-class imbalance on a
-binary target -- its normalisation by foreground volume keeps the
-gradient informative whether the positive class is ~50% (sem) or
-~0.1% (skl) of the voxels.  The historical setup paired Dice with a
-per-voxel BCE term that needed a per-config tuning loop
-(`class_weights` / `pos_weight` to balance the imbalance,
-`weight_ce` to dial CE down so it didn't overwhelm Dice).  Empirically
-the converged solution was driven by Dice with CE acting as a small
-tie-breaker, so the tuning loop wasn't paying for its cognitive
-overhead.  Removing it gives a much simpler schema:
+**Why.** Pre-May-2026 the loss was BCE + Dice with a ``pos_weight`` /
+``class_weights`` tuning loop to balance the per-voxel BCE term on
+the imbalanced ``skl`` target (see entry #44 for the brief Dice-only
+interlude).  The present regime keeps Dice's imbalance-robustness,
+brings BCE back without the ``pos_weight`` knob (Focal's
+``(1 - p_t)^gamma`` term handles the imbalance instead), and
+parameterises the mix with three independent lambdas plus the focal
+``gamma``.  Schema::
 
 ```yaml
-weight_sem: { weight: 2.0 }                 # or scalar: weight_sem: 2.0
-weight_skl: { weight: 1.0 }
-weight_aff_emb: { weight: 2.0, tau: 1.0 }   # tau is the aff kernel softness
-weight_aff_avg: { weight: 2.0, tau: 1.0 }
+weight_sem:
+  weight: 1.0
+  lambda_dice: 1.0
+  lambda_bce: 1.0
+  lambda_focal: 1.0
+  gamma: 2.0            # 0 collapses focal back to plain BCE
+weight_aff_emb:
+  weight: 2.0
+  tau: 1.0              # softness of the exp(-tau * L1) aff kernel
+  lambda_dice: 1.0
+  lambda_bce: 1.0
+  lambda_focal: 1.0
+  gamma: 2.0
 ```
 
-The dual-head heads (raw, dir, cov, rad, avg) still take `loss:`
-because they have a real choice (`l1` / `mse` / `smooth_l1`); the
-Dice-only heads have no such choice and the schema collapsed
-accordingly.
+The aff_* paths instantiate their own ``DiceBCEFocalLoss`` so the
+two paths can be tuned independently; ``aff_eps`` under
+``weight_aff_emb`` seeds the shared Dice smoothing default and is
+inherited by ``weight_aff_avg`` unless overridden by per-path
+``smooth_nr`` / ``smooth_dr``.
 
-**Remediation.** Strip `weight_ce`, `weight_dice`, and
-`class_weights` from any local config that overrides these heads.
-`stable_bce_on_probs` was removed from
-`brainbow.losses._common`; if you imported it directly (it was never
-re-exported via `brainbow.losses`), replace it with
-`monai.losses.DiceLoss` on probabilities or with a
-`torch.nn.BCEWithLogitsLoss` on the *pre-sigmoid* head before the
-wrapper's `apply_head_activations` runs.
+**Activation contract (unchanged across all three regimes).** The
+composite expects probabilities -- (sem, skl) arrive post-sigmoid
+via ``apply_head_activations``, and the aff_* paths arrive
+post-``exp(-tau * L1)`` via ``soft_aff_from_field``.  MONAI's
+``DiceCELoss`` / ``FocalLoss`` *can't* be used directly because their
+CE / Focal branches assume logits; we use MONAI's ``DiceLoss(sigmoid=False)``
+for the Dice term and roll the BCE / Focal terms on probabilities
+ourselves (sharing ``stable_bce_on_probs`` for the fp32-clamped log
+math).  See the module docstring on
+``brainbow/losses/dice_bce_focal.py`` for the derivation.
 
-**See also.** Entry #2 (loss-config schema) and entry #39
-(activation policy) for the broader context.
+**Ablations.** Set any ``lambda_*`` to ``0`` to disable that term on
+one head only -- e.g. ``lambda_bce: 0, lambda_focal: 0`` recovers
+Dice-only behaviour for an ablation run without touching the
+sibling heads.  ``gamma: 0`` makes the focal term reduce exactly to
+per-voxel BCE (the focal weight ``(1 - p_t)^0 == 1``); this is
+useful when you want BCE supervision without the focal sharpening.
+
+**See also.** Entry #2 (loss-config schema), entry #44 (the brief
+Dice-only window this regime replaces), entry #39 (activation
+policy).

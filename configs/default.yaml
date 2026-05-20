@@ -113,22 +113,36 @@ optimizer:
 # nested mapping without ``weight:`` defaults to ``weight: 1.0``; set
 # ``weight: 0`` (scalar or nested) to disable a head entirely.
 loss:
-  ignore_index: -100              # semantic label voxels masked out of sem Dice
+  ignore_index: -100              # sem label value masked from composite target
   background: -1                  # aff target background mask; -1 = keep every voxel
 
   weight_raw:
     weight: 1.0
     loss: l1
-  # Sigmoid + Dice on the binary foreground head (ch 1).  Dice-only
-  # since May 2026; ``weight`` is the sole sub-knob.
+  # Sigmoid + composite Dice + BCE + Focal on the binary foreground
+  # head (ch 1).  ``lambda_{dice,bce,focal}`` scale each term inside
+  # ``DiceBCEFocalLoss``; ``gamma`` is the focal focusing parameter
+  # (``gamma=0`` makes Focal collapse to plain BCE).  Set any lambda
+  # to ``0`` to disable that term on this head only (e.g. Dice-only
+  # ablation: ``lambda_bce: 0, lambda_focal: 0``).
   weight_sem:
     weight: 1.0
-  # Sigmoid + Dice on the 1-voxel-wide skeleton mask (ch 2).  Dice
-  # handles the ~99.9% negative imbalance natively (the BCE branch
-  # this head used to carry was removed -- see ``GOTCHAS.md`` entry
-  # on the May-2026 CE/BCE removal).
+    lambda_dice: 1.0
+    lambda_bce: 1.0
+    lambda_focal: 1.0
+    gamma: 2.0
+  # Sigmoid + composite Dice + BCE + Focal on the 1-voxel-wide
+  # skeleton mask (ch 2).  The ~99.9% negative target is handled by
+  # Dice's foreground-volume normalisation; the Focal term sharpens
+  # the gradient on the rare positive voxels.  Tune ``gamma`` upward
+  # (e.g. ``3.0``) if the skeleton head is recall-poor after a few
+  # thousand steps.
   weight_skl:
     weight: 0.0
+    lambda_dice: 1.0
+    lambda_bce: 1.0
+    lambda_focal: 1.0
+    gamma: 2.0
   weight_dir:
     weight: 0.0
     loss: l1
@@ -155,15 +169,27 @@ loss:
     delta_d: 1.5
     normalize_embeddings: false
     max_hard_pairs: 0
-  # Derived 12-channel face-affinity Dice heads.  ``tau`` controls the
-  # softness of the ``exp(-tau * L1)`` kernel that turns the
-  # continuous emb / avg field into a soft affinity score.
+  # Derived 12-channel face-affinity composite heads.  ``tau``
+  # controls the softness of the ``exp(-tau * L1)`` kernel that turns
+  # the continuous emb / avg field into a soft affinity score.  The
+  # composite (Dice + BCE + Focal) lambdas are per-path; ``aff_eps``
+  # under ``weight_aff_emb`` is the shared Dice smoothing default and
+  # also seeds ``weight_aff_avg`` (override per path with explicit
+  # ``smooth_nr`` / ``smooth_dr``).
   weight_aff_emb:
     weight: 0.0
     tau: 1.0
+    lambda_dice: 1.0
+    lambda_bce: 1.0
+    lambda_focal: 1.0
+    gamma: 2.0
   weight_aff_avg:
     weight: 0.0
     tau: 1.0
+    lambda_dice: 1.0
+    lambda_bce: 1.0
+    lambda_focal: 1.0
+    gamma: 2.0
 
 # Training configuration
 training:

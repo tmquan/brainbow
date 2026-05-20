@@ -231,10 +231,14 @@ This way, when TensorBoard alphabetically sorts tags, each field's
 scalars cluster next to its images — e.g. `train/automatic/loss/aff_emb`
 sits beside `train/automatic/pred/emb/aff/{01_t1,...}`.
 
-Note: the previous `loss/{sem,skl,aff_emb,aff_avg}/{ce,dice}`
-sub-component scalars are gone since the May-2026 CE/BCE removal
-(see `GOTCHAS.md` #44).  Only the discriminative `emb` head still
-emits a per-sub-component breakdown (`loss/emb/{pull,push,norm}`).
+Note: the composite-loss heads (sem, skl, aff_emb, aff_avg) emit
+only the field-level total -- their three sub-terms (Dice, BCE,
+Focal) are already weighted-in by ``lambda_{dice,bce,focal}`` inside
+``DiceBCEFocalLoss``, so logging them separately would re-introduce
+the per-config-knob tuning loop the simplification was meant to
+eliminate.  Only the discriminative `emb` head still emits a
+per-sub-component breakdown (`loss/emb/{pull,push,norm}`).  See
+`GOTCHAS.md` entries #44 and #45 for the supervision-regime history.
 
 **Affinity tag ordering.**  Each affinity panel is prefixed with its
 1-based position in `brainbow.losses.DIRECTIONS`, zero-padded to two

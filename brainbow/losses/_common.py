@@ -5,8 +5,8 @@ The Vista-style task head emits a single ``[B, 32, *spatial]`` tensor
 (in 3-D) whose 32 channels carry eight fields::
 
     ch  0       : raw      (1)   linear,  L1 vs raw image intensity
-    ch  1       : sem      (1)   sigmoid, Dice vs (label > 0)
-    ch  2       : skl      (1)   sigmoid, Dice vs binary skeleton mask
+    ch  1       : sem      (1)   sigmoid, Dice + BCE + Focal vs (label > 0)
+    ch  2       : skl      (1)   sigmoid, Dice + BCE + Focal vs binary skeleton mask
     ch  3 -  5  : dir      (3)   linear,  L1 vs unit skeleton-direction field
     ch  6 - 11  : cov      (6)   linear,  L1 vs upper-triangle Voronoi-cell
                                           local-segment covariance
@@ -79,13 +79,13 @@ Public helpers
 * :func:`canonical_regression_name` / :func:`regression_loss_fn` --
   resolve user-facing names (``mse`` / ``l1`` / ``smooth_l1`` plus
   aliases) to a canonical string or ``F.*`` callable.
-
-The (sem, skl) sigmoid block plus the two derived ``aff_*`` paths are
-all Dice-only since May 2026; the previous per-voxel BCE helper
-(``stable_bce_on_probs``) was removed along with the
-``weight_ce`` / ``class_weights`` sub-knobs.  Dice is naturally
-imbalance-robust on a binary positive target, so the BCE term was
-just adding a tuning knob without changing the converged solution.
+* :func:`stable_bce_on_probs` -- per-voxel BCE on already-sigmoided
+  probabilities, with fp32 log math safe under bf16-mixed autocast.
+  Used by the composite Dice + BCE + Focal loss
+  (:class:`brainbow.losses.dice_bce_focal.DiceBCEFocalLoss`) that
+  supervises the sem / skl / aff_* heads on the probability inputs
+  produced by the wrapper-side sigmoid (sem, skl) and the
+  ``exp(-tau * L1)`` kernel (aff_emb, aff_avg).
 """
 
 from __future__ import annotations
@@ -493,6 +493,42 @@ def regression_loss_fn(name: str) -> Callable:
     return _REGRESSION_FNS[canonical_regression_name(name)]
 
 
+# ---------------------------------------------------------------------------
+# Numerically-stable BCE on probabilities
+# ---------------------------------------------------------------------------
+
+def stable_bce_on_probs(
+    probs: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    eps: float = 1e-7,
+) -> torch.Tensor:
+    """Per-voxel binary cross-entropy on **probabilities** (not logits).
+
+    The model wrappers apply a single sigmoid to the (sem, skl)
+    classification block before the loss sees it, and the
+    ``exp(-tau * L1)`` aff kernel produces values already in ``[0, 1]``;
+    BCE here consumes those ``[0, 1]`` probabilities directly.  The
+    log math runs in fp32 with explicit clamping so ``log(p)`` and
+    ``log(1 - p)`` stay finite under ``bf16-mixed`` autocast (bf16 has
+    only ~3 decimal digits of mantissa near 1, so any ``p > ~0.992``
+    rounds to exactly ``1`` and would otherwise yield ``-inf``).
+
+    Args:
+        probs:  ``[B, C, *spatial]`` already-activated predictions in
+            ``[0, 1]``.
+        target: ``[B, C, *spatial]`` binary target (0 / 1 floats).
+        eps:    Clamp bound for numerical stability.
+
+    Returns:
+        ``[B, C, *spatial]`` per-voxel BCE.  The caller reduces (mean,
+        masked sum / valid_mask, ...) as it sees fit.
+    """
+    p = probs.float().clamp(eps, 1.0 - eps)
+    t = target.float()
+    return -(t * p.log() + (1.0 - t) * (1.0 - p).log())
+
+
 __all__ = [
     # Channel layout
     "CH_RAW", "CH_SEM", "CH_SKL", "CH_DIR", "CH_COV", "CH_RAD",
@@ -510,4 +546,5 @@ __all__ = [
     "soft_aff_from_field",
     "upper_tri_to_matrix",
     "canonical_regression_name", "regression_loss_fn",
+    "stable_bce_on_probs",
 ]

@@ -7,13 +7,21 @@ The public loss surface is intentionally small:
   mask, skeleton-relative direction, Voronoi-cell covariance,
   distance-to-skeleton scalar, average-centroid, embedding, and the
   two derived 12-channel affinity paths.
+* :class:`DiceBCEFocalLoss` is the composite Dice + BCE + Focal
+  supervisor used internally by :class:`CombinedLoss` for the
+  (sem, skl, aff_emb, aff_avg) heads -- exposed here so external
+  consumers (eval scripts, ablation notebooks) can instantiate it
+  directly with the same numerics.
 * :mod:`brainbow.losses._common` owns the canonical channel layout,
   the contiguous ``SIGMOID_SLICE`` over the (sem, skl) classification
   block, :func:`apply_head_activations`, the 12-direction affinity
-  convention, field-slicing helpers, and shared numerical utilities.
+  convention, field-slicing helpers, and shared numerical utilities
+  (including :func:`stable_bce_on_probs`, the per-voxel BCE on
+  already-sigmoided probabilities used by the composite loss).
 """
 
 from brainbow.losses.combined import CombinedLoss, build_avg_target
+from brainbow.losses.dice_bce_focal import DiceBCEFocalLoss
 from brainbow.losses._common import (
     AFF_CHANNELS,
     AFF_NAMES,
@@ -32,11 +40,13 @@ from brainbow.losses._common import (
     apply_head_activations,
     slice_head,
     soft_aff_from_field,
+    stable_bce_on_probs,
     upper_tri_to_matrix,
 )
 
 __all__ = [
     "CombinedLoss",
+    "DiceBCEFocalLoss",
     "HEAD_CHANNELS",
     "HEAD_LAYOUT",
     "RAW_SLICE",
@@ -55,5 +65,6 @@ __all__ = [
     "affinity_target",
     "build_avg_target",
     "soft_aff_from_field",
+    "stable_bce_on_probs",
     "upper_tri_to_matrix",
 ]

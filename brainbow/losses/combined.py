@@ -11,29 +11,34 @@ Field summary
 
 ::
 
-    field   ch slice    activation   sub-loss             extras
-    -----   ---------   ----------   ------------------   ----------------
-    raw     [ 0,  1)    linear       L1 / MSE / Smooth-L1 vs the (clipped) input image
-    sem     [ 1,  2)    sigmoid      Dice                 vs (label > 0)
-    skl     [ 2,  3)    sigmoid      Dice                 vs binary skeleton mask
-    dir     [ 3,  6)    linear       L1 / MSE / Smooth-L1 vs skeleton-direction field, fg-only
-    cov     [ 6, 12)    linear       L1 / MSE / Smooth-L1 vs upper-triangle Voronoi-cell covariance, fg-only
-    rad     [12, 13)    linear       L1 / MSE / Smooth-L1 vs distance-to-skeleton scalar, fg-only
-    avg     [13, 16)    linear       L1 / MSE / Smooth-L1 vs normalised centroid (z, y, x), fg-only
-                                     + 12-ch ``aff_avg`` (Dice on derived face-affinity)
-    emb     [16, 32)    linear       discriminative pull / push / norm (centroid-based)
-                                     + 12-ch ``aff_emb`` (Dice on derived face-affinity)
+    field   ch slice    activation   sub-loss                              extras
+    -----   ---------   ----------   -----------------------------------   ----------------
+    raw     [ 0,  1)    linear       L1 / MSE / Smooth-L1                  vs the (clipped) input image
+    sem     [ 1,  2)    sigmoid      Dice + BCE + Focal (DiceBCEFocalLoss) vs (label > 0)
+    skl     [ 2,  3)    sigmoid      Dice + BCE + Focal (DiceBCEFocalLoss) vs binary skeleton mask
+    dir     [ 3,  6)    linear       L1 / MSE / Smooth-L1                  vs skeleton-direction field, fg-only
+    cov     [ 6, 12)    linear       L1 / MSE / Smooth-L1                  vs upper-triangle Voronoi-cell covariance, fg-only
+    rad     [12, 13)    linear       L1 / MSE / Smooth-L1                  vs distance-to-skeleton scalar, fg-only
+    avg     [13, 16)    linear       L1 / MSE / Smooth-L1                  vs normalised centroid (z, y, x), fg-only
+                                     + 12-ch ``aff_avg`` (Dice + BCE + Focal on derived face-affinity)
+    emb     [16, 32)    linear       discriminative pull / push / norm     (centroid-based)
+                                     + 12-ch ``aff_emb`` (Dice + BCE + Focal on derived face-affinity)
 
 The two ``aff_*`` paths share the same 12-channel binary aff target
 ``aff_target = label_aff(label, background=self.background)``.
 
-Cross-entropy / BCE was removed for ``sem``, ``skl``, ``aff_emb`` and
-``aff_avg`` in May 2026.  All four are now Dice-only -- the
-``weight_ce``, ``weight_dice`` and ``class_weights`` sub-knobs are
-gone, and a single field-level ``weight`` scales the Dice term.  Dice
-is naturally imbalance-robust on the binary positive class, so
-removing BCE eliminates the per-config ``pos_weight`` / ``weight_ce``
-tuning loop the imbalanced ``skl`` target used to require.
+Supervision history.  The Dice-only window (May 2026) was reverted
+shortly afterwards in favour of the present
+:class:`brainbow.losses.dice_bce_focal.DiceBCEFocalLoss` composite,
+which scales Dice + BCE + Focal independently via ``lambda_dice``,
+``lambda_bce``, ``lambda_focal`` and a focal ``gamma``.  The composite
+operates on **probabilities** (sem / skl are post-sigmoid by the
+wrapper, aff_* arrive as ``exp(-tau * L1)`` outputs in ``(0, 1]``) so
+MONAI's logit-based ``DiceCELoss`` / ``FocalLoss`` aren't usable
+directly -- Dice goes through MONAI's :class:`monai.losses.DiceLoss`
+on probabilities, BCE / Focal are custom probability-input paths
+sharing :func:`brainbow.losses._common.stable_bce_on_probs` for the
+fp32-clamped log math.
 
 Configuration schema
 --------------------
@@ -42,15 +47,28 @@ Each ``weight_<field>`` argument is either a scalar (only the field
 weight) or a mapping ``{weight: ..., **sub_kwargs}`` whose entries are
 forwarded into the field's sub-loss configuration::
 
-    weight_sem: 1.0                        # scalar -> {weight: 1.0}
-    weight_skl: { weight: 1.0 }            # explicit mapping (no sub-knobs)
+    weight_sem: 1.0                        # scalar -> {weight: 1.0}, all
+                                           # composite-loss lambdas default
+    weight_skl:
+      weight: 1.0
+      lambda_dice: 1.0                     # multiplier on the Dice term
+      lambda_bce: 1.0                      # multiplier on per-voxel BCE
+      lambda_focal: 1.0                    # multiplier on focal-on-probs
+      gamma: 2.0                           # focal focusing parameter
     weight_aff_emb:
       weight: 2.0
-      tau: 1.0                             # only aff_* take ``tau`` / ``aff_eps``
+      tau: 1.0                             # ``soft_aff_from_field`` softness
+      lambda_dice: 1.0
+      lambda_bce: 1.0
+      lambda_focal: 1.0
+      gamma: 2.0
 
 A nested mapping that omits ``weight`` defaults to ``weight: 1.0`` --
 a user who wrote a nested block clearly intended to enable the field;
-silent disablement on a missing key would be a footgun.
+silent disablement on a missing key would be a footgun.  Set any
+``lambda_*`` to ``0`` to disable that term locally (e.g.
+``lambda_bce: 0, lambda_focal: 0`` recovers the Dice-only behaviour
+on that head without touching the others).
 
 Output dict
 -----------
@@ -65,8 +83,11 @@ Output dict
                                            # runs with different weights)
 
 with ``{field}`` ∈ ``{raw, sem, skl, dir, cov, rad, avg, emb, aff_avg,
-aff_emb}`` and ``{sub}`` ∈ ``{pull, push, norm}`` (only emit by the
-``emb`` head; the Dice-only heads emit only ``loss/{field}``).
+aff_emb}`` and ``{sub}`` ∈ ``{pull, push, norm}`` (only emitted by the
+``emb`` head; the composite-loss heads emit only the field-level
+``loss/{field}`` since their three sub-terms are already weighted-in
+by ``lambda_*`` and tracking them separately would re-introduce the
+per-config-knob tuning loop that the Dice-only cleanup eliminated).
 
 The Lightning module prefixes everything with ``{stage}/{mode}/`` so a
 TB tag like ``train/automatic/loss/aff_emb`` sits next to its image
@@ -80,7 +101,6 @@ from typing import Any, Dict, Mapping, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from einops import rearrange, reduce, repeat
-from monai.losses import DiceLoss
 
 from brainbow.losses._common import (
     AVG_SLICE,
@@ -100,6 +120,7 @@ from brainbow.losses._common import (
     shift_replicate,
     soft_aff_from_field,
 )
+from brainbow.losses.dice_bce_focal import DiceBCEFocalLoss
 
 
 HeadConfig = Union[float, int, Mapping[str, Any]]
@@ -117,6 +138,45 @@ def _split_field(cfg: HeadConfig) -> Tuple[float, Dict[str, Any]]:
         d = dict(cfg)
         return float(d.pop("weight", 1.0)), d
     return float(cfg), {}
+
+
+# ---------------------------------------------------------------------------
+# Composite-loss kwarg helper
+# ---------------------------------------------------------------------------
+
+_COMPOSITE_KEYS = (
+    "lambda_dice",
+    "lambda_bce",
+    "lambda_focal",
+    "gamma",
+    "smooth_nr",
+    "smooth_dr",
+)
+
+
+def _pop_composite_loss(
+    kw: Dict[str, Any],
+    *,
+    smooth_default: float = 1e-5,
+) -> DiceBCEFocalLoss:
+    """Pop the :class:`DiceBCEFocalLoss` sub-knobs out of ``kw`` and
+    return the configured composite loss.
+
+    Defaults are sensible for the binary single-channel heads
+    (``sem``, ``skl``) and for the 12-channel ``aff_*`` derived heads;
+    callers can override on a per-head basis from YAML.  Any remaining
+    keys in ``kw`` after this helper runs flow through to the
+    ``weight_<field>``-level unused-kwargs warning at the end of
+    :meth:`CombinedLoss.__init__`.
+    """
+    return DiceBCEFocalLoss(
+        lambda_dice=float(kw.pop("lambda_dice", 1.0)),
+        lambda_bce=float(kw.pop("lambda_bce", 1.0)),
+        lambda_focal=float(kw.pop("lambda_focal", 1.0)),
+        gamma=float(kw.pop("gamma", 2.0)),
+        smooth_nr=float(kw.pop("smooth_nr", smooth_default)),
+        smooth_dr=float(kw.pop("smooth_dr", smooth_default)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +242,11 @@ class CombinedLoss(nn.Module):
             artifact along instance edges that ``background=0``
             otherwise produces.  Pass ``None`` to disable masking
             entirely.
-        ignore_index: label value masked out of the semantic Dice
-            target (voxels with this label contribute ``0`` to both
-            numerator and denominator of the sem Dice term).
+        ignore_index: label value masked out of the semantic target
+            for the composite Dice + BCE + Focal loss (voxels with
+            this label have their target zeroed, so they contribute
+            as background in BCE / Focal and don't move the sem Dice
+            numerator / denominator).
     """
 
     num_channels: int = HEAD_CHANNELS
@@ -214,32 +276,25 @@ class CombinedLoss(nn.Module):
         self.loss_raw = canonical_regression_name(raw_kw.pop("loss", "l1"))
         self._raw_fn = regression_loss_fn(self.loss_raw)
 
-        # ----- sem (sigmoid + Dice) -----
-        # Dice-only since May 2026 -- BCE / CE was removed because Dice
-        # already handles the binary-foreground imbalance and the
-        # ``pos_weight`` / ``class_weights`` tuning loop wasn't paying
-        # for its cognitive overhead.  Field-level ``weight`` is the
-        # only sub-knob.
+        # ----- sem (sigmoid + composite Dice + BCE + Focal) -----
+        # The composite supervisor lives in
+        # ``brainbow/losses/dice_bce_focal.py`` and operates on the
+        # post-sigmoid probabilities the wrapper hands the loss.  Each
+        # field-level ``weight_<head>`` block can override
+        # ``lambda_{dice,bce,focal}``, ``gamma``, and the Dice
+        # smoothing terms; setting any lambda to ``0`` disables that
+        # term on this head only (e.g. for a Dice-only sem ablation).
         self.weight_sem, sem_kw = _split_field(weight_sem)
-        self._sem_dice = DiceLoss(
-            sigmoid=False, softmax=False,
-            include_background=True, reduction="mean",
-            batch=True,
-        )
+        self._sem_loss = _pop_composite_loss(sem_kw)
 
-        # ----- skl (sigmoid + Dice on binary skeleton mask) -----
-        # Identical schema to sem.  Despite the 1-voxel-wide target
-        # being ~99.9% negative, Dice's normalisation by foreground
-        # volume keeps the gradient informative -- the old
-        # ``weight_ce: 0.1`` knob (which dialled CE down to a small
-        # tie-breaker) was the natural admission that CE was
-        # contributing little here, so it's now gone outright.
+        # ----- skl (sigmoid + composite Dice + BCE + Focal) -----
+        # Identical schema to sem; the 1-voxel-wide skeleton target is
+        # ~99.9% negative, but Dice handles the imbalance natively and
+        # the focal term sharpens the gradient on the rare positive
+        # voxels.  Tune ``gamma`` upward (e.g. ``3.0``) if the
+        # skeleton head is recall-poor after a few thousand steps.
         self.weight_skl, skl_kw = _split_field(weight_skl)
-        self._skl_dice = DiceLoss(
-            sigmoid=False, softmax=False,
-            include_background=True, reduction="mean",
-            batch=True,
-        )
+        self._skl_loss = _pop_composite_loss(skl_kw)
 
         # ----- dir / cov / rad / avg (foreground-only L1 regression) -----
         self.weight_dir, dir_kw = _split_field(weight_dir)
@@ -268,22 +323,31 @@ class CombinedLoss(nn.Module):
         self.normalize_embeddings = bool(emb_kw.pop("normalize_embeddings", False))
         self.max_hard_pairs = int(emb_kw.pop("max_hard_pairs", 0))
 
-        # ----- aff_emb / aff_avg (Dice on derived face-aff) -----
-        # Dice-only since May 2026.  Each path keeps ``tau`` (the
-        # softness of the ``exp(-tau * L1)`` kernel that turns the
-        # continuous field into a soft 12-channel affinity) and
-        # shares a single ``aff_eps`` for the Dice numerator /
-        # denominator smoothing.
+        # ----- aff_emb / aff_avg (composite Dice + BCE + Focal on
+        #       derived face-aff) -----
+        # Each path keeps ``tau`` (the softness of the
+        # ``exp(-tau * L1)`` kernel that turns the continuous
+        # emb / avg field into a soft 12-channel affinity) and gets
+        # its own :class:`DiceBCEFocalLoss` instance so the composite
+        # lambdas can be tuned independently per path.  ``aff_eps`` is
+        # a shorthand for Dice numerator / denominator smoothing
+        # shared across the two aff paths (matches the historical
+        # single-``aff_eps`` knob that drove a shared ``DiceLoss``
+        # instance); individual ``smooth_nr`` / ``smooth_dr`` under
+        # ``weight_aff_emb`` / ``weight_aff_avg`` override on a
+        # per-path basis.
         self.weight_aff_emb, aff_emb_kw = _split_field(weight_aff_emb)
         self.weight_aff_avg, aff_avg_kw = _split_field(weight_aff_avg)
         self.aff_emb_tau = float(aff_emb_kw.pop("tau", 1.0))
         self.aff_avg_tau = float(aff_avg_kw.pop("tau", 1.0))
         self.aff_eps = float(aff_emb_kw.pop("aff_eps", 1e-5))
-        self._aff_dice = DiceLoss(
-            sigmoid=False, softmax=False,
-            include_background=True, reduction="mean",
-            batch=True,
-            smooth_nr=self.aff_eps, smooth_dr=self.aff_eps,
+        # Propagate the shared ``aff_eps`` default to the avg path so
+        # the two aff Dice terms start with the same smoothing.
+        self._aff_emb_loss = _pop_composite_loss(
+            aff_emb_kw, smooth_default=self.aff_eps,
+        )
+        self._aff_avg_loss = _pop_composite_loss(
+            aff_avg_kw, smooth_default=self.aff_eps,
         )
 
         # Warn about unused kwargs (typo-defence).
@@ -390,7 +454,7 @@ class CombinedLoss(nn.Module):
     def _loss_sem(
         self, probs: torch.Tensor, labels: torch.Tensor,
     ) -> torch.Tensor:
-        """Dice on the binary semantic head (post-sigmoid).
+        """Composite Dice + BCE + Focal on the binary semantic head.
 
         ``probs`` is ``[B, 1, *spatial]`` already-sigmoided
         predictions; the target is ``(labels > 0)`` masked to ``0``
@@ -402,12 +466,12 @@ class CombinedLoss(nn.Module):
         )
         valid = (labels != self.ignore_index).float()
         valid_mask = rearrange(valid, "b ... -> b 1 ...")
-        return self._sem_dice(probs, target * valid_mask)
+        return self._sem_loss(probs, target * valid_mask)
 
     def _loss_skl(
         self, probs: torch.Tensor, target: torch.Tensor,
     ) -> torch.Tensor:
-        """Dice on the binary skeleton head (post-sigmoid).
+        """Composite Dice + BCE + Focal on the binary skeleton head.
 
         Mirrors :meth:`_loss_sem`: ``probs`` are ``[B, 1, *spatial]``
         sigmoided predictions, ``target`` is a ``[B, 1, *spatial]`` or
@@ -417,7 +481,7 @@ class CombinedLoss(nn.Module):
         if target.dim() == probs.dim() - 1:
             target = rearrange(target, "b ... -> b 1 ...")
         target = (target > 0).to(probs.dtype)
-        return self._skl_dice(probs, target)
+        return self._skl_loss(probs, target)
 
     def _loss_fg_regression(
         self,
@@ -536,19 +600,23 @@ class CombinedLoss(nn.Module):
         field: torch.Tensor,
         labels: torch.Tensor,
         aff_target: torch.Tensor,
+        aff_loss: DiceBCEFocalLoss,
         tau: float,
         *,
         normalize_field: bool = False,
     ) -> torch.Tensor:
-        """Generic 12-channel derived-affinity Dice loss for a continuous field.
+        """Generic 12-channel derived-affinity composite loss.
 
         Used by both ``aff_emb`` (field = embedding, 16-D) and
         ``aff_avg`` (field = avg, 3-D).  The kernel
         ``exp(-tau * sum_c |field[v] - shift_replicate(field[v], dir)|)``
-        produces a soft 12-channel face-affinity score that is
-        supervised against the binary ``aff_target``, masked to
+        produces a soft 12-channel face-affinity score in ``(0, 1]``;
+        ``aff_loss`` is the per-path
+        :class:`DiceBCEFocalLoss` instance and supervises that soft
+        affinity against the binary ``aff_target``, masked to
         foreground-foreground face pairs (so background-background
-        pairs don't contaminate the dice numerator / denominator).
+        pairs don't contaminate the dice numerator / denominator and
+        don't push BCE/Focal toward "predict 0 everywhere").
         """
         if field.dim() != 5:
             raise ValueError(
@@ -571,7 +639,7 @@ class CombinedLoss(nn.Module):
                 for _, axis, shift in DIRECTIONS
             ], dim=1)                                         # [B, 12, D, H, W]
 
-        return self._aff_dice(aff_pred * pair_mask, aff_t * pair_mask)
+        return aff_loss(aff_pred * pair_mask, aff_t * pair_mask)
 
     # ------------------------------------------------------------------
     # Forward
@@ -746,7 +814,8 @@ class CombinedLoss(nn.Module):
             total = total + self.weight_emb * emb["loss"]
 
         # aff_emb / aff_avg -- both consume the same 12-channel
-        # ``aff`` target.
+        # ``aff`` target.  Each path runs its own composite-loss
+        # instance so the lambdas / gamma can be tuned independently.
         aff_target = cached.get("aff")
         if self.weight_aff_emb > 0:
             if aff_target is None:
@@ -757,6 +826,7 @@ class CombinedLoss(nn.Module):
             emb_pred = head[:, EMB_SLICE]
             l_ae = self._loss_aff_path(
                 emb_pred, labels, aff_target,
+                self._aff_emb_loss,
                 tau=self.aff_emb_tau,
                 normalize_field=self.normalize_embeddings,
             )
@@ -772,6 +842,7 @@ class CombinedLoss(nn.Module):
             avg_pred = head[:, AVG_SLICE]
             l_aa = self._loss_aff_path(
                 avg_pred, labels, aff_target,
+                self._aff_avg_loss,
                 tau=self.aff_avg_tau,
                 normalize_field=False,
             )

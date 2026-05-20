@@ -220,13 +220,13 @@ Channel layout is owned by `brainbow.losses._common`:
 | Field | Slice | Channels | Activation | Supervision |
 | ----- | ----- | -------- | ---------- | ----------- |
 | raw | `[0, 1)`  | 1  | linear | L1 / MSE / Smooth-L1 |
-| sem | `[1, 2)`  | 1  | sigmoid | Dice |
-| skl | `[2, 3)`  | 1  | sigmoid | Dice |
+| sem | `[1, 2)`  | 1  | sigmoid | Dice + BCE + Focal (``DiceBCEFocalLoss``) |
+| skl | `[2, 3)`  | 1  | sigmoid | Dice + BCE + Focal (``DiceBCEFocalLoss``) |
 | dir | `[3, 6)`  | 3  | linear | L1 / MSE / Smooth-L1 (fg-only) |
 | cov | `[6, 12)` | 6  | linear | L1 / MSE / Smooth-L1 (fg-only) |
 | rad | `[12, 13)`| 1  | linear | L1 / MSE / Smooth-L1 (fg-only) |
-| avg | `[13, 16)`| 3  | linear | L1 (fg-only) + derived 12-aff Dice |
-| emb | `[16, 32)`| 16 | linear | pull / push / norm + derived 12-aff Dice |
+| avg | `[13, 16)`| 3  | linear | L1 (fg-only) + derived 12-aff Dice + BCE + Focal |
+| emb | `[16, 32)`| 16 | linear | pull / push / norm + derived 12-aff Dice + BCE + Focal |
 
 ### 5.2 What `CombinedLoss` returns
 
@@ -248,9 +248,11 @@ loss/aff_emb
 loss/aff_avg
 ```
 
-The Dice-only heads (sem, skl, aff_emb, aff_avg) emit only the
-field-level total; the prior `loss/{head}/{ce,dice}` breakdown is
-gone since the May-2026 CE/BCE removal (see GOTCHAS entry #44).
+The composite-loss heads (sem, skl, aff_emb, aff_avg) emit only the
+field-level total; the three sub-terms inside ``DiceBCEFocalLoss``
+are already weighted-in by ``lambda_{dice,bce,focal}`` so we don't
+log them separately (see GOTCHAS entries #44 and #45 for the
+supervision-regime history).
 
 So e.g. `loss/aff_emb` accompanies
 `pred/emb/aff/{01_t1,02_b1,03_u1,04_d1,05_l1,06_r1,07_t2,08_b2,09_u2,10_d2,11_l2,12_r2}`,
