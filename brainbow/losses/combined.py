@@ -51,15 +51,15 @@ forwarded into the field's sub-loss configuration::
                                            # composite-loss lambdas default
     weight_skl:
       weight: 1.0
-      lambda_dice: 1.0                     # multiplier on the Dice term
       lambda_bce: 1.0                      # multiplier on per-voxel BCE
+      lambda_dice: 1.0                     # multiplier on the Dice term
       lambda_focal: 1.0                    # multiplier on focal-on-probs
       gamma: 2.0                           # focal focusing parameter
     weight_aff_emb:
       weight: 2.0
       tau: 1.0                             # ``soft_aff_from_field`` softness
-      lambda_dice: 1.0
       lambda_bce: 1.0
+      lambda_dice: 1.0
       lambda_focal: 1.0
       gamma: 2.0
 
@@ -281,7 +281,7 @@ class CombinedLoss(nn.Module):
         # ``brainbow/losses/dice_bce_focal.py`` and operates on the
         # post-sigmoid probabilities the wrapper hands the loss.  Each
         # field-level ``weight_<head>`` block can override
-        # ``lambda_{dice,bce,focal}``, ``gamma``, and the Dice
+        # ``lambda_{bce,dice,focal}``, ``gamma``, and the Dice
         # smoothing terms; setting any lambda to ``0`` disables that
         # term on this head only (e.g. for a Dice-only sem ablation).
         self.weight_sem, sem_kw = _split_field(weight_sem)

@@ -250,7 +250,7 @@ loss/aff_avg
 
 The composite-loss heads (sem, skl, aff_emb, aff_avg) emit only the
 field-level total; the three sub-terms inside ``DiceBCEFocalLoss``
-are already weighted-in by ``lambda_{dice,bce,focal}`` so we don't
+are already weighted-in by ``lambda_{bce,dice,focal}`` so we don't
 log them separately (see GOTCHAS entries #44 and #45 for the
 supervision-regime history).
 

@@ -135,7 +135,7 @@ class DiceBCEFocalLoss(nn.Module):
         probs: torch.Tensor,
         target: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute ``lambda_dice * Dice + lambda_bce * BCE + lambda_focal * Focal``."""
+        """Compute ``lambda_bce * BCE + lambda_dice * Dice + lambda_focal * Focal``."""
         total = self._zero_like(probs)
 
         if self.lambda_dice > 0:

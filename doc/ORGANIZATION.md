@@ -233,7 +233,7 @@ sits beside `train/automatic/pred/emb/aff/{01_t1,...}`.
 
 Note: the composite-loss heads (sem, skl, aff_emb, aff_avg) emit
 only the field-level total -- their three sub-terms (Dice, BCE,
-Focal) are already weighted-in by ``lambda_{dice,bce,focal}`` inside
+Focal) are already weighted-in by ``lambda_{bce,dice,focal}`` inside
 ``DiceBCEFocalLoss``, so logging them separately would re-introduce
 the per-config-knob tuning loop the simplification was meant to
 eliminate.  Only the discriminative `emb` head still emits a

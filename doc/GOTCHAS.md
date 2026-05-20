@@ -59,7 +59,7 @@ than calling `main()`.
 ## 2. Loss-config schema is silently both flat and nested
 
 **Symptom.** Two YAML files mix `weight_sem: 0.5` with
-`weight_sem: { weight: 0.5, lambda_dice: 1.0, lambda_bce: 1.0,
+`weight_sem: { weight: 0.5, lambda_bce: 1.0, lambda_dice: 1.0,
 lambda_focal: 1.0, gamma: 2.0 }` and both work, but you can't tell
 which one is in effect from the config alone.
 
@@ -67,7 +67,7 @@ Historical note: the supervision regime for sem / skl / aff_* has
 churned three times.  Pre-May-2026 took `weight_ce` / `weight_dice` /
 `class_weights`; the brief Dice-only window (entry #44) took only
 `weight`; the present composite-loss regime (entry #45) takes
-`weight` + `lambda_{dice,bce,focal}` + `gamma`.  Any config still
+`weight` + `lambda_{bce,dice,focal}` + `gamma`.  Any config still
 carrying the old pre-May-2026 keys (`weight_ce`, `class_weights`)
 will trigger a `CombinedLoss: ignoring unknown weight_sem keys: [...]`
 warning at construction.
@@ -907,7 +907,7 @@ shortest path forward.
 | ``InstanceLoss(... semantic_ids=...)`` multi-class branch | no datamodule populated ``semantic_ids``; the loss is single-class only |
 | ``CombinedLoss(... learned_task_weights=True)``          | Kendall-Gal uncertainty weighting; never enabled in any shipped config |
 | ``SemanticLoss(label_smoothing=...)``                    | sigmoid BCE has no native smoothing knob; the param was stored but never used.  BCE itself was briefly dropped (entry #44) then reinstated inside the composite ``DiceBCEFocalLoss`` (entry #45) -- the new ``gamma`` knob plays a similar "soften the per-voxel signal" role to label-smoothing if you set ``gamma > 0`` (default ``2.0``). |
-| Flat-form loss config schema (``weight_ce`` at top level, ``boundary_*`` prefix) | nested form (``weight_<head>: { weight: ..., ... }``) is the only schema; sem / skl / aff_* now take ``lambda_{dice,bce,focal}`` + ``gamma`` (see entry #45).  The legacy ``weight_ce`` / ``weight_dice`` / ``class_weights`` keys are silently dropped with a typo-defence warning. |
+| Flat-form loss config schema (``weight_ce`` at top level, ``boundary_*`` prefix) | nested form (``weight_<head>: { weight: ..., ... }``) is the only schema; sem / skl / aff_* now take ``lambda_{bce,dice,focal}`` + ``gamma`` (see entry #45).  The legacy ``weight_ce`` / ``weight_dice`` / ``class_weights`` keys are silently dropped with a typo-defence warning. |
 | ``data.include_clefts`` / ``data.include_mito``          | placeholders for a multi-channel MICrONS pipeline that was never wired in |
 | Vista ``PointPromptEncoder`` + ``sample_point_prompts`` + ``forward(... point_prompts=...)`` | interactive proofreading was never wired into a training loop; the encoder was added then frozen on every step |
 | ``CosmosTransfer3DWrapper._try_load_raw_checkpoint``     | the dead third loader path that loaded HF safetensors into a ``_StandaloneDiT3D`` (different architecture) -- the `_try_load_diffusers` and `_try_load_cosmos_package` paths cover the production path; if both fail the wrapper now uses the random-init standalone DiT explicitly |
@@ -1108,7 +1108,7 @@ classification-style heads collapse to just ``loss/sem``,
 ``loss/skl``, ``loss/aff_emb``, ``loss/aff_avg`` -- no per-sub-term
 ``/ce``, ``/dice``, or ``/focal`` breakdown -- even though the
 composite mixes three terms.  The per-head config now takes a
-nested mapping with ``lambda_{dice,bce,focal}`` + ``gamma``.
+nested mapping with ``lambda_{bce,dice,focal}`` + ``gamma``.
 
 **Where.**
 [`brainbow/losses/dice_bce_focal.py`](../brainbow/losses/dice_bce_focal.py)

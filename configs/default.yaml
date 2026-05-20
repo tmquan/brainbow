@@ -120,15 +120,15 @@ loss:
     weight: 1.0
     loss: l1
   # Sigmoid + composite Dice + BCE + Focal on the binary foreground
-  # head (ch 1).  ``lambda_{dice,bce,focal}`` scale each term inside
+  # head (ch 1).  ``lambda_{bce,dice,focal}`` scale each term inside
   # ``DiceBCEFocalLoss``; ``gamma`` is the focal focusing parameter
   # (``gamma=0`` makes Focal collapse to plain BCE).  Set any lambda
   # to ``0`` to disable that term on this head only (e.g. Dice-only
   # ablation: ``lambda_bce: 0, lambda_focal: 0``).
   weight_sem:
     weight: 1.0
-    lambda_dice: 1.0
     lambda_bce: 1.0
+    lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 2.0
   # Sigmoid + composite Dice + BCE + Focal on the 1-voxel-wide
@@ -139,8 +139,8 @@ loss:
   # thousand steps.
   weight_skl:
     weight: 0.0
-    lambda_dice: 1.0
     lambda_bce: 1.0
+    lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 2.0
   weight_dir:
@@ -179,15 +179,15 @@ loss:
   weight_aff_emb:
     weight: 0.0
     tau: 1.0
-    lambda_dice: 1.0
     lambda_bce: 1.0
+    lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 2.0
   weight_aff_avg:
     weight: 0.0
     tau: 1.0
-    lambda_dice: 1.0
     lambda_bce: 1.0
+    lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 2.0
 

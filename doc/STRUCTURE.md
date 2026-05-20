@@ -119,7 +119,7 @@ and the loss targets.  No learnable state.
 | File            | Purpose                                                                        |
 | --------------- | ------------------------------------------------------------------------------ |
 | `_common.py`         | Single source of truth for the unified head layout (`raw|sem|skl|dir|cov|rad|avg|emb`), the contiguous `SIGMOID_SLICE` over (sem, skl), `apply_head_activations` helper, 12-direction affinity geometry, slicing helpers, regression utilities, and the fp32-clamped `stable_bce_on_probs` consumed by the composite Dice + BCE + Focal supervisor. |
-| `dice_bce_focal.py`  | `DiceBCEFocalLoss` — composite probability-input supervisor for the (sem, skl, aff_emb, aff_avg) heads.  Composes MONAI's `DiceLoss(sigmoid=False)` with custom BCE-on-probs (`stable_bce_on_probs`) and a focal-on-probs path; ``lambda_{dice,bce,focal}`` + ``gamma`` parameterise the mix. |
+| `dice_bce_focal.py`  | `DiceBCEFocalLoss` — composite probability-input supervisor for the (sem, skl, aff_emb, aff_avg) heads.  Composes MONAI's `DiceLoss(sigmoid=False)` with custom BCE-on-probs (`stable_bce_on_probs`) and a focal-on-probs path; ``lambda_{bce,dice,focal}`` + ``gamma`` parameterise the mix. |
 | `combined.py`        | `CombinedLoss` — one monolithic loss over the 32-channel head: raw, sem, skl, dir, cov, rad, avg, emb, derived `aff_avg`, derived `aff_emb`.  Each composite-loss head instantiates its own `DiceBCEFocalLoss` so the lambdas can be tuned independently per path. |
 
 ### `brainbow/metrics/` — per-head eval metrics

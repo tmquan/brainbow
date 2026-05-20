@@ -482,7 +482,7 @@ optimizer:
 #   - weight: scalar multiplier (0 disables that field/path)
 #   - all other keys: sub-loss knobs (``loss`` for L1-style heads,
 #     ``tau`` for derived aff heads, ``delta_v`` etc. for ``emb``,
-#     ``lambda_{dice,bce,focal}`` + ``gamma`` for the composite-loss
+#     ``lambda_{bce,dice,focal}`` + ``gamma`` for the composite-loss
 #     heads -- see ``brainbow/losses/dice_bce_focal.py``).
 #
 # The (sem, skl, aff_emb, aff_avg) heads run on ``DiceBCEFocalLoss``,
@@ -500,14 +500,14 @@ loss:
     loss: l1
   weight_sem:
     weight: 1.0
-    lambda_dice: 1.0
     lambda_bce: 1.0
+    lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 2.0
   weight_skl:
     weight: 1.0
-    lambda_dice: 1.0
     lambda_bce: 1.0
+    lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 2.0
   weight_dir:
@@ -541,14 +541,14 @@ loss:
   weight_aff_emb:
     weight: 1.0
     tau: 1.0
-    lambda_dice: 1.0
     lambda_bce: 1.0
+    lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 2.0
   weight_aff_avg:
     weight: 1.0
     tau: 1.0
-    lambda_dice: 1.0
     lambda_bce: 1.0
+    lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 2.0
