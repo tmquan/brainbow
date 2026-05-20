@@ -94,7 +94,7 @@ data:
   data_root: data/SNEMI3D
 
   # ---- Loader & batching ----
-  batch_size: 4
+  batch_size: 8
   num_workers: 8
   # persistent_workers=true.  The earlier ``/dev/shm`` blow-up that
   # tempted us to disable this was actually a kimimaro pathos leak
@@ -337,7 +337,7 @@ training:
   accumulate_grad_batches: 1
   limit_val_batches: 100
   num_sanity_val_steps: 2
-  log_every_n_steps: 100
+  log_every_n_steps: 50
   check_val_every_n_epoch: 20     # validate every 20 epochs (default 1)
   benchmark: true
 
@@ -498,18 +498,32 @@ loss:
   weight_raw:
     weight: 1.0
     loss: l1
+  # Sem (foreground): ``data.min_foreground: 0.80`` ⇒ ~80-95% positive
+  # per crop, so foreground is the statistically dominant class.
+  # Shrink ``lambda_bce`` (plain BCE biases toward the dominant class)
+  # and grow ``lambda_focal`` (focal's ``(1 - p_t)^gamma`` silences
+  # easy positives, redirecting gradient onto the rare boundary /
+  # ECS voxels).  ``lambda_dice`` stays flat -- Dice is naturally
+  # imbalance-robust.
   weight_sem:
     weight: 1.0
-    lambda_bce: 1.0
+    lambda_bce: 0.5
     lambda_dice: 1.0
-    lambda_focal: 1.0
+    lambda_focal: 1.5
     gamma: 2.0
+  # Skl (skeleton): 1-voxel-wide centerline ⇒ ~99.9% **negative**
+  # (extreme background-major).  Plain BCE actively pushes the model
+  # toward "predict 0 everywhere", so ``lambda_bce`` is cut hard.
+  # ``lambda_focal`` is bumped up and ``gamma`` is raised to 3 so the
+  # focal weight ``(1 - p_t)^3`` aggressively silences the easy
+  # negatives once the model has collapsed to ``p ≈ 0`` -- after that
+  # the rare skeleton positives carry the gradient.  Dice stays at 1.
   weight_skl:
     weight: 1.0
-    lambda_bce: 1.0
+    lambda_bce: 0.1
     lambda_dice: 1.0
-    lambda_focal: 1.0
-    gamma: 2.0
+    lambda_focal: 3.0
+    gamma: 3.0
   weight_dir:
     weight: 1.0
     loss: l1
@@ -538,17 +552,26 @@ loss:
   # softness of the ``exp(-tau * L1)`` kernel that turns the
   # continuous emb / avg field into a soft 12-channel affinity
   # score; the composite lambdas + gamma are independent per path.
+  #
+  # Imbalance: inside the fg-fg ``pair_mask`` (see
+  # ``CombinedLoss._loss_aff_path``), same-instance face pairs
+  # statistically dominate -- most face pairs between foreground
+  # voxels are within the same neuron, with the rare positives being
+  # the cross-instance boundary pairs.  So the lambdas mirror the
+  # sem head's foreground-major shape: trim ``lambda_bce``, bump
+  # ``lambda_focal`` so focal redirects the gradient onto the rare
+  # between-instance pairs.
   weight_aff_emb:
     weight: 1.0
     tau: 1.0
-    lambda_bce: 1.0
+    lambda_bce: 0.5
     lambda_dice: 1.0
-    lambda_focal: 1.0
+    lambda_focal: 1.5
     gamma: 2.0
   weight_aff_avg:
     weight: 1.0
     tau: 1.0
-    lambda_bce: 1.0
+    lambda_bce: 0.5
     lambda_dice: 1.0
-    lambda_focal: 1.0
+    lambda_focal: 1.5
     gamma: 2.0
