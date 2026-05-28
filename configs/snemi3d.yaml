@@ -37,19 +37,26 @@
 #   python scripts/train.py --config-name snemi3d \
 #     training.resume_from_checkpoint=<run_dir>/checkpoints/last.ckpt
 #
-# Cross-architecture warm start.  When the saved ``last.ckpt`` was
-# trained with a different backbone (e.g. the older Cosmos-Transfer
-# wrapper, which carried a ``model.controlnet.*`` branch this Predict
-# wrapper does not), full Lightning resume cannot be used (key +
-# optimiser-state mismatch).  Use the weights-only path with the skip
-# list pinned below to:
-#
-#   * keep ``model.dit.*`` at the freshly-pulled HF base DiT,
-#   * restore everything else (heads, projector, decoder shim, loss
-#     buffers, ...) from the ckpt where keys overlap.
+# Same-architecture weights-only warm start.  Use ``+ckpt_path=`` when
+# you want to seed a fresh run with the weights of an existing snemi3d
+# checkpoint but discard the optimiser / scheduler / RNG state (e.g.
+# starting a new sweep on top of trained weights).  The default
+# ``ckpt_path_skip_prefixes: []`` below loads every overlapping key,
+# including the trained ``model.dit.*``::
 #
 #   python scripts/train.py --config-name snemi3d \
 #     +ckpt_path=<run_dir>/checkpoints/last.ckpt
+#
+# Cross-architecture warm start.  When the saved ``last.ckpt`` was
+# trained with a different backbone (e.g. the older Cosmos-Transfer
+# wrapper, which carried a ``model.controlnet.*`` branch this Predict
+# wrapper does not), or when you want to wipe a co-adapted DiT and
+# fall back to the freshly-pulled HF base, add the skip list on the
+# CLI::
+#
+#   python scripts/train.py --config-name snemi3d \
+#     +ckpt_path=<run_dir>/checkpoints/last.ckpt \
+#     +ckpt_path_skip_prefixes=[model.dit.]
 # =====================================================================
 
 defaults:
@@ -63,27 +70,37 @@ output_dir: outputs
 # ---------------------------------------------------------------------
 # Checkpoint loading policy (weights-only warm start)
 # ---------------------------------------------------------------------
-# Source-of-truth for ``+ckpt_path=...`` loads on this recipe.  The
-# behaviour table is:
+# Source-of-truth for ``+ckpt_path=...`` loads on this recipe.  Only
+# consulted by ``scripts/train.py::_resolve_checkpoint`` when
+# ``+ckpt_path=`` is set on the CLI; the default training paths
+# (fresh run, ``training.resume_from_checkpoint=...`` full Lightning
+# resume) ignore this key entirely.
 #
-#   model.dit.*               -> Fresh nvidia/Cosmos-Predict2.5-2B @
-#                                ``diffusers/base/post-trained`` (HF,
-#                                dropped from ckpt by the skip list
-#                                below).
-#   model.feature_projector.* -> Restored from ``last.ckpt``.
-#   model.decoder_adapter.*   -> Restored from ``last.ckpt`` (head +
-#                                decoder shim).
-#   anything else (e.g. ``loss.*`` buffers)
-#                             -> Restored from ``last.ckpt`` where keys
-#                                overlap; fresh init otherwise.
+# Default behaviour with the empty list below: every overlapping key
+# in the ckpt's ``state_dict`` is loaded (``strict=False``); any key
+# only present in the freshly-constructed module keeps its fresh init,
+# any key only present in the ckpt is logged as unexpected and
+# dropped.
 #
-# See ``scripts/train.py::_resolve_checkpoint`` for the loader.  Pass
-# ``+ckpt_path_skip_prefixes=[]`` on the CLI to override (e.g. when
-# you want the ckpt's ``model.dit.*`` to win over the freshly-pulled HF
-# weights).
+# This default assumes a **same-architecture** warm start (current
+# Cosmos-Predict 2.5 wrapper on both sides), where the saved
+# ``model.dit.*`` has already been trained on this data by
+# ``freeze_dit_backbone: N`` (see ``model.freeze_dit_backbone`` below)
+# and is therefore *more* useful than the fresh HF base.
+#
+# For a **cross-architecture** warm start (e.g. migrating from the
+# older Cosmos-Transfer wrapper, which carried a ``model.controlnet.*``
+# branch this Predict wrapper does not) or any other case where you
+# want the freshly-pulled HF base DiT to win over the ckpt's DiT,
+# pass the skip list on the CLI::
+#
+#   +ckpt_path_skip_prefixes=[model.dit.]
+#
+# (The argument can list multiple prefixes; ControlNet migrations also
+# typically want ``model.controlnet.`` skipped if the source ckpt has
+# it.)
 # ---------------------------------------------------------------------
-ckpt_path_skip_prefixes:
-  - model.dit.
+ckpt_path_skip_prefixes: []
 
 
 # ---------------------------------------------------------------------
@@ -280,34 +297,37 @@ model:
   # What to freeze.  Cosmos-Predict has no ControlNet residual branch
   # to absorb the trainable load, so leaving the DiT permanently
   # frozen would mean only the heads + last VAE-decoder up-block
-  # train.  ``freeze_dit_backbone`` is applied **once at construction**
-  # (see ``brainbow/models/cosmos_2_5_common/wrapper_base.py``):
+  # train.  ``freeze_dit_backbone`` accepts three forms (parsed by
+  # ``brainbow/models/cosmos_2_5_common/wrapper_base.py::
+  # _resolve_freeze_dit_backbone``):
   #
   #   true  -> base DiT permanently frozen (heads-only training; only
   #            ~10M params receive gradients).
-  #   false -> base DiT permanently trainable; the DiT param group
-  #            picks up ``optimizer.dit_backbone_lr`` (10x lower than
-  #            the head ``optimizer.lr``).
-  #
-  # Note: the historical integer-N "freeze for epochs 0..N-1, then
-  # unfreeze" interpretation was removed in the Phase 1 cleanup
-  # (see ``doc/GOTCHAS.md`` items #5 and #27); the per-epoch thaw
-  # branch in ``on_train_epoch_start`` no longer exists.  Non-zero
-  # integers are now silently truthy (treated as ``true``).  See
-  # ``doc/ARCHITECT.md`` for the parameter-budget table.
+  #   false -> base DiT permanently trainable from step 0; the DiT
+  #            param group picks up ``optimizer.dit_backbone_lr``
+  #            (10x lower than the head ``optimizer.lr``).
+  #   N (int, >= 0) -> DiT frozen for epochs ``0..N-1``, thawed at the
+  #            start of epoch ``N``.  ``N == 0`` is equivalent to
+  #            ``false``.  The DiT param group is included in the
+  #            optimizer up front (with zero-grad no-op steps while
+  #            frozen) so the thaw doesn't disturb the LR scheduler --
+  #            see ``brainbow/modules/cosmos_2_5_common/base.py::
+  #            on_train_epoch_start``.  Negative ints or non-bool /
+  #            non-int values now raise at construction.
   freeze_vae_encoder: true
-  # Current value: end-to-end training of the base DiT from step 0.
-  #
-  # Consider flipping to ``true`` (heads-only warm-up) if the very
-  # first multi-GPU all-reduce trips an Xid 145 NVLink-SHARP fault on
-  # this node -- the failure mode that motivated the NCCL env block
-  # at the top of ``scripts/train.py`` (``NCCL_NVLS_ENABLE=0`` +
-  # ``NCCL_ALGO=Ring`` + ``NCCL_PROTO=Simple``).  Freezing the DiT
-  # shrinks the cold first all-reduce from ~2B params to the head
-  # group (~10M params), giving the fabric a small warm-up
-  # collective before the big reductions start; once you have a few
-  # clean DDP runs you can flip back to ``false`` for an end-to-end
-  # fine-tune.
+  # Current value: heads-only warm-up for 2 epochs, then end-to-end
+  # fine-tune of the base DiT from epoch 2 onwards.  The 2-epoch
+  # warm-up shrinks the cold first multi-GPU all-reduce from ~2B
+  # params to the head group (~10M params), giving the fabric a
+  # small warm-up collective before the big reductions start -- the
+  # same failure mode that motivated the NCCL env block at the top
+  # of ``scripts/train.py`` (``NCCL_NVLS_ENABLE=0`` +
+  # ``NCCL_ALGO=Ring`` + ``NCCL_PROTO=Simple``).  Also lines up with
+  # ``optimizer.scheduler.warmup_epochs: 2`` below, so the DiT
+  # unfreezes exactly when the head LR finishes its linear warm-up
+  # and the cosine decay starts.  Flip to ``false`` to skip the
+  # warm-up entirely (end-to-end from step 0) or ``true`` for a
+  # heads-only run.
   freeze_dit_backbone: 2
   freeze_vae_decoder: true
 
@@ -459,7 +479,7 @@ optimizer:
   scheduler:
     type: cosine_warmup
     warmup_epochs: 2
-    T_max: 50
+    T_max: 101
     eta_min: 1.0e-6
 
 

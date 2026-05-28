@@ -206,14 +206,20 @@ the natural ControlNet pattern, and what NVIDIA's own training recipe uses.
 
 `freeze_dit_backbone` accepts three forms in config:
 
-| YAML value | Meaning |
-|------------|---------|
-| `true`     | permanently frozen |
-| `false`    | permanently trainable (from step 0) |
-| `1` (int)  | frozen during epoch 0, unfrozen at start of epoch 1 (optimizer rebuilt) |
+| YAML value     | Meaning |
+|----------------|---------|
+| `true`         | permanently frozen |
+| `false`        | permanently trainable (from step 0) |
+| `N` (int, ≥ 0) | frozen for epochs `0..N-1`, thawed at start of epoch `N` (`N == 0` ≡ `false`) |
 
-The phased-schedule machinery lives in
-`brainbow/modules/cosmos_transfer_2_5/base.py::on_train_epoch_start`.
+Negative ints and non-bool / non-int values raise at construction.
+Parsing lives in
+`brainbow/models/cosmos_2_5_common/wrapper_base.py::_resolve_freeze_dit_backbone`;
+the phased-schedule machinery lives in
+`brainbow/modules/cosmos_2_5_common/base.py::BaseCosmosModule.on_train_epoch_start`.
+The DiT param group is included in the optimizer up front (as
+zero-grad no-ops while frozen) so the thaw only flips `requires_grad`
+-- the LR scheduler state is preserved verbatim.
 
 ### 1.8 Default parameter budget (snemi3d / combine recipes)
 

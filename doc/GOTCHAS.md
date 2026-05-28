@@ -123,20 +123,30 @@ one tensor and slices into named fields downstream via
 
 ---
 
-## 5. (Removed in Phase 1 cleanup -- `freeze_dit_backbone` integer schedule)
+## 5. `freeze_dit_backbone` integer warm-up schedule
 
-The integer-epoch thaw branch in `on_train_epoch_start` was deleted.
-`freeze_*` flags are now plain bools applied **once at construction**
-by the model wrapper:
+`freeze_dit_backbone` accepts a bool *or* a non-negative int:
 
 * `freeze_dit_backbone: true`  -> permanently frozen.
-* `freeze_dit_backbone: false` -> permanently trainable.
+* `freeze_dit_backbone: false` -> permanently trainable from step 0.
+* `freeze_dit_backbone: N` (int, `N >= 0`) -> frozen for epochs
+  `0..N-1`, thawed at the start of epoch `N`.  `N == 0` is equivalent
+  to `false`.
 
-Integer values are silently truthy (so `freeze_*: 0` means trainable
-and any non-zero int means frozen), but the per-epoch state machine
-that used to thaw at epoch `N` is gone.  See
-[brainbow/models/cosmos_transfer_2_5/wrapper.py](../brainbow/models/cosmos_transfer_2_5/wrapper.py)
-and [`ARCHITECT.md` §1.6](./ARCHITECT.md#16-freeze-flags--what-actually-moves).
+Parsing happens in
+[`brainbow/models/cosmos_2_5_common/wrapper_base.py::_resolve_freeze_dit_backbone`](../brainbow/models/cosmos_2_5_common/wrapper_base.py);
+the thaw is wired up in
+[`brainbow/modules/cosmos_2_5_common/base.py::BaseCosmosModule.on_train_epoch_start`](../brainbow/brainbow/modules/cosmos_2_5_common/base.py).
+The optimizer keeps the DiT param group up front (zero-grad no-op
+steps while frozen), so the thaw flips `requires_grad` without
+rebuilding the optimizer or resetting the LR scheduler.
+
+History: the integer-N schedule was removed in the Phase 1 cleanup
+(non-zero ints became silently truthy) and restored here so warm-ups
+like `freeze_dit_backbone: 2` actually do what the config reads.
+Negative ints and non-bool / non-int values now raise at construction
+instead of being silently truthy.  See also [`ARCHITECT.md`
+§1.7](./ARCHITECT.md#17-freeze-flags--what-actually-moves).
 
 ---
 
@@ -569,14 +579,12 @@ pulling main; the train curves are unaffected.
 
 ---
 
-## 27. (Removed in Phase 1 cleanup -- `freeze_dit_backbone: N` epoch count)
+## 27. `freeze_dit_backbone: N` epoch warm-up (restored)
 
-The integer-epoch interpretation has been deleted along with the
-per-epoch thaw machinery (see #5).  `freeze_dit_backbone` is now a
-plain bool: `true` freezes the whole DiT for the run, `false` keeps
-it trainable.  If you need per-block layer freezing, walk
-`self.dit.blocks[:N].requires_grad_(False)` yourself outside the
-Hydra surface.
+The integer-N epoch warm-up (frozen for epochs `0..N-1`, thawed at
+epoch `N`) is supported again -- see #5 for the full spec.  Per-block
+layer freezing is still not exposed via Hydra; walk
+`self.dit.blocks[:N].requires_grad_(False)` yourself if you need it.
 
 ---
 

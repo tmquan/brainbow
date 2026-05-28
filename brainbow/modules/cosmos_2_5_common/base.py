@@ -135,6 +135,36 @@ class BaseCosmosModule(BaseCircuitModule):
         return {}
 
     # ------------------------------------------------------------------
+    # Scheduled DiT thaw (``model.freeze_dit_backbone: N`` warm-up)
+    # ------------------------------------------------------------------
+
+    def on_train_epoch_start(self) -> None:
+        """Thaw the DiT backbone when the configured warm-up epoch arrives.
+
+        Wired to ``model.freeze_dit_backbone: N`` (non-negative int):
+        the DiT stays frozen for epochs ``0..N-1`` and is unfrozen at
+        the start of epoch ``N``.  ``configure_optimizers`` already
+        included the DiT params in the optimizer's backbone group up
+        front (see ``include_frozen_dit`` there), so the only work
+        here is flipping ``requires_grad`` -- AdamW lazily allocates
+        moment buffers on the first step that produces gradients, and
+        the existing LR scheduler state is preserved verbatim.
+        """
+        super().on_train_epoch_start()
+        thaw_epoch = getattr(self.model, "dit_thaw_epoch", None)
+        if thaw_epoch is None:
+            return
+        if self.current_epoch < thaw_epoch:
+            return
+        if not self.model._freeze_dit_backbone:
+            return
+        logger.info(
+            "Scheduled DiT thaw at epoch %d (freeze_dit_backbone: %d).",
+            self.current_epoch, thaw_epoch,
+        )
+        self.model.unfreeze_dit_backbone()
+
+    # ------------------------------------------------------------------
     # Optimizer (backbone vs heads split + NaN/Inf gradient zeroing)
     # ------------------------------------------------------------------
 
@@ -212,13 +242,27 @@ class BaseCosmosModule(BaseCircuitModule):
         if controlnet_lr is None:
             controlnet_lr = backbone_lr
 
+        # ``include_frozen_dit`` keeps the DiT params in the optimizer
+        # even while they're still frozen, so the warm-up schedule
+        # (``freeze_dit_backbone: N`` -- frozen for epochs 0..N-1, thawed
+        # at epoch N) can simply flip ``requires_grad`` at epoch N
+        # without rebuilding the optimizer (and without resetting the
+        # LR scheduler).  AdamW skips params whose ``grad is None``,
+        # so frozen DiT params sitting in the optimizer are a no-op
+        # until they thaw.
+        include_frozen_dit = (
+            getattr(self.model, "dit_thaw_epoch", None) is not None
+        )
+
         backbone_decay, backbone_no_decay = [], []
         controlnet_decay, controlnet_no_decay = [], []
         head_decay, head_no_decay = [], []
         for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
             is_backbone = name.startswith("model.dit.")
+            if not param.requires_grad and not (
+                include_frozen_dit and is_backbone
+            ):
+                continue
             is_controlnet = name.startswith("model.controlnet.")
             no_decay = param.dim() <= 1 or name.endswith(".bias")
             if is_controlnet:

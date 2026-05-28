@@ -57,9 +57,12 @@ class CosmosTransfer3DWrapper(_BaseCosmos25Wrapper):
         checkpoint_variant: HuggingFace revision string.
         dtype: Weight dtype (``"bf16"``, ``"fp16"``, ``"fp32"``).
         freeze_dit_backbone: Whether to freeze the pretrained base DiT
-            (the "upper part").  Defaults to ``False`` (legacy behaviour
-            -- the recipe config typically flips this to ``True`` so
-            only the ControlNet trains).
+            (the "upper part").  Accepts ``True`` (permanently frozen),
+            ``False`` (trainable from step 0), or a non-negative int
+            ``N`` (frozen for epochs ``0..N-1``, thawed at the start of
+            epoch ``N``).  Defaults to ``False`` -- the recipe config
+            typically flips this to ``True`` so only the ControlNet
+            trains.
         freeze_controlnet: Whether to freeze the ControlNet (the
             "residual part").  Defaults to ``False`` so the ControlNet
             adapts to the EM domain.

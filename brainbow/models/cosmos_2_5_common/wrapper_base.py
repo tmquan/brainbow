@@ -21,7 +21,7 @@ inherits this base class without overrides.
 
 import logging
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -44,6 +44,40 @@ from brainbow.models.cosmos_2_5_common.standalone_dit import _StandaloneDiT3D
 from brainbow.models.cosmos_2_5_common.variants import _VariantConfigBase
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_freeze_dit_backbone(
+    value: Union[bool, int, None],
+) -> Tuple[bool, Optional[int]]:
+    """Parse ``freeze_dit_backbone`` into ``(initial_frozen, thaw_epoch)``.
+
+    Accepted forms:
+
+    * ``True`` / ``False`` -- permanent state.  ``thaw_epoch`` is ``None``.
+    * non-negative ``int`` ``N`` (and not a ``bool``) -- DiT is frozen
+      for epochs ``0..N-1`` and unfrozen at the start of epoch ``N``.
+      ``N == 0`` is equivalent to ``False`` (never frozen).
+
+    Raises:
+        TypeError: ``value`` is neither ``bool`` nor ``int`` (and not ``None``).
+        ValueError: ``value`` is a negative integer.
+    """
+    if value is None or isinstance(value, bool):
+        return bool(value), None
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(
+                "freeze_dit_backbone integer schedule must be non-negative "
+                f"(got {value}).  Use ``N >= 0`` for 'freeze epochs 0..N-1, "
+                "thaw at epoch N', or pass a bool for permanent state."
+            )
+        if value == 0:
+            return False, None
+        return True, value
+    raise TypeError(
+        "freeze_dit_backbone must be a bool or non-negative int "
+        f"(got {type(value).__name__}: {value!r})."
+    )
 
 
 class _BaseCosmos25Wrapper(nn.Module):
@@ -78,7 +112,7 @@ class _BaseCosmos25Wrapper(nn.Module):
         checkpoint_variant: str = "post-trained",
         dtype: str = "bf16",
         pretrained: bool = True,
-        freeze_dit_backbone: bool = False,
+        freeze_dit_backbone: Union[bool, int] = False,
         freeze_vae_decoder: bool = False,
         freeze_vae_encoder: bool = True,
         gradient_checkpointing: bool = False,
@@ -117,7 +151,16 @@ class _BaseCosmos25Wrapper(nn.Module):
             "fp16": torch.float16,
             "fp32": torch.float32,
         }[dtype]
-        self._freeze_dit_backbone = freeze_dit_backbone
+        # ``freeze_dit_backbone`` accepts either a bool (permanent state)
+        # or a non-negative int ``N`` (frozen for epochs 0..N-1, thawed at
+        # epoch N -- the warm-up schedule restored after Phase 1).  See
+        # ``_resolve_freeze_dit_backbone`` and
+        # ``brainbow.modules.cosmos_2_5_common.base.BaseCosmosModule.on_train_epoch_start``.
+        initial_frozen, thaw_epoch = _resolve_freeze_dit_backbone(
+            freeze_dit_backbone,
+        )
+        self._freeze_dit_backbone = initial_frozen
+        self._dit_thaw_epoch: Optional[int] = thaw_epoch
         self._freeze_vae_decoder = freeze_vae_decoder
         self._freeze_vae_encoder = freeze_vae_encoder
         self._gradient_checkpointing = gradient_checkpointing
@@ -174,7 +217,7 @@ class _BaseCosmos25Wrapper(nn.Module):
             self.vae_encoder.requires_grad_(False)
             self.vae_encoder.eval()
 
-        if freeze_dit_backbone:
+        if initial_frozen:
             self.freeze_dit_backbone()
         else:
             self.dit.train()
@@ -188,11 +231,12 @@ class _BaseCosmos25Wrapper(nn.Module):
 
         logger.info(
             "%s initialised: variant=%s, feature_layers=%s, "
-            "backbone_loaded=%s, frozen_dit=%s, grad_ckpt=%s, "
-            "params=%s (trainable=%s)",
+            "backbone_loaded=%s, frozen_dit=%s, dit_thaw_epoch=%s, "
+            "grad_ckpt=%s, params=%s (trainable=%s)",
             type(self).__name__,
             variant, self._feature_layers, self._backbone_loaded,
-            freeze_dit_backbone, self._gradient_checkpointing,
+            self._freeze_dit_backbone, self._dit_thaw_epoch,
+            self._gradient_checkpointing,
             f"{self.get_num_parameters(trainable_only=False):,}",
             f"{self.get_num_parameters(trainable_only=True):,}",
         )
@@ -784,9 +828,22 @@ class _BaseCosmos25Wrapper(nn.Module):
 
     def unfreeze_dit_backbone(self) -> None:
         self.dit.requires_grad_(True)
+        self.dit.train()
         self._freeze_dit_backbone = False
         logger.info("DiT backbone unfrozen (%s trainable params).",
                      f"{self.get_num_parameters(True):,}")
+
+    @property
+    def dit_thaw_epoch(self) -> Optional[int]:
+        """Epoch at which the frozen DiT will be thawed, or ``None``.
+
+        ``None`` ⇒ no schedule (the DiT is either permanently frozen or
+        permanently trainable, depending on ``_freeze_dit_backbone``).
+        Otherwise the integer ``N`` returned here matches the
+        ``freeze_dit_backbone: N`` config: the DiT is frozen for epochs
+        ``0..N-1`` and unfrozen at the start of epoch ``N``.
+        """
+        return self._dit_thaw_epoch
 
     def freeze_vae_encoder(self) -> None:
         if self.vae_encoder is not None:
