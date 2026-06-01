@@ -1,9 +1,9 @@
 # =====================================================================
-# SNEMI3D + Neurons + MICrONS  --  CosmosPredict3D training config
+# SNEMI3D + Neurons + MICrONS  --  Cosmos3Nano3D training config
 # =====================================================================
 # Inheritance chain:  default <- snemi3d
 #
-# Trains CosmosPredict3D jointly on three EM datasets at a harmonised
+# Trains Cosmos3Nano3D jointly on three EM datasets at a harmonised
 # resolution so a single model sees all three:
 #
 #   Dataset    Native res (Z, Y, X nm)   Source
@@ -48,9 +48,10 @@
 #     +ckpt_path=<run_dir>/checkpoints/last.ckpt
 #
 # Cross-architecture warm start.  When the saved ``last.ckpt`` was
-# trained with a different backbone (e.g. the older Cosmos-Transfer
-# wrapper, which carried a ``model.controlnet.*`` branch this Predict
-# wrapper does not), or when you want to wipe a co-adapted DiT and
+# trained with a different backbone (e.g. a Cosmos 2.5 Predict/Transfer
+# run, whose ``model.dit.*`` is a different transformer entirely, or a
+# Transfer run carrying a ``model.controlnet.*`` branch this wrapper
+# does not have), or when you want to wipe a co-adapted transformer and
 # fall back to the freshly-pulled HF base, add the skip list on the
 # CLI::
 #
@@ -262,31 +263,35 @@ data:
 
 
 # ---------------------------------------------------------------------
-# Model -- CosmosPredict3D (Cosmos-Predict2.5-2B base DiT, no ControlNet)
+# Model -- Cosmos3Nano3D (Cosmos3-Nano omni transformer, no ControlNet)
 # ---------------------------------------------------------------------
-# Cosmos-Predict2.5 is the upstream base DiT in NVIDIA's Cosmos 2.5
-# stack -- a plain DiT + Wan-VAE pair, with no ControlNet residual
-# branch (that's the Cosmos-Transfer 2.5 add-on; see the sister
-# package ``brainbow/models/cosmos_transfer_2_5/`` if you want it).
-# Loaded from ``nvidia/Cosmos-Predict2.5-2B`` @
-# ``diffusers/base/post-trained`` (the closest analog to the
-# ``diffusers/general`` revision Cosmos-Transfer 2.5 uses, so warm-
-# starting between the two backbones still works):
+# Cosmos 3 (Nano) is NVIDIA's 16B omnimodal world model.  Its generator
+# is a Mixture-of-Transformers (``Cosmos3OmniTransformer``) that jointly
+# handles text / image / video / audio / action; we drive only its
+# diffusion (video) tower as a feature extractor and feed null
+# conditioning for every other modality.  Loaded from
+# ``nvidia/Cosmos3-Nano`` @ ``main`` (transformer + Wan2.2-TI2V VAE
+# subfolders only; the omni sub-towers are skipped at download time):
 #
-#   self.dit  -- ``CosmosTransformer3DModel`` (~2 B params), the only
+#   self.dit  -- ``Cosmos3OmniTransformer`` (~16 B params), the only
 #                transformer branch.  Whether it trains depends on
-#                ``freeze_dit_backbone`` below.
+#                ``freeze_dit_backbone`` below.  Kept on the ``self.dit``
+#                attribute so the ``model.dit.*`` optimiser split,
+#                freeze schedule and ckpt skip-list all still apply.
 #
-# The same EM VAE latent feeds the DiT alone (no auxiliary control
-# signal).  See ``brainbow/models/cosmos_predict_2_5/`` for the wrapper
-# and ``brainbow/models/cosmos_2_5_common/`` for the scaffolding shared
-# with Cosmos-Transfer 2.5.
+# The Wan VAE latent (48-channel, 16x spatial / 4x temporal) feeds the
+# omni transformer alone (no auxiliary control signal).  See
+# ``brainbow/models/cosmos_3_nano/`` for the wrapper and
+# ``brainbow/models/cosmos_2_5_common/`` for the shared scaffolding.
+#
+# Requires a bleeding-edge ``diffusers`` (>= 0.37, currently git main)
+# that exposes ``Cosmos3OmniTransformer``; Cosmos 3 is BF16-only.
 # ---------------------------------------------------------------------
 model:
-  type: cosmospredict3d
-  variant: "2B"
+  type: cosmos3nano3d
+  variant: "Nano"
   dtype: "bf16"
-  pretrained: true                # auto-pulls nvidia/Cosmos-Predict2.5-2B from HF
+  pretrained: true                # auto-pulls nvidia/Cosmos3-Nano from HF
 
   # Unified output head (must match brainbow.losses._common.HEAD_CHANNELS):
   in_channels: 1                  # raw EM input -> 1 channel
@@ -294,43 +299,46 @@ model:
   head_channels: 32
   feature_size: 64
 
-  # What to freeze.  Cosmos-Predict has no ControlNet residual branch
-  # to absorb the trainable load, so leaving the DiT permanently
-  # frozen would mean only the heads + last VAE-decoder up-block
-  # train.  ``freeze_dit_backbone`` accepts three forms (parsed by
-  # ``brainbow/models/cosmos_2_5_common/wrapper_base.py::
+  # What to freeze.  Cosmos 3 has no ControlNet residual branch to
+  # absorb the trainable load, so leaving the omni transformer
+  # permanently frozen would mean only the heads + last VAE-decoder
+  # up-block train.  ``freeze_dit_backbone`` accepts three forms (parsed
+  # by ``brainbow/models/cosmos_2_5_common/wrapper_base.py::
   # _resolve_freeze_dit_backbone``):
   #
-  #   true  -> base DiT permanently frozen (heads-only training; only
-  #            ~10M params receive gradients).
-  #   false -> base DiT permanently trainable from step 0; the DiT
-  #            param group picks up ``optimizer.dit_backbone_lr``
-  #            (10x lower than the head ``optimizer.lr``).
-  #   N (int, >= 0) -> DiT frozen for epochs ``0..N-1``, thawed at the
-  #            start of epoch ``N``.  ``N == 0`` is equivalent to
-  #            ``false``.  The DiT param group is included in the
-  #            optimizer up front (with zero-grad no-op steps while
-  #            frozen) so the thaw doesn't disturb the LR scheduler --
-  #            see ``brainbow/modules/cosmos_2_5_common/base.py::
+  #   true  -> base transformer permanently frozen (heads-only training;
+  #            only ~1M params receive gradients).
+  #   false -> base transformer permanently trainable from step 0; the
+  #            ``model.dit.*`` param group picks up
+  #            ``optimizer.dit_backbone_lr`` (10x lower than the head
+  #            ``optimizer.lr``).
+  #   N (int, >= 0) -> transformer frozen for epochs ``0..N-1``, thawed
+  #            at the start of epoch ``N``.  ``N == 0`` is equivalent to
+  #            ``false``.  The param group is included in the optimizer
+  #            up front (with zero-grad no-op steps while frozen) so the
+  #            thaw doesn't disturb the LR scheduler -- see
+  #            ``brainbow/modules/cosmos_2_5_common/base.py::
   #            on_train_epoch_start``.  Negative ints or non-bool /
-  #            non-int values now raise at construction.
+  #            non-int values raise at construction.
   freeze_vae_encoder: true
-  # Current value: heads-only warm-up for 2 epochs, then end-to-end
-  # fine-tune of the base DiT from epoch 2 onwards.  The 2-epoch
-  # warm-up shrinks the cold first multi-GPU all-reduce from ~2B
-  # params to the head group (~10M params), giving the fabric a
-  # small warm-up collective before the big reductions start -- the
-  # same failure mode that motivated the NCCL env block at the top
-  # of ``scripts/train.py`` (``NCCL_NVLS_ENABLE=0`` +
-  # ``NCCL_ALGO=Ring`` + ``NCCL_PROTO=Simple``).  Also lines up with
-  # ``optimizer.scheduler.warmup_epochs: 2`` below, so the DiT
-  # unfreezes exactly when the head LR finishes its linear warm-up
-  # and the cosine decay starts.  Flip to ``false`` to skip the
-  # warm-up entirely (end-to-end from step 0) or ``true`` for a
-  # heads-only run.
+  # Current value: heads-only warm-up for 2 epochs, then a fine-tune of
+  # the 16B omni transformer from epoch 2 onwards.  WARNING: end-to-end
+  # fine-tuning a 16B backbone is very memory-heavy -- prefer ``true``
+  # (heads-only) unless you have the budget, and turn on
+  # ``gradient_checkpointing`` below if you thaw it.  The 2-epoch
+  # warm-up also shrinks the cold first multi-GPU all-reduce from ~16B
+  # params to the head group, giving the NCCL fabric a small warm-up
+  # collective before the big reductions start (the failure mode that
+  # motivated the NCCL env block at the top of ``scripts/train.py``).
+  # Lines up with ``optimizer.scheduler.warmup_epochs: 2`` so the
+  # transformer unfreezes exactly when the head LR finishes its linear
+  # warm-up.  Flip to ``true`` for a heads-only run.
   freeze_dit_backbone: 2
   freeze_vae_decoder: true
 
+  # Strongly recommended ``true`` when ``freeze_dit_backbone`` thaws the
+  # 16B transformer (trades ~20-30% step time for ~40% less activation
+  # memory).  Left ``false`` here to match the heads-only warm-up phase.
   gradient_checkpointing: false
   dropout: 0.0
 

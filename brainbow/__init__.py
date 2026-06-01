@@ -45,6 +45,7 @@ from brainbow.datamodules import (
 from brainbow.losses import CombinedLoss, HEAD_CHANNELS, HEAD_LAYOUT, slice_head
 from brainbow.models import (
     BaseModel,
+    Cosmos3Nano3DWrapper,
     CosmosTransfer3DWrapper,
     Vista3DWrapper,
 )
@@ -52,6 +53,7 @@ from brainbow.modules import (
     BaseCircuitModule,
     BaseCosmosModule,
     BaseVistaModule,
+    Cosmos3Nano3DModule,
     CosmosTransfer3DModule,
     Vista3DModule,
 )
@@ -79,11 +81,13 @@ __all__ = [
     "slice_head",
     # Models (backbone wrappers)
     "BaseModel",
+    "Cosmos3Nano3DWrapper",
     "CosmosTransfer3DWrapper",
     "Vista3DWrapper",
     # Modules (Lightning)
     "BaseCircuitModule",
     "BaseCosmosModule",
+    "Cosmos3Nano3DModule",
     "BaseVistaModule",
     "CosmosTransfer3DModule",
     "Vista3DModule",

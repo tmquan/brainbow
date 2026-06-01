@@ -313,6 +313,103 @@ class _BaseCosmos25Wrapper(nn.Module):
         """
         return None
 
+    def _diffusers_transformer_cls_name(self) -> str:
+        """diffusers class name to load the base DiT into ``self.dit``.
+
+        Default: ``"CosmosTransformer3DModel"`` (the Cosmos 2.5 base
+        DiT used by Predict / Transfer).  Subclasses on a different
+        backbone family (e.g. Cosmos 3 with its omni
+        ``Cosmos3OmniTransformer``) override this so
+        :meth:`_try_load_diffusers` imports the right class.
+        """
+        return "CosmosTransformer3DModel"
+
+    def _diffusers_vae_cls_name(self) -> str:
+        """diffusers class name to load the VAE into ``self.vae_*``.
+
+        Default: ``"AutoencoderKLWan"`` -- the Wan VAE shared across the
+        Cosmos 2.5 *and* Cosmos 3 stacks (Cosmos 3 ships the
+        Wan2.2-TI2V VAE under the same class), so subclasses rarely need
+        to override this.
+        """
+        return "AutoencoderKLWan"
+
+    def _hf_ignore_patterns(self) -> Optional[List[str]]:
+        """Extra HF snapshot ignore globs for this backbone.
+
+        Default: ``None`` -- use :data:`hf_loader._DEFAULT_IGNORE_PATTERNS`.
+        Subclasses whose HF repo carries large unused subfolders (e.g.
+        Cosmos 3's ``vision_encoder`` / ``sound_tokenizer``) override
+        this to skip them -- we only ever load ``transformer/`` and
+        ``vae/`` and feed null conditioning for everything else.
+        """
+        return None
+
+    def _run_dit_forward(
+        self,
+        latent: torch.Tensor,
+        timestep: torch.Tensor,
+    ) -> None:
+        """Drive one DiT forward pass so the feature hooks fire.
+
+        The return value is ignored -- intermediate block activations
+        are captured by the persistent forward hooks registered in
+        :meth:`_register_persistent_hooks`; this method only has to make
+        the backbone *run* over ``latent`` with the right (null)
+        conditioning for the family.
+
+        Default: the Cosmos 2.5 ``CosmosTransformer3DModel`` call
+        convention (null text / image cross-attention embeddings, a
+        unit padding mask, a zero condition mask, and -- for
+        Cosmos-Transfer -- ControlNet residuals via
+        :meth:`_compute_controlnet_residuals`).  Backbones with a
+        different forward signature (e.g. Cosmos 3) override this whole
+        method.
+        """
+        B = latent.shape[0]
+        dit_cfg = getattr(self.dit, "config", None)
+        text_dim = getattr(dit_cfg, "crossattn_proj_in_channels", 1024)
+        null_text = torch.zeros(
+            B, 1, text_dim, device=latent.device, dtype=latent.dtype,
+        )
+
+        img_dim_in = getattr(dit_cfg, "img_context_dim_in", None)
+        img_tokens = getattr(dit_cfg, "img_context_num_tokens", 256)
+        if img_dim_in:
+            null_img = torch.zeros(
+                B, img_tokens, img_dim_in,
+                device=latent.device, dtype=latent.dtype,
+            )
+            enc_hidden: Any = (null_text, null_img)
+        else:
+            enc_hidden = null_text
+
+        padding_mask = torch.ones(
+            1, 1, latent.shape[-2], latent.shape[-1],
+            device=latent.device, dtype=latent.dtype,
+        )
+        null_condition = torch.zeros(
+            B, 1, *latent.shape[2:], device=latent.device, dtype=latent.dtype,
+        )
+
+        # Subclass hook -- Cosmos-Transfer runs its ControlNet over the
+        # *same* EM latent first so its residuals can be summed into the
+        # base DiT every ``controlnet_block_every_n`` blocks.  Predict
+        # returns ``None`` and the DiT runs alone.
+        block_controlnet_hidden_states = self._compute_controlnet_residuals(
+            latent, timestep, enc_hidden, padding_mask, null_condition,
+        )
+
+        with self._dit_forward_without_ckpt_when_eval():
+            self.dit(
+                hidden_states=latent,
+                timestep=timestep,
+                encoder_hidden_states=enc_hidden,
+                block_controlnet_hidden_states=block_controlnet_hidden_states,
+                condition_mask=null_condition,
+                padding_mask=padding_mask,
+            )
+
     # ------------------------------------------------------------------
     # Module placement
     # ------------------------------------------------------------------
@@ -392,13 +489,18 @@ class _BaseCosmos25Wrapper(nn.Module):
         hf_token: Optional[str],
         checkpoint_variant: str,
     ) -> bool:
+        transformer_cls_name = self._diffusers_transformer_cls_name()
+        vae_cls_name = self._diffusers_vae_cls_name()
         try:
-            from diffusers import (  # type: ignore[import-untyped]
-                CosmosTransformer3DModel,
+            import diffusers  # type: ignore[import-untyped]
+
+            _TransformerClass = getattr(diffusers, transformer_cls_name)
+            _VAEClass = getattr(diffusers, vae_cls_name)
+        except (ImportError, AttributeError):
+            logger.debug(
+                "diffusers classes not available (%s / %s).",
+                transformer_cls_name, vae_cls_name,
             )
-            from diffusers import AutoencoderKLWan as _VAEClass  # type: ignore[import-untyped]
-        except ImportError:
-            logger.debug("diffusers Cosmos classes not available.")
             return False
 
         try:
@@ -407,13 +509,14 @@ class _BaseCosmos25Wrapper(nn.Module):
                 revision=self.cfg.hf_revision,
                 cache_dir=cache_dir,
                 token=hf_token,
+                ignore_patterns=self._hf_ignore_patterns(),
             )
         except Exception as exc:
             logger.warning("HuggingFace download failed: %s", exc)
             return False
 
         try:
-            transformer = CosmosTransformer3DModel.from_pretrained(
+            transformer = _TransformerClass.from_pretrained(
                 str(local_path),
                 subfolder="transformer",
                 torch_dtype=self._dtype,
@@ -687,42 +790,12 @@ class _BaseCosmos25Wrapper(nn.Module):
         try:
             ctx = torch.enable_grad() if any_trainable else torch.no_grad()
             with ctx:
-                B = latent.shape[0]
-                dit_cfg = getattr(self.dit, "config", None)
-                text_dim = getattr(dit_cfg, "crossattn_proj_in_channels", 1024)
-                null_text = torch.zeros(B, 1, text_dim, device=latent.device, dtype=latent.dtype)
-
-                img_dim_in = getattr(dit_cfg, "img_context_dim_in", None)
-                img_tokens = getattr(dit_cfg, "img_context_num_tokens", 256)
-                if img_dim_in:
-                    null_img = torch.zeros(B, img_tokens, img_dim_in, device=latent.device, dtype=latent.dtype)
-                    enc_hidden = (null_text, null_img)
-                else:
-                    enc_hidden = null_text
-
-                padding_mask = torch.ones(1, 1, latent.shape[-2], latent.shape[-1], device=latent.device, dtype=latent.dtype)
-                null_condition = torch.zeros(B, 1, *latent.shape[2:], device=latent.device, dtype=latent.dtype)
-
-                # Subclass hook -- Cosmos-Transfer runs its ControlNet
-                # over the *same* EM latent first so its residuals can
-                # be summed into the base DiT every
-                # ``controlnet_block_every_n`` blocks (see
-                # ``CosmosTransformer3DModel.forward``).  Predict has
-                # no ControlNet, so this returns ``None`` and the DiT
-                # runs alone.
-                block_controlnet_hidden_states = self._compute_controlnet_residuals(
-                    latent, timestep, enc_hidden, padding_mask, null_condition,
-                )
-
-                with self._dit_forward_without_ckpt_when_eval():
-                    self.dit(
-                        hidden_states=latent,
-                        timestep=timestep,
-                        encoder_hidden_states=enc_hidden,
-                        block_controlnet_hidden_states=block_controlnet_hidden_states,
-                        condition_mask=null_condition,
-                        padding_mask=padding_mask,
-                    )
+                # Family-specific forward.  Default builds the Cosmos 2.5
+                # null-conditioning + ControlNet-residual call; Cosmos 3
+                # overrides ``_run_dit_forward`` for its omni signature.
+                # The return is ignored -- features are captured by the
+                # persistent block hooks above.
+                self._run_dit_forward(latent, timestep)
         finally:
             self._hooks_active = False
 

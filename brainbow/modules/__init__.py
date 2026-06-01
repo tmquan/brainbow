@@ -23,6 +23,8 @@ Public surface
 * :class:`BaseCosmosModule` -- adds the freeze schedule and
   ``dit_backbone_lr`` / ``controlnet_lr`` parameter-group split.
 * :class:`BaseVistaModule` -- adds Vista-specific wiring.
+* :class:`Cosmos3Nano3DModule` -- concrete Lightning class for the
+  Cosmos 3 (Nano) omni backbone (16B MoT, no ControlNet).  The default.
 * :class:`CosmosPredict3DModule` -- concrete Lightning class for the
   Cosmos-Predict 2.5 backbone (base DiT, no ControlNet).
 * :class:`CosmosTransfer3DModule` -- concrete Lightning class for the
@@ -37,6 +39,7 @@ See ``doc/CONTRIBUTING.md`` "How to add a new model architecture".
 
 from brainbow.modules.base import BaseCircuitModule
 from brainbow.modules.cosmos_2_5_common import BaseCosmosModule
+from brainbow.modules.cosmos_3_nano import Cosmos3Nano3DModule
 from brainbow.modules.cosmos_predict_2_5 import CosmosPredict3DModule
 from brainbow.modules.cosmos_transfer_2_5 import CosmosTransfer3DModule
 from brainbow.modules.vista import BaseVistaModule, Vista3DModule
@@ -45,6 +48,7 @@ __all__ = [
     "BaseCircuitModule",
     "BaseCosmosModule",
     "BaseVistaModule",
+    "Cosmos3Nano3DModule",
     "CosmosPredict3DModule",
     "CosmosTransfer3DModule",
     "Vista3DModule",
