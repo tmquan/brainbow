@@ -622,6 +622,25 @@ class _BaseCosmos25Wrapper(nn.Module):
         """Encode pixel-space volume ``[B, 3, D, H, W]`` to latent grid."""
         if hasattr(self, "_vae_ref") and self._vae_ref:
             vae = self._vae_ref[0]
+            # Device co-location.  ``_vae_ref`` holds the VAE as an
+            # UNregistered reference (list trick, so its params aren't
+            # double-counted in ``state_dict``).  DDP moved it via the
+            # ``_apply`` override, but FSDP only relocates the params it
+            # manages and leaves this reference (partly) on CPU -> "Input
+            # type (CUDA...) and weight type (CPU...)".  Note the VAE ends up
+            # MIXED-device under FSDP (the ``self.vae_encoder`` alias FSDP
+            # manages gets moved; quant/conv params do not), so we must check
+            # *every* param, not just the first, and move the whole module
+            # onto the input device.  ``.to()`` is a no-op for params already
+            # co-located, and the VAE is frozen so this never affects grads.
+            _vae_off_device = any(
+                p.device != x.device for p in vae.parameters()
+            ) or any(
+                b.device != x.device for b in vae.buffers()
+            )
+            if _vae_off_device:
+                self._vae_ref[0] = vae.to(x.device)
+                vae = self._vae_ref[0]
             ctx = torch.no_grad() if self._freeze_vae_encoder else torch.enable_grad()
             with ctx:
                 enc = vae.encode(x)
@@ -725,7 +744,17 @@ class _BaseCosmos25Wrapper(nn.Module):
 
         for attr in ("transformer_blocks", "blocks", "layers"):
             if hasattr(self.dit, attr):
-                self._hook_block_container = getattr(self.dit, attr)
+                # Store as a plain (UNregistered) reference via
+                # ``object.__setattr__``.  A normal ``self.x = <ModuleList>``
+                # assignment would re-register the DiT block list as a second
+                # submodule (aliasing ``dit.<attr>.*`` under
+                # ``_hook_block_container.*``).  Harmless under DDP, but FSDP's
+                # recursive auto-wrap then revisits the same layer twice and
+                # raises "already wrapped by FSDP".  The blocks still move with
+                # ``self.dit`` (mirrors the ``_vae_ref`` list trick).
+                object.__setattr__(
+                    self, "_hook_block_container", getattr(self.dit, attr),
+                )
                 break
 
         if self._hook_block_container is None:

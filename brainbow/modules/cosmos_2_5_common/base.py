@@ -216,6 +216,23 @@ class BaseCosmosModule(BaseCircuitModule):
                     "non-finite per-tensor norms).",
                     len(grads), self.global_step,
                 )
+        if not gradient_clip_val:
+            return
+
+        # FSDP path: Lightning's ``FSDPPrecision`` rejects
+        # ``self.clip_gradients(..., algorithm='norm')`` -- sharded grads
+        # need a cross-rank norm reduction, which the FSDP root module's
+        # own ``clip_grad_norm_`` performs.  Route there under FSDP and use
+        # the standard ``self.clip_gradients`` everywhere else (DDP / single).
+        from pytorch_lightning.strategies import FSDPStrategy
+
+        if isinstance(self.trainer.strategy, FSDPStrategy):
+            fsdp_module = self.trainer.model  # FSDP-wrapped root
+            clip_fn = getattr(fsdp_module, "clip_grad_norm_", None)
+            if callable(clip_fn):
+                clip_fn(float(gradient_clip_val))
+                return
+
         self.clip_gradients(
             optimizer,
             gradient_clip_val=gradient_clip_val,

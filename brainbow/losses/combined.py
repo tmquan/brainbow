@@ -641,6 +641,41 @@ class CombinedLoss(nn.Module):
 
         return aff_loss(aff_pred * pair_mask, aff_t * pair_mask)
 
+    def canonical_loss_keys(self) -> list:
+        """Loss-dict keys :meth:`forward` always emits for this config.
+
+        The key set is gated purely by ``weight_* > 0`` (see
+        :meth:`forward`), never by batch content, so it is identical on
+        every DDP/FSDP rank.  The evaluation loop pre-seeds these (plus the
+        fixed per-head metric keys) into its accumulator so the per-epoch
+        cross-rank reduction can run over a deterministic, rank-consistent
+        key order WITHOUT a fragile ``all_gather_object`` (which produced
+        bogus ">1EB" allocations under DDP dead-peer cascades and
+        ``EOFError`` under FSDP).
+        """
+        keys: list = ["loss"]
+        for name, weight in (
+            ("raw", self.weight_raw),
+            ("sem", self.weight_sem),
+            ("skl", self.weight_skl),
+            ("dir", self.weight_dir),
+            ("cov", self.weight_cov),
+            ("rad", self.weight_rad),
+            ("avg", self.weight_avg),
+            ("aff_emb", self.weight_aff_emb),
+            ("aff_avg", self.weight_aff_avg),
+        ):
+            if weight > 0:
+                keys.append(f"loss/{name}")
+        if self.weight_emb > 0:
+            keys += [
+                "loss/emb",
+                "loss/emb/pull",
+                "loss/emb/push",
+                "loss/emb/norm",
+            ]
+        return keys
+
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------

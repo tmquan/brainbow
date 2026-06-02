@@ -33,6 +33,7 @@ class MICRONSDataModule(CircuitDataModule):
         self,
         data_root: str,
         batch_size: int = 4,
+        val_batch_size: Optional[int] = None,
         num_workers: int = 4,
         cache_rate: float = 0.5,
         pin_memory: bool = True,
@@ -63,6 +64,7 @@ class MICRONSDataModule(CircuitDataModule):
         super().__init__(
             data_root=data_root,
             batch_size=batch_size,
+            val_batch_size=val_batch_size,
             num_workers=num_workers,
             cache_rate=cache_rate,
             pin_memory=pin_memory,

@@ -124,8 +124,11 @@ class ImageLogger(pl.Callback):
         self._val_batch: Optional[Dict[str, torch.Tensor]] = None
 
     # ------------------------------------------------------------------
-    # Batch capture (rank-0 only, first batch of each epoch)
+    # Batch capture (ALL ranks, first batch of each epoch)
     # ------------------------------------------------------------------
+    # Captured on every rank -- under FSDP the epoch-end forward must run
+    # on all ranks (the model's per-layer all-gathers are collectives), so
+    # every rank needs its own batch to feed.  Only rank 0 logs the result.
 
     @staticmethod
     def _detach_batch(batch: Dict[str, Any]) -> Dict[str, Any]:
@@ -142,7 +145,7 @@ class ImageLogger(pl.Callback):
         batch: Dict[str, torch.Tensor],
         batch_idx: int,
     ) -> None:
-        if batch_idx == 0 and trainer.global_rank == 0:
+        if batch_idx == 0:
             self._train_batch = self._detach_batch(batch)
 
     def on_validation_batch_end(
@@ -154,7 +157,7 @@ class ImageLogger(pl.Callback):
         batch_idx: int,
         dataloader_idx: int = 0,
     ) -> None:
-        if batch_idx == 0 and trainer.global_rank == 0:
+        if batch_idx == 0:
             self._val_batch = self._detach_batch(batch)
 
     # ------------------------------------------------------------------
@@ -171,29 +174,31 @@ class ImageLogger(pl.Callback):
             return None
         return tb
 
+
     @torch.no_grad()
     def on_train_epoch_end(
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
     ) -> None:
-        if trainer.global_rank != 0:
-            self._train_batch = None
-            return
+        # ALL ranks must run ``_run_visualization`` (its model forward does
+        # FSDP per-layer all-gathers -- collectives that need every rank);
+        # only rank 0 actually logs (``tb`` is None elsewhere, and the
+        # forward bails before the logging stage on non-rank-0).  Do NOT
+        # early-return on non-rank-0, or the collectives desync and hang.
+        # The epoch gate is rank-consistent (same ``current_epoch``).
         epoch = trainer.current_epoch
         if epoch % self.every_n_epochs != 0:
+            self._train_batch = None
             return
         if self._train_batch is None:
             return
-        tb = self._get_tb(trainer)
-        if tb is None:
-            return
 
-        batch = self._train_batch
+        tb = self._get_tb(trainer)  # real on rank 0, None elsewhere
         was_training = pl_module.training
         pl_module.eval()
         try:
-            self._run_visualization(tb, pl_module, batch, stage="train")
+            self._run_visualization(tb, trainer, pl_module, self._train_batch, stage="train")
         finally:
             self._train_batch = None
             if was_training:
@@ -205,24 +210,20 @@ class ImageLogger(pl.Callback):
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
     ) -> None:
-        if trainer.global_rank != 0:
-            self._val_batch = None
-            return
+        # See on_train_epoch_end: ALL ranks run the forward (collective);
+        # only rank 0 logs.  No non-rank-0 early-return.
         epoch = trainer.current_epoch
         if epoch % self.every_n_epochs != 0:
+            self._val_batch = None
             return
         if self._val_batch is None:
             return
-        tb = self._get_tb(trainer)
-        if tb is None:
-            return
 
+        tb = self._get_tb(trainer)  # real on rank 0, None elsewhere
         was_training = pl_module.training
         pl_module.eval()
         try:
-            self._run_visualization(
-                tb, pl_module, self._val_batch, stage="val",
-            )
+            self._run_visualization(tb, trainer, pl_module, self._val_batch, stage="val")
         finally:
             self._val_batch = None
             if was_training:
@@ -233,7 +234,7 @@ class ImageLogger(pl.Callback):
     # ------------------------------------------------------------------
 
     def _run_visualization(
-        self, tb, pl_module, batch, *, stage: str,
+        self, tb, trainer, pl_module, batch, *, stage: str,
     ):
         epoch = pl_module.current_epoch
         # Gate autocast on the actual device the module lives on, **not**
@@ -254,14 +255,30 @@ class ImageLogger(pl.Callback):
                 labels = rearrange(labels, "b 1 ... -> b ...")
 
             n = min(images.shape[0], self.max_images)
-            head_pred = pl_module.model(images[:n])
+            # Route the head forward through the (FSDP/DDP-)WRAPPED root
+            # module ``trainer.model`` -> ``LightningModule.forward`` ->
+            # ``self.model``.  Under FSDP this triggers the root unit's
+            # native param unshard (the frozen VAE + heads live there); a
+            # direct ``pl_module.model(...)`` call bypasses it and sees
+            # sharded 1-D weights ("weight should have at least three
+            # dimensions").  Identical behaviour under DDP / single.
+            fwd_module = getattr(trainer, "model", None) or pl_module
+            head_pred = fwd_module(images[:n])
 
-            # Optional: pretrained Wan-VAE pixel reconstruction (Cosmos
-            # only).  Diagnostic side branch — see
-            # ``CosmosTransfer3DWrapper.wan_decoder_output``.  Returns
-            # ``None`` for the random-init standalone DiT and for the
-            # Vista wrapper, which suppresses the panel downstream.
-            wan_decoder = getattr(pl_module.model, "wan_decoder_output", None)
+            # Wan-VAE reconstruction panel (Cosmos diagnostic) is a wrapper
+            # METHOD, not the forward, so it can't ride the root unshard --
+            # under FSDP its params would be sharded.  Skip it under FSDP
+            # (panel suppressed); keep it on DDP / single where params are
+            # full-shape.
+            try:
+                from pytorch_lightning.strategies import FSDPStrategy
+                is_fsdp = isinstance(getattr(trainer, "strategy", None), FSDPStrategy)
+            except Exception:
+                is_fsdp = False
+            wan_decoder = (
+                None if is_fsdp
+                else getattr(pl_module.model, "wan_decoder_output", None)
+            )
             wan_decoder_pred = (
                 wan_decoder(images[:n]) if callable(wan_decoder) else None
             )
@@ -273,6 +290,14 @@ class ImageLogger(pl.Callback):
         head_pred = head_pred.float()
         if wan_decoder_pred is not None:
             wan_decoder_pred = wan_decoder_pred.float()
+
+        # The forward above is the only collective part (FSDP per-layer
+        # all-gathers), and every rank has now run it.  Non-rank-0 ranks
+        # have no TensorBoard writer, so they bail here -- the remaining
+        # work (clustering, manifold projection, rendering, ``tb.add_*``)
+        # is purely local and only the master needs to do it.
+        if tb is None:
+            return
 
         clusterer = (
             getattr(pl_module, "clusterer", None)

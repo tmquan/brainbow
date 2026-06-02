@@ -203,6 +203,7 @@ def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
     return {
         "data_root": data_cfg.get("data_root", "data"),
         "batch_size": data_cfg.get("batch_size", 4),
+        "val_batch_size": data_cfg.get("val_batch_size"),
         "num_workers": data_cfg.get("num_workers", 4),
         "cache_rate": data_cfg.get("cache_rate", 0.5),
         "pin_memory": data_cfg.get("pin_memory", True),
@@ -490,9 +491,61 @@ def setup_strategy(cfg: DictConfig):
             timeout=datetime.timedelta(minutes=30),
         )
     if strategy_name == "fsdp":
+        # FULL_SHARD FSDP for end-to-end training of the 15.2 B Cosmos3-Nano
+        # omni transformer: weights, grads and optimizer state shard across
+        # the ranks instead of being replicated (DDP OOMs at ~265 GB/rank).
+        #
+        # Wrap policy: ONLY the Cosmos3 omni decoder-layer class
+        # (``Cosmos3VLTextMoTDecoderLayer`` -- the unit run at
+        # ``und_seq, gen_seq = decoder_layer(...)`` in
+        # ``transformer_cosmos3.py``).  Each of the 36 layers becomes its own
+        # FSDP unit; the small fp32-origin heads / feature projector /
+        # ``time_embedder`` and the Wan VAE are deliberately left UNWRAPPED
+        # (they sit in the root unit), so they are tiny and unsharded.
+        #
+        # ``use_orig_params=True`` is REQUIRED so the optimiser param-group
+        # split in ``BaseCosmosModule.configure_optimizers`` can still bucket
+        # by name (``model.dit.*`` vs heads) and so the mixed
+        # frozen/trainable + mixed-dtype graph is allowed.
+        #
+        # MixedPrecision(bf16/bf16/bf16): the model is natively bf16, so we
+        # shard, compute and all-reduce in bf16.  Paired with Lightning
+        # ``precision: bf16-true`` (see ``configs/snemi3d.yaml``), which casts
+        # the module to bf16 and -- crucially -- runs the forward WITHOUT an
+        # outer autocast (FSDPPrecision's "true" path uses a dtype context,
+        # not ``torch.autocast``), so the ``at::autocast::prioritize`` failure
+        # of the bf16-mixed path cannot occur.
+        #
+        # Activation checkpointing is provided by the wrapper's own
+        # ``gradient_checkpointing: true`` (diffusers-native, hook-aware via
+        # ``_hooks_active``); we deliberately do NOT also pass
+        # ``activation_checkpointing_policy`` here to avoid double-wrapping
+        # the same decoder layers.
+        import functools
+
+        from diffusers.models.transformers.transformer_cosmos3 import (
+            Cosmos3VLTextMoTDecoderLayer,
+        )
+        from torch.distributed.fsdp import MixedPrecision
+        from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+
+        auto_wrap_policy = functools.partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={Cosmos3VLTextMoTDecoderLayer},
+        )
+        bf16 = torch.bfloat16
         return FSDPStrategy(
             sharding_strategy="FULL_SHARD",
-            activation_checkpointing_policy={torch.nn.modules.conv.Conv3d},
+            auto_wrap_policy=auto_wrap_policy,
+            mixed_precision=MixedPrecision(
+                param_dtype=bf16,
+                reduce_dtype=bf16,
+                buffer_dtype=bf16,
+            ),
+            use_orig_params=True,
+            limit_all_gathers=True,
+            state_dict_type="sharded",
+            timeout=datetime.timedelta(minutes=30),
         )
     return strategy_name
 
@@ -518,6 +571,7 @@ def build_trainer(
         log_every_n_steps=training_cfg.get("log_every_n_steps", 50),
         gradient_clip_val=training_cfg.get("gradient_clip_val", 1.0),
         accumulate_grad_batches=training_cfg.get("accumulate_grad_batches", 1),
+        limit_train_batches=training_cfg.get("limit_train_batches", 1.0),
         limit_val_batches=training_cfg.get("limit_val_batches", 1.0),
         val_check_interval=training_cfg.get("val_check_interval", 1.0),
         check_val_every_n_epoch=training_cfg.get("check_val_every_n_epoch", 1),

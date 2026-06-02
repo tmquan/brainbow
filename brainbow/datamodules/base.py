@@ -83,7 +83,11 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
 
     Args:
         data_root: Path to the data directory.
-        batch_size: Batch size for training and validation.
+        batch_size: Batch size for training (and validation when
+            ``val_batch_size`` is unset).
+        val_batch_size: Batch size for validation / test loaders.
+            Defaults to ``batch_size``; set lower when the eval-time
+            memory peak exceeds the train step.
         num_workers: Number of worker processes for data loading.
         cache_rate: Fraction of data to cache in memory (default: 0.5).
         pin_memory: Whether to pin memory for faster GPU transfer.
@@ -106,6 +110,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         self,
         data_root: str,
         batch_size: int = 4,
+        val_batch_size: Optional[int] = None,
         num_workers: int = 4,
         cache_rate: float = 0.5,
         pin_memory: bool = True,
@@ -133,6 +138,11 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
 
         self.data_root = data_root
         self.batch_size = batch_size
+        # Validation / test batch size.  Defaults to ``batch_size``.  Set
+        # lower (e.g. 1) when the eval-time forward + full-resolution decode
+        # + clusterer/metrics peak exceeds the train-step memory -- common on
+        # large backbones where validation is the memory-binding path.
+        self.val_batch_size = val_batch_size if val_batch_size is not None else batch_size
         self.num_workers = num_workers
         self.cache_rate = cache_rate
         self.pin_memory = pin_memory
@@ -541,7 +551,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
     def val_dataloader(self) -> torch.utils.data.DataLoader:
         return torch.utils.data.DataLoader(
             self.val_dataset,  # type: ignore[arg-type]
-            batch_size=self.batch_size,
+            batch_size=self.val_batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
@@ -553,7 +563,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
     def test_dataloader(self) -> torch.utils.data.DataLoader:
         return torch.utils.data.DataLoader(
             self.test_dataset,  # type: ignore[arg-type]
-            batch_size=self.batch_size,
+            batch_size=self.val_batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,

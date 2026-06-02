@@ -113,6 +113,16 @@ data:
 
   # ---- Loader & batching ----
   batch_size: 4
+  # Validation/test batch size.  The eval path runs a full-resolution
+  # decode + the SpatialCC clusterer + contingency-matrix metrics on top
+  # of the 16B forward, so its per-batch peak FAR exceeds the train step
+  # (~207 GB/rank at batch_size=4 on Cosmos3-Nano).  Under DDP that tips
+  # one rank into OOM -> the rank dies -> the survivors' epoch-end
+  # ``dist.all_gather_object`` reports a bogus ">1EB" allocation.  Pin
+  # val to 1 to keep the eval peak well under the per-GPU ceiling; raise
+  # once you've confirmed headroom.  (A per-batch OOM is also caught and
+  # skipped now -- see ``BaseCircuitModule._eval_step_and_accumulate``.)
+  val_batch_size: 1
   num_workers: 8
   # persistent_workers=true.  The earlier ``/dev/shm`` blow-up that
   # tempted us to disable this was actually a kimimaro pathos leak
@@ -333,14 +343,30 @@ model:
   # Lines up with ``optimizer.scheduler.warmup_epochs: 2`` so the
   # transformer unfreezes exactly when the head LR finishes its linear
   # warm-up.  Flip to ``true`` for a heads-only run.
-  freeze_dit_backbone: 2
+  #
+  # ``false`` = end-to-end training of the 15.2B omni transformer.  This
+  # only fits with FSDP FULL_SHARD (``training.strategy: fsdp`` below),
+  # which shards weights/grads/optimizer ~8x across ranks (~17 GB/rank).
+  # Under plain DDP this OOMs (~265 GB/rank, replicated) -- switch to
+  # ``true`` (heads-only) if you ever run on DDP.
+  freeze_dit_backbone: false
   freeze_vae_decoder: true
 
-  # Strongly recommended ``true`` when ``freeze_dit_backbone`` thaws the
-  # 16B transformer (trades ~20-30% step time for ~40% less activation
-  # memory).  Left ``false`` here to match the heads-only warm-up phase.
+  # End-to-end training of the 15.2B omni transformer is only feasible
+  # with FSDP FULL_SHARD (``training.strategy: fsdp`` below) AND
+  # activation checkpointing.  ``true`` here enables the wrapper's
+  # diffusers-native gradient checkpointing on the 36 decoder layers
+  # (trades ~20-30% step time for ~40% less activation memory).  It is
+  # hook-aware (recompute in backward is gated by ``_hooks_active``) and
+  # is used *instead of* FSDP ``activation_checkpointing_policy`` to
+  # avoid double-wrapping the same layers.
+  # Disabled for speed (saves the ~20-30% recompute tax).  TRADE-OFF:
+  # FSDP shards params/grads/optimizer but NOT activations, so without
+  # checkpointing the full 16B activation stack is retained per rank and
+  # memory rises sharply -- if this OOMs, flip back to ``true`` or lower
+  # ``data.batch_size``.
   gradient_checkpointing: false
-  dropout: 0.2
+  dropout: 0.4
 
 
 # ---------------------------------------------------------------------
@@ -349,7 +375,21 @@ model:
 callbacks:
   cuda_empty_cache_before_val: true   # avoids val-peak polluting train pool
   image_logger:
-    max_images: 8
+    # Train + val visualizations at epoch end.  Runs on rank 0 only, so
+    # it does NOT cause the multi-rank validation cascade -- that was the
+    # per-rank val step at val_batch_size=4, now fixed by
+    # ``data.val_batch_size: 1`` + the OOM guard in
+    # ``BaseCircuitModule._eval_step_and_accumulate``.
+    #
+    # FSDP-safe: the epoch-end forward runs on ALL ranks (so the model's
+    # per-layer FSDP all-gathers are satisfied), and only rank 0 writes the
+    # panels to TensorBoard (non-rank-0 bail right after the forward).  See
+    # ``ImageLogger`` -- this replaced the rank-0-only / ``summon_full_params``
+    # approach, which desynced the collectives and hung to a 1800s NCCL
+    # timeout.  Every rank pays one extra ``model(images[:max_images])`` +
+    # ``wan_decoder`` decode at epoch end, so keep ``max_images`` modest.
+    enabled: true
+    max_images: 4
 
 
 # ---------------------------------------------------------------------
@@ -359,8 +399,29 @@ training:
   max_epochs: 101
   accelerator: auto
   devices: auto
-  strategy: ddp
-  precision: bf16-mixed
+  # FSDP FULL_SHARD so the 15.2B omni DiT shards weights/grads/optimizer
+  # across the 8 ranks (DDP replicates it -> ~265 GB/rank OOM).  The
+  # FSDPStrategy (see ``scripts/train.py::setup_strategy``) wraps only the
+  # Cosmos3 decoder-layer class, keeps the small fp32-origin heads / VAE in
+  # the unsharded root unit, and uses ``use_orig_params=True`` so the
+  # ``model.dit.*`` vs heads optimiser split still works.  Switch back to
+  # ``ddp`` for heads-only (``freeze_dit_backbone: true``) runs.
+  #
+  # FSDP FULL_SHARD: shards the 15.2B omni DiT's weights/grads/optimizer
+  # across the 8 ranks (~17 GB/rank) so end-to-end training fits; DDP
+  # would replicate it -> ~265 GB/rank OOM.  The FSDPStrategy (see
+  # ``scripts/train.py::setup_strategy``) wraps only the Cosmos3
+  # decoder-layer class, keeps the small fp32-origin heads / VAE in the
+  # unsharded root unit, and uses ``use_orig_params=True`` so the
+  # ``model.dit.*`` vs heads optimiser split still works.
+  strategy: fsdp
+  # ``bf16-true`` (NOT ``bf16-mixed``) with FSDP: the model is natively
+  # bf16, so cast to bf16 and run WITHOUT an outer autocast.  Lightning's
+  # FSDPPrecision "true" path uses a dtype context (not ``torch.autocast``),
+  # avoiding the redundant re-promotion of this mixed-dtype graph (the
+  # ``at::autocast::prioritize`` failure) and pairing with the FSDP
+  # ``MixedPrecision(bf16/bf16/bf16)`` sharding dtype.
+  precision: bf16-true
   gradient_clip_val: 1.0
   accumulate_grad_batches: 1
   limit_val_batches: 100
@@ -373,6 +434,24 @@ training:
   #   false / null     -> off
   #   true             -> "reduce-overhead"  (~1 min compile, good runtime)
   #   "max-autotune"   -> best runtime, but 5-15 min first-run compile
+  #   "default"        -> Inductor fusion, NO cudagraphs
+  #
+  # MUST stay false (or "default") for the cosmos3nano3d backbone.  Its
+  # feature extraction captures DiT block activations via forward hooks
+  # (``Cosmos3Nano3DWrapper._extract_features_hook``).  The cudagraph
+  # modes ("reduce-overhead" / "max-autotune") place those captured
+  # tensors in reused static graph memory, and the next graph replay
+  # overwrites them before they're stacked -> "accessing tensor output
+  # of CUDAGraphs that has been overwritten".  Cloning in the hook can't
+  # escape because the hook runs *inside* the captured graph.  Cudagraphs
+  # are fundamentally incompatible with hook-based intermediate capture,
+  # so use "default" if you want Inductor fusion (no cudagraphs), else
+  # false.  (The Cosmos-2.5 backbones tolerated "reduce-overhead" only
+  # because their captured tensors happened not to be cudagraph-managed.)
+  #
+  # Kept ``false`` for the FSDP end-to-end run: the cudagraph/hook
+  # incompatibility above, plus torch.compile + FSDP composition, are not
+  # worth the risk here.
   compile: false
   # compile_fullgraph=true forces a single monolithic Inductor compile
   # of the 2B DiT (no graph breaks), which gives the best steady-state
@@ -386,7 +465,7 @@ training:
   # the first step lands: ``false`` lets Inductor compile
   # incrementally with graph breaks, trading ~10% runtime for a much
   # shorter first-step.
-  compile_fullgraph: false
+  compile_fullgraph: true
 
   # -------------------------------------------------------------------
   # Validation-time clusterer

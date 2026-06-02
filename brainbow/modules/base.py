@@ -314,18 +314,38 @@ class BaseCircuitModule(pl.LightningModule):
         batch = self._strip_meta_tensor(batch)
         images = self._expand_image_channel(batch["image"])
 
-        targets = self._prepare_targets(batch)
-        head = self.model(images)
-        losses = self.criterion(head, targets)
+        # OOM guard.  A single heavy validation crop (many instances ->
+        # large clusterer / contingency-matrix allocation, on top of the
+        # full-resolution decode) can exhaust GPU memory on big backbones.
+        # Under DDP a CUDA OOM kills that rank, and the survivors then trip
+        # the epoch-end ``dist.all_gather_object`` in ``_reduce_and_log_accum``
+        # into a bogus ">1EB" allocation (the dead-peer cascade).  Catch the
+        # OOM, drop this batch's contribution, reclaim memory, and continue
+        # so the rank stays alive; the epoch-end reducer already unions keys
+        # across ranks, so a rank with fewer accumulated batches is safe.
+        head = losses = targets = None
+        try:
+            targets = self._prepare_targets(batch)
+            head = self.model(images)
+            losses = self.criterion(head, targets)
 
-        prefix = self._scalar_prefix(stage)
-        bs = float(images.shape[0])
-        for name, val in losses.items():
-            self._accum(f"{prefix}/{name}", val, bs)
+            prefix = self._scalar_prefix(stage)
+            bs = float(images.shape[0])
+            for name, val in losses.items():
+                self._accum(f"{prefix}/{name}", val, bs)
 
-        self._accumulate_metrics(head, targets, prefix, bs)
-
-        del head, losses
+            self._accumulate_metrics(head, targets, prefix, bs)
+        except torch.cuda.OutOfMemoryError:
+            warnings.warn(
+                f"CUDA OOM during {stage} step (skipping this batch's "
+                "metrics; rank kept alive to avoid a DDP all_gather cascade). "
+                "Lower data.val_batch_size or patch_size if frequent.",
+                stacklevel=2,
+            )
+        finally:
+            del head, losses, targets
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _accumulate_metrics(
         self,
@@ -391,22 +411,16 @@ class BaseCircuitModule(pl.LightningModule):
         del ins_pred
 
     def _reduce_and_log_accum(self, stage: str) -> None:
-        # Note: ranks may legitimately accumulate different key sets per epoch
-        # (e.g. _accumulate_instance_metrics early-returns on all-background
-        # batches; conditional loss terms similarly skip insertion). Building
-        # tensors from `sorted(self._eval_accum)` per rank would then create
-        # length-mismatched allreduces and a silent NCCL hang. Union the keys
-        # across ranks first so every rank reduces the same fixed shape; a
-        # rank that never saw key K contributes (0.0, 0.0) -- caught by the
-        # `counts[i] > 0` filter below.
-        if self.trainer.world_size > 1:
-            local_names: List[str] = list(self._eval_accum.keys())
-            gathered: List[List[str]] = [None] * self.trainer.world_size  # type: ignore[list-item]
-            dist.all_gather_object(gathered, local_names)
-            names = sorted({n for sub in gathered for n in sub})
-        else:
-            names = sorted(self._eval_accum)
-
+        # The accumulator was pre-seeded with a canonical, rank-independent
+        # key set in ``_seed_eval_accum`` (criterion loss keys + fixed
+        # sem/emb metric keys), and no other keys are ever inserted, so
+        # ``sorted(self._eval_accum)`` is identical on every rank.  We can
+        # therefore reduce in deterministic order WITHOUT a cross-rank
+        # ``all_gather_object`` to union keys -- that object collective was
+        # the source of the bogus ">1EB" allocations under DDP dead-peer
+        # cascades and of ``EOFError: Ran out of input`` under FSDP.  Seeded
+        # keys that never received data have count 0 and are filtered below.
+        names = sorted(self._eval_accum)
         if not names:
             return
 
@@ -445,8 +459,37 @@ class BaseCircuitModule(pl.LightningModule):
     # Validation / Test hooks
     # ------------------------------------------------------------------
 
-    def on_validation_epoch_start(self) -> None:
+    # Fixed per-head metric keys produced by ``_accumulate_metrics``.  The
+    # instance (emb) metrics are foreground-gated, so a rank whose batches
+    # were all background would otherwise omit them -- pre-seeding makes the
+    # key set identical across ranks (see ``_seed_eval_accum``).
+    _SEM_METRIC_KEYS = ("sem/metric/acc", "sem/metric/iou", "sem/metric/dice")
+    _EMB_METRIC_KEYS = (
+        "emb/metric/ari", "emb/metric/ami", "emb/metric/voi",
+        "emb/metric/voi_split", "emb/metric/voi_merge", "emb/metric/ted",
+    )
+
+    def _seed_eval_accum(self, stage: str) -> None:
+        """Reset and pre-seed the eval accumulator with a canonical key set.
+
+        The seeded set = the criterion's deterministic loss keys
+        (``canonical_loss_keys()``, gated only by config) + the fixed
+        per-head metric keys above.  Because it is computed identically on
+        every rank, ``_reduce_and_log_accum`` can reduce in a deterministic
+        sorted order WITHOUT a fragile cross-rank ``all_gather_object``
+        (which gave bogus ">1EB" OOMs under DDP dead-peer cascades and
+        ``EOFError`` under FSDP).  Seeded entries start at ``(0.0, 0.0)`` and
+        are dropped at log time if they never receive data (count 0).
+        """
         self._eval_accum = defaultdict(lambda: [0.0, 0.0])
+        prefix = self._scalar_prefix(stage)
+        canon = getattr(self.criterion, "canonical_loss_keys", None)
+        loss_keys = list(canon()) if callable(canon) else []
+        for key in (*loss_keys, *self._SEM_METRIC_KEYS, *self._EMB_METRIC_KEYS):
+            _ = self._eval_accum[f"{prefix}/{key}"]  # materialise (0.0, 0.0)
+
+    def on_validation_epoch_start(self) -> None:
+        self._seed_eval_accum("val")
 
     def validation_step(
         self, batch: Dict[str, torch.Tensor], batch_idx: int,
@@ -459,7 +502,7 @@ class BaseCircuitModule(pl.LightningModule):
             torch.cuda.empty_cache()
 
     def on_test_epoch_start(self) -> None:
-        self._eval_accum = defaultdict(lambda: [0.0, 0.0])
+        self._seed_eval_accum("test")
 
     def test_step(
         self, batch: Dict[str, torch.Tensor], batch_idx: int,

@@ -108,6 +108,11 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
         # model's decoder forward accordingly (no-op for non-residual
         # VAEs, so the Cosmos 2.5 path is unaffected).
         self._maybe_wrap_residual_vae_decoder()
+        # Keep the fp32 ``Timesteps`` embedding compatible with whatever
+        # dtype ``time_embedder`` ends up at (bf16 after the base load, or
+        # bf16 under FSDP MixedPrecision) without mutating the module --
+        # safe under FSDP flat params.
+        self._install_time_embedder_dtype_guard()
 
     # ------------------------------------------------------------------
     # Backbone selection
@@ -197,20 +202,15 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
         p = int(getattr(cfg, "latent_patch_size", self.cfg.patch_size))
         device = latent.device
 
-        # ``Cosmos3OmniTransformer`` lists ``time_embedder`` in
-        # ``_keep_in_fp32_modules``: diffusers' ``Timesteps`` always emits
-        # an fp32 sinusoidal embedding, so the timestep MLP weights must
-        # stay fp32 too.  The shared base load casts the whole DiT to the
-        # wrapper dtype (bf16), which silently breaks that contract and
-        # makes the ``time_embedder`` matmul raise a Float/BFloat16
-        # mismatch.  Restore it once here (cheap no-op after the first
-        # call) so the omni timestep path matches the upstream pipeline.
-        time_embedder = getattr(self.dit, "time_embedder", None)
-        if (
-            time_embedder is not None
-            and next(time_embedder.parameters()).dtype != torch.float32
-        ):
-            time_embedder.float()
+        # NOTE on the timestep dtype: diffusers' ``Timesteps`` always emits an
+        # fp32 sinusoidal embedding (``get_timestep_embedding`` upcasts), so
+        # the ``time_embedder`` MLP would hit a dtype mismatch if its weights
+        # are bf16.  This is handled by an input-cast forward-pre-hook
+        # installed in :meth:`_install_time_embedder_dtype_guard` (which casts
+        # the fp32 timestep embedding to the module's *runtime* weight dtype).
+        # We do NOT mutate the module dtype here -- under FSDP the params are
+        # flat-param views and an in-place ``.float()`` would corrupt the
+        # shard.
 
         # The omni transformer is unbatched (it works on a single packed
         # ``[sequence_length, hidden]`` stream); the batch loop lives in
@@ -377,7 +377,13 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
 
         for attr in ("transformer_blocks", "blocks", "layers"):
             if hasattr(self.dit, attr):
-                self._hook_block_container = getattr(self.dit, attr)
+                # Unregistered reference (see base ``_register_persistent_hooks``):
+                # a normal assignment would alias the DiT block list as a second
+                # submodule, which makes FSDP's recursive auto-wrap double-wrap
+                # the same decoder layer ("already wrapped by FSDP").
+                object.__setattr__(
+                    self, "_hook_block_container", getattr(self.dit, attr),
+                )
                 break
 
         if self._hook_block_container is None:
@@ -485,7 +491,13 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
         while 0 < len(collected) < num_layers:
             collected.append(collected[-1])
 
-        collected = [f.float() for f in collected]
+        # Match the projector's *runtime* parameter dtype rather than forcing
+        # fp32: the projector is fp32 in the eager / DDP-bf16-mixed path but
+        # bf16 under FSDP ``MixedPrecision`` (bf16-true), so a hard ``.float()``
+        # would mismatch the sharded bf16 projector weights.
+        proj_param = next(self.feature_projector.parameters(), None)
+        proj_dtype = proj_param.dtype if proj_param is not None else torch.float32
+        collected = [f.to(proj_dtype) for f in collected]
         return self.feature_projector(collected, grid_d, grid_h, grid_w)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -525,6 +537,41 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
             if head_param is not None and features.dtype != head_param.dtype:
                 features = features.to(head_param.dtype)
             return self.decoder_adapter(features, target_size=target_size)
+
+    def _install_time_embedder_dtype_guard(self) -> None:
+        """Cast the fp32 timestep embedding to ``time_embedder``'s dtype.
+
+        ``Cosmos3OmniTransformer.forward`` runs
+        ``self.time_embedder(self.time_proj(timesteps))`` and diffusers'
+        ``Timesteps``/``get_timestep_embedding`` ALWAYS returns fp32.  If
+        ``time_embedder``'s weights are bf16 (they are after the base load,
+        and under FSDP ``MixedPrecision``) the matmul raises a Float/BFloat16
+        mismatch.  A ``forward_pre_hook`` that casts the (activation) input to
+        the module's current weight dtype fixes this for every precision /
+        sharding mode without ever mutating the parameter dtype -- the latter
+        would corrupt an FSDP flat-param view.
+        """
+        if getattr(self, "_c3_time_embedder_guarded", False):
+            return
+        time_embedder = getattr(self.dit, "time_embedder", None)
+        if time_embedder is None:
+            return
+
+        def _cast_inputs(module: nn.Module, args: Any) -> Any:
+            if not args:
+                return args
+            weight = next(module.parameters(), None)
+            first = args[0]
+            if (
+                weight is not None
+                and isinstance(first, torch.Tensor)
+                and first.dtype != weight.dtype
+            ):
+                return (first.to(weight.dtype),) + tuple(args[1:])
+            return args
+
+        time_embedder.register_forward_pre_hook(_cast_inputs)
+        self._c3_time_embedder_guarded = True
 
     # ------------------------------------------------------------------
     # Decoder override (residual Wan2.2 VAE)
