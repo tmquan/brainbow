@@ -38,11 +38,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Cosmos-Predict2.5 backbone (DiT + VAE).  Pulls HuggingFace + diffusers.
+# Cosmos backbones (Cosmos 2.5 Predict/Transfer + Cosmos 3 Nano).
+# Pulls HuggingFace + diffusers (+ transformers for the Cosmos 3 omni
+# Qwen3-VL / Qwen2 sub-towers).
+#
+# NOTE: the default ``cosmos3nano3d`` backbone needs
+# ``Cosmos3OmniTransformer``, which is only on diffusers git main as of
+# this writing -- the ``>=0.37.0`` lower bound here is a placeholder.
+# Until a release ships the class, install the git-main build pinned in
+# ``requirements.txt`` (``diffusers @ git+https://github.com/huggingface/diffusers.git``);
+# otherwise the wrapper falls back to a randomly-initialised DiT.  Bump
+# this lower bound to the first release exposing the class once it lands.
 cosmos = [
     "diffusers>=0.37.0",
+    "transformers>=4.57.0",
     "huggingface_hub>=1.6.0",
-    "safetensors>=0.7.0",
+    # git-main diffusers requires safetensors>=0.8.0rc0.
+    "safetensors>=0.8.0rc0",
     "accelerate>=1.13.0",
 ]
 # NVIDIA RAPIDS wheels for GPU clustering (cuML HDBSCAN / MeanShift)

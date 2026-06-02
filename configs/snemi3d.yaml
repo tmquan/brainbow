@@ -340,7 +340,7 @@ model:
   # 16B transformer (trades ~20-30% step time for ~40% less activation
   # memory).  Left ``false`` here to match the heads-only warm-up phase.
   gradient_checkpointing: false
-  dropout: 0.0
+  dropout: 0.2
 
 
 # ---------------------------------------------------------------------
@@ -373,7 +373,7 @@ training:
   #   false / null     -> off
   #   true             -> "reduce-overhead"  (~1 min compile, good runtime)
   #   "max-autotune"   -> best runtime, but 5-15 min first-run compile
-  compile: true
+  compile: false
   # compile_fullgraph=true forces a single monolithic Inductor compile
   # of the 2B DiT (no graph breaks), which gives the best steady-state
   # runtime but pays for it with a multi-minute first-step stall.
@@ -386,7 +386,7 @@ training:
   # the first step lands: ``false`` lets Inductor compile
   # incrementally with graph breaks, trading ~10% runtime for a much
   # shorter first-step.
-  compile_fullgraph: true
+  compile_fullgraph: false
 
   # -------------------------------------------------------------------
   # Validation-time clusterer

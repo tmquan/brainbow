@@ -85,10 +85,28 @@ tensorboard==2.20.0
 matplotlib==3.10.8
 plotly>=5.24.0
 
-# Cosmos-Predict2.5 backbone
-diffusers==0.37.0
+# Cosmos backbones (Cosmos 2.5 Predict/Transfer + Cosmos 3 Nano)
+#
+# The default backbone (``model.type: cosmos3nano3d``) loads
+# ``Cosmos3OmniTransformer``, which is NOT in any tagged diffusers
+# release yet -- the pinned 0.37.0 only ships the Cosmos 2.5 classes
+# (``CosmosTransformer3DModel`` etc.).  Without the git-main build the
+# wrapper silently falls back to a randomly-initialised DiT (see
+# ``_BaseCosmos25Wrapper._try_load_diffusers``).  Track HF's main until
+# a release (>= the version that exposes ``Cosmos3OmniTransformer``)
+# lands, then re-pin to that tag.  git main still ships every Cosmos
+# 2.5 class, so Predict/Transfer keep working.
+diffusers @ git+https://github.com/huggingface/diffusers.git
+# Cosmos 3 is an omni model: the pipeline pulls a Qwen3-VL vision
+# encoder + Qwen2 tokenizer from transformers, so it is now a hard
+# dependency (Qwen3-VL support requires a recent transformers).  Pin
+# the exact resolved version once the env is rebuilt.
+transformers>=4.57.0
 huggingface_hub>=1.6.0
-safetensors==0.7.0
+# git-main diffusers (0.39.0.dev0) requires safetensors>=0.8.0rc0, so
+# the old ``==0.7.0`` pin is unsatisfiable against it.  Track the rc
+# lower bound; re-pin to the resolved version at freeze time.
+safetensors>=0.8.0rc0
 accelerate==1.13.0
 
 # HTTP / networking
