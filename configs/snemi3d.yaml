@@ -366,7 +366,7 @@ model:
   # memory rises sharply -- if this OOMs, flip back to ``true`` or lower
   # ``data.batch_size``.
   gradient_checkpointing: false
-  dropout: 0.4
+  dropout: 0.2
 
 
 # ---------------------------------------------------------------------
@@ -452,7 +452,7 @@ training:
   # Kept ``false`` for the FSDP end-to-end run: the cudagraph/hook
   # incompatibility above, plus torch.compile + FSDP composition, are not
   # worth the risk here.
-  compile: true
+  compile: false
   # compile_fullgraph=true forces a single monolithic Inductor compile
   # of the 2B DiT (no graph breaks), which gives the best steady-state
   # runtime but pays for it with a multi-minute first-step stall.
