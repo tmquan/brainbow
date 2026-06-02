@@ -122,7 +122,7 @@ data:
   # val to 1 to keep the eval peak well under the per-GPU ceiling; raise
   # once you've confirmed headroom.  (A per-batch OOM is also caught and
   # skipped now -- see ``BaseCircuitModule._eval_step_and_accumulate``.)
-  val_batch_size: 1
+  val_batch_size: 4
   num_workers: 8
   # persistent_workers=true.  The earlier ``/dev/shm`` blow-up that
   # tempted us to disable this was actually a kimimaro pathos leak
@@ -452,7 +452,7 @@ training:
   # Kept ``false`` for the FSDP end-to-end run: the cudagraph/hook
   # incompatibility above, plus torch.compile + FSDP composition, are not
   # worth the risk here.
-  compile: false
+  compile: true
   # compile_fullgraph=true forces a single monolithic Inductor compile
   # of the 2B DiT (no graph breaks), which gives the best steady-state
   # runtime but pays for it with a multi-minute first-step stall.
