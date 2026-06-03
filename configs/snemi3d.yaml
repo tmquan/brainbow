@@ -298,10 +298,10 @@ data:
 # that exposes ``Cosmos3OmniTransformer``; Cosmos 3 is BF16-only.
 # ---------------------------------------------------------------------
 model:
-  type: cosmos3nano3d
-  variant: "Nano"
+  type: cosmospredict3d
+  variant: "2B"
   dtype: "bf16"
-  pretrained: true                # auto-pulls nvidia/Cosmos3-Nano from HF
+  pretrained: true                # auto-pulls nvidia/Cosmos-Predict2.5-2B from HF
 
   # Affinity + sem + raw output head (must match
   # brainbow.losses._common.HEAD_CHANNELS = N_AFF + 2):
@@ -365,12 +365,11 @@ model:
   # hook-aware (recompute in backward is gated by ``_hooks_active``) and
   # is used *instead of* FSDP ``activation_checkpointing_policy`` to
   # avoid double-wrapping the same layers.
-  # Disabled for speed (saves the ~20-30% recompute tax).  TRADE-OFF:
-  # FSDP shards params/grads/optimizer but NOT activations, so without
-  # checkpointing the full 16B activation stack is retained per rank and
-  # memory rises sharply -- if this OOMs, flip back to ``true`` or lower
-  # ``data.batch_size``.
-  gradient_checkpointing: true
+  # Disabled for speed (saves the ~20-30% recompute tax).  The 2B
+  # Cosmos-Predict DiT fits comfortably under DDP at this batch size, so
+  # activation checkpointing is not needed here.  If you later OOM (e.g.
+  # bigger crops / batch), flip back to ``true`` or lower ``data.batch_size``.
+  gradient_checkpointing: false
   dropout: 0.2
 
 
@@ -419,14 +418,13 @@ training:
   # decoder-layer class, keeps the small fp32-origin heads / VAE in the
   # unsharded root unit, and uses ``use_orig_params=True`` so the
   # ``model.dit.*`` vs heads optimiser split still works.
-  strategy: fsdp
-  # ``bf16-true`` (NOT ``bf16-mixed``) with FSDP: the model is natively
-  # bf16, so cast to bf16 and run WITHOUT an outer autocast.  Lightning's
-  # FSDPPrecision "true" path uses a dtype context (not ``torch.autocast``),
-  # avoiding the redundant re-promotion of this mixed-dtype graph (the
-  # ``at::autocast::prioritize`` failure) and pairing with the FSDP
-  # ``MixedPrecision(bf16/bf16/bf16)`` sharding dtype.
-  precision: bf16-true
+  # DDP replicates the 2B Cosmos-Predict DiT per rank (~fits on 80 GB at
+  # this batch size); FSDP is only needed for the 16B Cosmos3 backbone.
+  strategy: ddp
+  # ``bf16-mixed`` is the recommended DDP precision: params stay fp32 with
+  # an outer bf16 autocast over the step.  (The ``bf16-true`` FSDP path was
+  # specific to the natively-bf16 Cosmos3 backbone + FSDP MixedPrecision.)
+  precision: bf16-mixed
   gradient_clip_val: 1.0
   accumulate_grad_batches: 1
   limit_val_batches: 100
@@ -454,10 +452,11 @@ training:
   # false.  (The Cosmos-2.5 backbones tolerated "reduce-overhead" only
   # because their captured tensors happened not to be cudagraph-managed.)
   #
-  # Kept ``false`` for the FSDP end-to-end run: the cudagraph/hook
-  # incompatibility above, plus torch.compile + FSDP composition, are not
-  # worth the risk here.
-  compile: false
+  # Enabled for the Cosmos-Predict 2.5 (2B) backbone: as the note above
+  # records, the Cosmos-2.5 backbones tolerate "reduce-overhead"
+  # cudagraphs (their hook-captured tensors are not cudagraph-managed),
+  # unlike cosmos3nano3d which MUST stay false/"default".
+  compile: true
   # compile_fullgraph=true forces a single monolithic Inductor compile
   # of the 2B DiT (no graph breaks), which gives the best steady-state
   # runtime but pays for it with a multi-minute first-step stall.
@@ -470,7 +469,7 @@ training:
   # the first step lands: ``false`` lets Inductor compile
   # incrementally with graph breaks, trading ~10% runtime for a much
   # shorter first-step.
-  compile_fullgraph: false
+  compile_fullgraph: true
 
   # -------------------------------------------------------------------
   # Validation-time agglomeration: Mutex Watershed

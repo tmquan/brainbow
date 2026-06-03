@@ -8,6 +8,7 @@ Pick the doc that matches *your* current question.  All six live in
 | "What is in each folder?"                                         | [`STRUCTURE.md`](./STRUCTURE.md)                              |
 | "Why is the code organised this way?  What pattern do you reach for?" | [`ORGANIZATION.md`](./ORGANIZATION.md)                    |
 | "What are the model channel layouts and the math behind each head?"  | [`ARCHITECT.md`](./ARCHITECT.md)                          |
+| "How does the affinity head + Mutex Watershed turn predictions into instances?" | [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md)        |
 | "What actually happens when I run `python scripts/train.py`?  Take me through one batch." | [`WALKTHROUGH.md`](./WALKTHROUGH.md) |
 | "Why is my run silently doing the wrong thing?"                   | [`GOTCHAS.md`](./GOTCHAS.md)                                  |
 | "How do I add a new dataset / loss / backbone / transform?"       | [`CONTRIBUTING.md`](./CONTRIBUTING.md)                        |
