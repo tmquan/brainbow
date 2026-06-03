@@ -103,6 +103,14 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
 
     def __init__(self, *args: Any, variant: str = "NANO", **kwargs: Any) -> None:
         super().__init__(*args, variant=variant, **kwargs)
+        # Halve the DiT's spatial patchification (``latent_patch_size 2 -> 1``)
+        # so the captured feature grid is the *full* VAE latent grid
+        # (H/16 x W/16) instead of H/32 x W/32 -- this is the blocky-artifact
+        # mitigation (4x finer spatial features).  Must run *before* the
+        # residual-VAE decoder wrap / time guard is irrelevant to ordering,
+        # but it MUST run pre-FSDP (it swaps two ``nn.Linear`` modules and
+        # mutates the DiT config) -- construction is always pre-wrap.
+        self._repatch_to_unit_latent_patch()
         # Cosmos 3 ships the residual Wan2.2-TI2V VAE, whose decoder the
         # shared decode path can only drive frame-by-frame; patch *this*
         # model's decoder forward accordingly (no-op for non-residual
@@ -144,6 +152,129 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
         ]
 
     # ------------------------------------------------------------------
+    # Spatial-resolution mitigation (latent_patch_size 2 -> 1)
+    # ------------------------------------------------------------------
+
+    def _repatch_to_unit_latent_patch(self) -> None:
+        """Rebuild ``proj_in`` / ``proj_out`` for ``latent_patch_size = 1``.
+
+        Cosmos 3's omni transformer patchifies the VAE latent's H/W axes by
+        ``latent_patch_size`` (``p``) *before* the token stack: a ``p x p``
+        spatial patch of the 48-channel latent is flattened to a
+        ``patch_latent_dim = p*p*48`` vector and projected to ``hidden`` by
+        ``proj_in`` (``proj_out`` does the inverse for the diffusion
+        prediction).  With the published ``p = 2`` the feature grid is only
+        ``H/(16*2) x W/(16*2) = H/32 x W/32`` (an 8x8 grid for a 256x256
+        crop), which the decoder upsamples 32x -> the visible ~32px blocky
+        pattern in the ``pred/*`` panels.
+
+        Setting ``p = 1`` makes the feature grid the *full* VAE latent grid
+        (``H/16 x W/16`` -> 16x16 for 256x256), 4x finer spatially.  But
+        ``p`` is baked into the pretrained projection dims
+        (``proj_in: 192 -> hidden``, ``proj_out: hidden -> 192``), so it is
+        NOT a free config flag: both layers must be rebuilt at
+        ``patch_latent_dim = 1*1*48 = 48``.
+
+        To preserve the 16B backbone's warm start we do **not** randomly
+        re-initialise them -- we down-project the pretrained patch-embed by
+        **averaging over the ``p x p`` spatial sub-positions** (the standard,
+        scale-preserving way to retarget a patch embedding to a finer patch;
+        cf. ViT patch-resize).  The flatten order in
+        ``_patchify_and_pack_latents`` is ``(p_h, p_w, c)``
+        (einsum ``cthpwq->thwpqc`` then ``reshape(-1, p*p*c)``), so the
+        pretrained ``[hidden, p*p*c]`` weight reshapes to
+        ``[hidden, p, p, c]`` and the mean over dims ``(p, p)`` yields the
+        ``[hidden, c]`` unit-patch weight (bias is ``hidden``-dim, unchanged).
+        ``proj_out`` is the mirror (``[p*p*c, hidden] -> [c, hidden]``; its
+        ``[p*p*c]`` bias -> ``[c]``); note its output is *not* used by the
+        feature path (we hook intermediate blocks), but it must stay
+        shape-consistent so the model's (ignored) prediction tail does not
+        crash.
+
+        Finally ``register_to_config(latent_patch_size=1, patch_latent_dim=48)``
+        makes ``_patchify_and_pack_latents`` / ``_unpatchify_and_unpack_latents``
+        (which read ``self.config.latent_patch_size`` live) agree with the new
+        projection dims.  Idempotent: a no-op if the DiT is already at ``p=1``
+        (e.g. when resuming from a brainbow checkpoint saved post-repatch).
+
+        Cost: ``num_vision_tokens`` (hence the DiT sequence length) grows 4x,
+        so self-attention compute grows ~16x and activation memory ~4x.  On
+        the 16B backbone this is the tightest memory point of the run -- pair
+        it with gradient checkpointing and/or a smaller batch.
+        """
+        dit = getattr(self, "dit", None)
+        if dit is None:
+            return
+        cfg = dit.config
+        p = int(getattr(cfg, "latent_patch_size", 2))
+        if p == 1:
+            return  # already unit-patch (e.g. resumed checkpoint)
+
+        c = int(getattr(cfg, "latent_channel", 48))
+        proj_in = getattr(dit, "proj_in", None)
+        proj_out = getattr(dit, "proj_out", None)
+        if not isinstance(proj_in, nn.Linear) or not isinstance(proj_out, nn.Linear):
+            logger.warning(
+                "Cosmos 3: proj_in/proj_out not nn.Linear; skipping "
+                "latent_patch_size->1 repatch (blocky-artifact mitigation).",
+            )
+            return
+
+        expected = p * p * c
+        if proj_in.in_features != expected or proj_out.out_features != expected:
+            logger.warning(
+                "Cosmos 3: unexpected patch dims (proj_in.in=%d, proj_out.out=%d, "
+                "expected %d=%d*%d*%d); skipping latent_patch_size->1 repatch to "
+                "avoid corrupting the backbone.",
+                proj_in.in_features, proj_out.out_features, expected, p, p, c,
+            )
+            return
+
+        hidden = int(proj_in.out_features)
+        device = proj_in.weight.device
+        dtype = proj_in.weight.dtype
+
+        with torch.no_grad():
+            # proj_in:  [hidden, p, p, c] -> mean over (p, p) -> [hidden, c]
+            w_in = (
+                proj_in.weight.detach()
+                .reshape(hidden, p, p, c)
+                .mean(dim=(1, 2))
+                .contiguous()
+            )
+            new_in = nn.Linear(c, hidden, bias=proj_in.bias is not None)
+            new_in = new_in.to(device=device, dtype=dtype)
+            new_in.weight.copy_(w_in)
+            if proj_in.bias is not None:
+                new_in.bias.copy_(proj_in.bias.detach())
+
+            # proj_out: [p, p, c, hidden] -> mean over (p, p) -> [c, hidden]
+            w_out = (
+                proj_out.weight.detach()
+                .reshape(p, p, c, hidden)
+                .mean(dim=(0, 1))
+                .contiguous()
+            )
+            new_out = nn.Linear(hidden, c, bias=proj_out.bias is not None)
+            new_out = new_out.to(device=device, dtype=dtype)
+            new_out.weight.copy_(w_out)
+            if proj_out.bias is not None:
+                new_out.bias.copy_(
+                    proj_out.bias.detach().reshape(p, p, c).mean(dim=(0, 1)).contiguous(),
+                )
+
+        dit.proj_in = new_in
+        dit.proj_out = new_out
+        dit.register_to_config(latent_patch_size=1, patch_latent_dim=c)
+        logger.info(
+            "Cosmos 3: repatched latent_patch_size %d -> 1 (proj_in %d->%d, "
+            "proj_out %d->%d, patch_latent_dim %d -> %d) -- feature grid is now "
+            "the full H/16 x W/16 VAE latent grid (blocky-artifact mitigation). "
+            "Sequence length grows ~%dx; pair with gradient checkpointing.",
+            p, expected, hidden, hidden, expected, expected, c, p * p,
+        )
+
+    # ------------------------------------------------------------------
     # Omni forward
     # ------------------------------------------------------------------
 
@@ -173,11 +304,14 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
           vision tokens.
         * ``vision_tokens`` -- ``[latent]`` (one ``[1, 48, T, H, W]``
           item).  The transformer patchifies H/W by ``latent_patch_size``
-          (=2) internally -- temporal is **not** patchified -- and
-          projects ``2*2*48 = 192 → hidden`` via ``proj_in``.  So we pass
-          the raw latent, *not* a pre-patchified token tensor.
-        * ``vision_token_shapes`` -- ``[(T, ceil(H/2), ceil(W/2))]`` patch
-          grid for that item.
+          internally -- temporal is **not** patchified -- and projects
+          ``p*p*48 → hidden`` via ``proj_in``.  We retarget ``p`` to ``1``
+          at construction (see :meth:`_repatch_to_unit_latent_patch`), so
+          each latent pixel is its own token (``1*1*48 = 48 → hidden``) and
+          the feature grid is the full ``H/16 x W/16`` VAE grid.  Either way
+          we pass the raw latent, *not* a pre-patchified token tensor.
+        * ``vision_token_shapes`` -- ``[(T, ceil(H/p), ceil(W/p))]`` patch
+          grid for that item (``p = 1`` after the repatch).
         * ``vision_sequence_indexes`` -- ``arange(und_len, und_len + N)``;
           places all ``N`` vision tokens immediately after the text
           prefix (so the generation half of the sequence == vision).
@@ -444,6 +578,20 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
         * **Batch.** The omni transformer is unbatched, so we run one
           forward per sample and stack the per-layer ``[N, hidden]``
           captures into ``[B, N, hidden]`` for the projector.
+
+        NOTE (spatial resolution / blocky predictions): the feature grid is
+        ``H/(16*p) x W/(16*p)`` where ``p = latent_patch_size`` and the
+        Wan2.2 VAE's 16x spatial compression is fixed.  We retarget ``p`` to
+        ``1`` at construction (:meth:`_repatch_to_unit_latent_patch`), so the
+        grid is the *full* ``H/16 x W/16`` VAE latent grid -- a 16x16 grid for
+        a 256x256 crop, 4x finer than the published ``p = 2`` (8x8) and on par
+        with Cosmos-2.5's effective 16x.  This is the fix for the ~32px blocky
+        pattern that the ``p = 2`` (32x total) grid produced in the ``pred/*``
+        panels (confirmed by runtime shape logging to be an intrinsic grid
+        effect, not a token/decoder bug -- temporal handling is correct,
+        ``grid_d = D_lat`` decoded 4x).  The VAE's 16x is the floor and cannot
+        be lowered further.  Cost: ``num_vision_tokens`` (DiT sequence length)
+        is 4x larger at ``p = 1`` -- the tightest memory point of the run.
         """
         if self._hook_block_container is None:
             return super()._extract_features_hook(

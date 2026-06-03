@@ -365,7 +365,7 @@ model:
   # checkpointing the full 16B activation stack is retained per rank and
   # memory rises sharply -- if this OOMs, flip back to ``true`` or lower
   # ``data.batch_size``.
-  gradient_checkpointing: false
+  gradient_checkpointing: true
   dropout: 0.2
 
 
