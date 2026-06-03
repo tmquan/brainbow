@@ -28,6 +28,7 @@ from brainbow.inference.clusterer import (
     SpatialCCClusterer,
     build_clusterer,
 )
+from brainbow.inference.mutex_watershed import MutexWatershed, mutex_watershed
 from brainbow.inference.sliding_window import sliding_window_inference
 
 __all__ = [
@@ -35,5 +36,7 @@ __all__ = [
     "SoftMeanShift",
     "SpatialCCClusterer",
     "build_clusterer",
+    "MutexWatershed",
+    "mutex_watershed",
     "sliding_window_inference",
 ]

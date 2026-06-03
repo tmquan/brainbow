@@ -5,7 +5,7 @@ Only the **automatic** training mode is supported.  See
 :class:`BaseCosmosModule` for the full training / evaluation logic.
 """
 
-from brainbow.losses import CombinedLoss
+from brainbow.losses import AffinityFGLoss
 from brainbow.models.cosmos_predict_2_5 import CosmosPredict3DWrapper
 from brainbow.modules.cosmos_2_5_common.base import BaseCosmosModule
 
@@ -20,4 +20,4 @@ class CosmosPredict3DModule(BaseCosmosModule):
     """
 
     _model_cls = CosmosPredict3DWrapper
-    _loss_cls = CombinedLoss
+    _loss_cls = AffinityFGLoss

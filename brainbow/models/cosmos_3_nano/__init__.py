@@ -2,12 +2,15 @@
 Cosmos 3 (Nano) **3D** model wrapper for volumetric connectomics segmentation.
 
 Adapts the Cosmos 3 omni transformer (``Cosmos3OmniTransformer``, 16B
-Mixture-of-Transformers) as a feature extractor for the unified
-32-channel volumetric segmentation head:
+Mixture-of-Transformers) as a feature extractor for the affinity +
+foreground volumetric segmentation head:
 
-``raw(1) | sem(1) | skl(1) | dir(3) | cov(6) | rad(1) | avg(3) | emb(16)``
+``aff(N_AFF offsets) | fg(1)``
 
-See :mod:`brainbow.losses._common` for the canonical slice constants.
+See :mod:`brainbow.losses._common` for the canonical channel layout
+(:data:`AFFINITY_OFFSETS`, :data:`AFF_SLICE`, :data:`FG_SLICE`) and
+:mod:`brainbow.inference.mutex_watershed` for the eval-time
+agglomeration.
 
 Cosmos 3 is NVIDIA's omnimodal world-model family (text / image / video
 / audio / action).  We drive only its diffusion (video) tower and feed

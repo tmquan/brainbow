@@ -15,7 +15,7 @@ and is shared with :mod:`brainbow.modules.cosmos_predict_2_5` and
 :mod:`brainbow.modules.cosmos_transfer_2_5`.
 """
 
-from brainbow.modules.cosmos_2_5_common.base import BaseCosmosModule
+from brainbow.modules.cosmos_3_nano.base import BaseCosmosModule
 from brainbow.modules.cosmos_3_nano.module import Cosmos3Nano3DModule
 
 __all__ = ["BaseCosmosModule", "Cosmos3Nano3DModule"]

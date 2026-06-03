@@ -7,9 +7,9 @@ Provides:
 - Preprocessors for common data formats (TIFF, HDF5, NRRD, NIfTI)
 - Cosmos-Transfer3D model wrapper (DiT + VAE backbone) for volumetric
   segmentation, together with a Vista3D reference implementation
-- A unified 32-channel head supervised by ``CombinedLoss``:
-  raw(1), sem(1), skl(1), dir(3), cov(6), rad(1), avg(3), emb(16),
-  plus derived 12-direction affinity losses on avg and emb.
+- An affinity + foreground head supervised by ``AffinityFGLoss`` and
+  agglomerated into instances at eval/inference by the Mutex Watershed
+  (``brainbow.inference.mutex_watershed``).
 """
 
 import warnings
@@ -42,7 +42,7 @@ from brainbow.datamodules import (
     MICRONSDataModule,
     NeuronsDataModule,
 )
-from brainbow.losses import CombinedLoss, HEAD_CHANNELS, HEAD_LAYOUT, slice_head
+from brainbow.losses import AffinityFGLoss, HEAD_CHANNELS, HEAD_LAYOUT, slice_head
 from brainbow.models import (
     BaseModel,
     Cosmos3Nano3DWrapper,
@@ -75,7 +75,7 @@ __all__ = [
     "MICRONSDataModule",
     "NeuronsDataModule",
     # Losses
-    "CombinedLoss",
+    "AffinityFGLoss",
     "HEAD_CHANNELS",
     "HEAD_LAYOUT",
     "slice_head",

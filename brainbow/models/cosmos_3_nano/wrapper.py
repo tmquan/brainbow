@@ -36,8 +36,8 @@ from typing import Any, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from brainbow.models.cosmos_2_5_common.wrapper_base import _BaseCosmos25Wrapper
 from brainbow.models.cosmos_3_nano.variants import _VARIANT_CONFIGS
+from brainbow.models.cosmos_3_nano.wrapper_base import _BaseCosmos25Wrapper
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +62,9 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
     """Cosmos 3 (Nano) omni transformer as a volumetric EM feature extractor.
 
     A single unified task head produces ``[B, head_channels, D, H, W]``
-    (default 32); the channel layout is owned by
-    :mod:`brainbow.losses._common`.
+    (default ``HEAD_CHANNELS = N_AFF + 2``: per-offset affinities + a
+    foreground/semantic channel + a linear raw-reconstruction channel);
+    the channel layout is owned by :mod:`brainbow.losses._common`.
 
     The depth axis of the EM volume maps to the model's temporal (video)
     axis, exactly as for the Cosmos 2.5 wrappers::
@@ -76,7 +77,7 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
 
     Args:
         in_channels: Number of input channels (1 for EM volumes).
-        head_channels: Unified head width (default 32).
+        head_channels: Unified head width (default ``HEAD_CHANNELS``).
         feature_size: Internal feature map channel count after projection.
         variant: Cosmos 3 variant key (only ``"Nano"`` is published).
         dtype: Weight dtype.  Cosmos 3 is officially BF16-only; keep
@@ -96,7 +97,7 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
         >>> model = Cosmos3Nano3DWrapper(in_channels=1, variant="Nano")
         >>> x = torch.randn(1, 1, 16, 256, 256)
         >>> out = model(x)
-        >>> out.shape   # [1, 32, 16, 256, 256]
+        >>> out.shape   # [1, HEAD_CHANNELS, 16, 256, 256]
     """
 
     _variant_configs = _VARIANT_CONFIGS

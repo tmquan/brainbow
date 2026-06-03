@@ -7,7 +7,7 @@ Only the **automatic** training mode is supported.  See
 
 from typing import Any, Dict
 
-from brainbow.losses import CombinedLoss
+from brainbow.losses import AffinityFGLoss
 from brainbow.models.cosmos_transfer_2_5 import CosmosTransfer3DWrapper
 from brainbow.modules.cosmos_2_5_common.base import BaseCosmosModule
 
@@ -23,7 +23,7 @@ class CosmosTransfer3DModule(BaseCosmosModule):
     """
 
     _model_cls = CosmosTransfer3DWrapper
-    _loss_cls = CombinedLoss
+    _loss_cls = AffinityFGLoss
 
     def _extra_model_kwargs(
         self, model_config: Dict[str, Any],

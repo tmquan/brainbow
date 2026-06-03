@@ -100,8 +100,8 @@ class BaseCosmosModule(BaseCircuitModule):
             self.model._fallback_down.requires_grad_(False)
 
         logger.info(
-            "Validation clusterer: %s",
-            type(self.clusterer).__name__,
+            "Validation agglomerator: %s",
+            repr(self.agglomerator),
         )
 
     def _build_model(self, model_config: Dict[str, Any]) -> torch.nn.Module:

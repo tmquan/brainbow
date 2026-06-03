@@ -303,10 +303,15 @@ model:
   dtype: "bf16"
   pretrained: true                # auto-pulls nvidia/Cosmos3-Nano from HF
 
-  # Unified output head (must match brainbow.losses._common.HEAD_CHANNELS):
+  # Affinity + sem + raw output head (must match
+  # brainbow.losses._common.HEAD_CHANNELS = N_AFF + 2):
   in_channels: 1                  # raw EM input -> 1 channel
-  # raw(1)+sem(1)+skl(1)+dir(3)+cov(6)+rad(1)+avg(3)+emb(16)
-  head_channels: 32
+  # aff(N_AFF=14 offsets: 3 attractive nn + 11 repulsive long-range)
+  # + sem(1, sigmoid foreground) + raw(1, linear L1 reconstruction) = 16.
+  # aff + sem are sigmoid probabilities (the affinities are agglomerated
+  # into instances by the Mutex Watershed at eval time -- see
+  # training.mutex_watershed below); raw is the linear input-recon channel.
+  head_channels: 16
   feature_size: 64
 
   # What to freeze.  Cosmos 3 has no ControlNet residual branch to
@@ -366,7 +371,7 @@ model:
   # memory rises sharply -- if this OOMs, flip back to ``true`` or lower
   # ``data.batch_size``.
   gradient_checkpointing: true
-  dropout: 0.0
+  dropout: 0.2
 
 
 # ---------------------------------------------------------------------
@@ -465,80 +470,35 @@ training:
   # the first step lands: ``false`` lets Inductor compile
   # incrementally with graph breaks, trading ~10% runtime for a much
   # shorter first-step.
-  compile_fullgraph: true
+  compile_fullgraph: false
 
   # -------------------------------------------------------------------
-  # Validation-time clusterer
+  # Validation-time agglomeration: Mutex Watershed
   # -------------------------------------------------------------------
-  # Turns the per-voxel embedding into discrete instance IDs at val time.
-  # `bandwidth` and `normalize_embeddings` default to loss.delta_v and
-  # loss.normalize_embeddings respectively.
+  # The affinity head's per-offset predictions are turned into discrete
+  # instance IDs by the parameter-free Mutex Watershed (Wolf et al. 2018;
+  # ``brainbow/inference/mutex_watershed.py``).  It is non-differentiable
+  # and runs on CPU per crop, so it is used at eval / inference only.
   #
-  # Choices (in rough order from "pretty early, misleading later" to
-  # "honest, neuron-appropriate"):
+  # ``offsets`` and ``n_attractive`` default to the loss's (so the head,
+  # target, and agglomerator share one edge convention) -- leave them
+  # unset unless you also override ``AFFINITY_OFFSETS`` in
+  # ``brainbow/losses/_common.py``.
   #
-  #   spatial_cc     -- [current default] connected components on the
-  #                     per-voxel embedding-affinity graph
-  #                     (face-connectivity by default).  Respects
-  #                     spatial connectivity, runs at full resolution,
-  #                     and accepts per-axis ``bandwidth`` thresholds
-  #                     (a list instead of a scalar) for anisotropic
-  #                     EM.  On 5:1 Z:XY stacks like SNEMI3D, neurons
-  #                     routinely touch across Z while being distinct
-  #                     cells; a tighter Z entry in ``bandwidth``
-  #                     stops them merging through one borderline-
-  #                     similar Z neighbour -- the dominant failure
-  #                     mode of isotropic spatial_cc / HDBSCAN here.
-  #                     See ``brainbow/inference/clusterer.py``'s
-  #                     :class:`SpatialCCClusterer`.
-  #
-  #   hdbscan        -- density-based, auto-K.  Honest but silent
-  #                     until the embedding actually separates.
-  #                     Ignores spatial connectivity, so two
-  #                     disconnected cells with similar mean
-  #                     embedding can merge.
-  #
-  #   soft_meanshift -- differentiable, mode-based; was the previous
-  #                     default before ``spatial_cc`` landed.
-  #                     Over-segments random embeddings, so panels
-  #                     look pretty but misleading before ~2k steps.
-  #                     Still the only option usable inside the
-  #                     training loop (gradient-preserving).
-  #
-  # ``spatial_cc`` knob semantics (see
-  # ``brainbow/inference/clusterer.py::SpatialCCClusterer``):
-  #   bandwidth         -- scalar or per-axis list; embedding-distance
-  #                        threshold for linking spatial neighbours.
-  #                        When omitted, defaults to ``loss.delta_v``.
-  #   min_cluster_size  -- clusters smaller than this are mapped back
-  #                        to background (applied at full resolution).
-  #   connectivity      -- ``1`` -> face (6-nbr in 3D, 4-nbr in 2D);
-  #                        any other value -> full (26 / 8).
-  #
-  # ``backend`` picker for the connected-components pass
-  # (``backend: auto`` is the default and prefers, in order):
-  #   1. self  -- our self-contained CuPy RawKernel union-find
-  #               (Shiloach-Vishkin hook + pointer-jumping).  No
-  #               ``pylibcugraph`` dependency; fastest path and the
-  #               option taken on CUDA when ``auto`` is selected.
-  #   2. cupy  -- ``cupyx.scipy.sparse.csgraph.connected_components``
-  #               (needs ``pylibcugraph``; kept for debugging parity).
-  #   3. scipy -- CPU ``scipy.sparse.csgraph`` round-trip; the
-  #               ``auto`` choice when CUDA is unavailable.
-  # Pin to ``backend: self`` (as below) to keep the kernel path
-  # deterministic across cuML installs of varying completeness.
+  # Knobs:
+  #   strides      -- per-axis subsampling of the *repulsive* (long-range)
+  #                   edges only; attractive nn edges are always dense.
+  #                   Coarser strides => far fewer edges => much faster /
+  #                   lighter MWS.  Default ``[1, 4, 4]`` keeps Z dense
+  #                   (anisotropy) and takes every 4th in-plane.  This is
+  #                   a throughput lever, not an accuracy knob in the
+  #                   usual regime.
+  #   size_filter  -- connected components smaller than this many voxels
+  #                   are reset to background (despeckle).
   # -------------------------------------------------------------------
-  clusterer:
-    # Previous default (kept for reference; uncomment to roll back):
-    # name: soft_meanshift
-    # min_cluster_size: 50
-    # connectivity: 1               # 1 -> 6-neighbour, else 26-neighbour
-    # backend: auto                 # auto -> self on CUDA, scipy on CPU
-    name: spatial_cc
-    backend: self
-    min_cluster_size: 50
-    connectivity: 1
-    bandwidth: [0.08, 0.40, 0.40]  # [Z, Y, X]; tighter Z respects 5:1 anisotropy
+  mutex_watershed:
+    strides: [1, 4, 4]             # [Z, Y, X]; dense Z, sparse in-plane repulsive
+    size_filter: 50
 
 
 # ---------------------------------------------------------------------
@@ -573,112 +533,61 @@ optimizer:
 # ---------------------------------------------------------------------
 # Loss
 # ---------------------------------------------------------------------
-# CombinedLoss = one 32-channel head scored by per-field losses.
+# AffinityFGLoss = one affinity + sem + raw head scored by three terms.
 #
-# Unified channel layout:
-#   raw: ch  0       -> L1 raw reconstruction
-#   sem: ch  1       -> sigmoid Dice + BCE + Focal foreground
-#   skl: ch  2       -> sigmoid Dice + BCE + Focal binary skeleton
-#   dir: ch  3- 5    -> L1 skeleton direction
-#   cov: ch  6-11    -> L1 upper-triangle Voronoi-cell covariance
-#   rad: ch 12       -> L1 distance to nearest skeleton voxel
-#   avg: ch 13-15    -> L1 normalised centroid + derived 12-aff (Dice + BCE + Focal)
-#   emb: ch 16-31    -> discriminative embedding + derived 12-aff (Dice + BCE + Focal)
+# Channel layout (see ``brainbow/losses/_common.py::AFFINITY_OFFSETS``):
+#   aff: ch  0 .. N_AFF-1  -> sigmoid per-offset affinity P(label[v]==label[v+o])
+#   sem: ch  N_AFF          -> sigmoid foreground / boundary probability
+#   raw: ch  N_AFF + 1      -> linear  L1 reconstruction of the input EM
 #
-# Each weight_<field> mapping has:
-#   - weight: scalar multiplier (0 disables that field/path)
-#   - all other keys: sub-loss knobs (``loss`` for L1-style heads,
-#     ``tau`` for derived aff heads, ``delta_v`` etc. for ``emb``,
-#     ``lambda_{bce,dice,focal}`` + ``gamma`` for the composite-loss
-#     heads -- see ``brainbow/losses/dice_bce_focal.py``).
+# The first ``N_ATTRACTIVE`` (3) offsets are the nearest-neighbour
+# attractive edges (z, y, x); the rest are long-range repulsive edges.
+# At eval the affinities are agglomerated into instances by the Mutex
+# Watershed (see ``training.mutex_watershed`` above).
 #
-# The (sem, skl, aff_emb, aff_avg) heads run on ``DiceBCEFocalLoss``,
-# which composes MONAI's Dice (on probabilities) with a stable
-# per-voxel BCE-on-probs and a focal-on-probs term.  Setting
-# ``lambda_bce: 0, lambda_focal: 0`` on a head recovers the Dice-only
-# behaviour for that head; the defaults below all-on.
+# weight_aff / weight_sem / weight_raw are each a scalar or a
+# ``{weight, **sub_kwargs}`` mapping.  ``weight: 0`` disables the field.
+# Sub-knobs:
+#   - aff: ``lambda_{bce,dice,focal}`` + ``gamma``, ``attractive_weight`` /
+#     ``repulsive_weight`` (per-offset class weighting), and
+#     ``mask_to_foreground`` (drop edges with a background endpoint).
+#   - sem: ``lambda_{bce,dice,focal}`` + ``gamma`` (DiceBCEFocalLoss).
+#   - raw: ``loss`` (``l1`` / ``mse`` / ``smooth_l1``).
 # ---------------------------------------------------------------------
 loss:
   ignore_index: -100
   background: -1
 
-  weight_raw:
+  # Affinity head.  Within the fg-fg validity mask, same-instance
+  # (positive) affinities dominate for the short-range attractive
+  # offsets, while the long-range repulsive offsets carry the rare but
+  # critical "must separate" signal -- so a focal term can be added
+  # (``lambda_focal``) to redirect gradient onto the hard boundary
+  # edges.  ``attractive_weight`` / ``repulsive_weight`` rebalance the
+  # nn vs long-range offset groups if one dominates the loss.
+  weight_aff:
     weight: 1.0
-    loss: l1
-  # Sem (foreground): ``data.min_foreground: 0.80`` ⇒ ~80-95% positive
-  # per crop, so foreground is the statistically dominant class.
-  # Shrink ``lambda_bce`` (plain BCE biases toward the dominant class)
-  # and grow ``lambda_focal`` (focal's ``(1 - p_t)^gamma`` silences
-  # easy positives, redirecting gradient onto the rare boundary /
-  # ECS voxels).  ``lambda_dice`` stays flat -- Dice is naturally
-  # imbalance-robust.
+    lambda_bce: 1.0
+    lambda_dice: 1.0
+    lambda_focal: 0.0
+    gamma: 2.0
+    attractive_weight: 1.0
+    repulsive_weight: 1.0
+    mask_to_foreground: true
+  # Foreground (semantic) head: ``data.min_foreground: 0.80`` => ~80-95%
+  # positive per crop, so foreground dominates.  Shrink ``lambda_bce``
+  # (plain BCE biases toward the dominant class) and grow ``lambda_focal``
+  # (focal's ``(1 - p_t)^gamma`` silences easy positives, redirecting
+  # gradient onto the rare boundary / ECS voxels).  Dice stays flat.
   weight_sem:
     weight: 1.0
     lambda_bce: 0.5
     lambda_dice: 1.0
     lambda_focal: 1.5
     gamma: 2.0
-  # Skl (skeleton): 1-voxel-wide centerline ⇒ ~99.9% **negative**
-  # (extreme background-major).  Plain BCE actively pushes the model
-  # toward "predict 0 everywhere", so ``lambda_bce`` is cut hard.
-  # ``lambda_focal`` is bumped up and ``gamma`` is raised to 3 so the
-  # focal weight ``(1 - p_t)^3`` aggressively silences the easy
-  # negatives once the model has collapsed to ``p ≈ 0`` -- after that
-  # the rare skeleton positives carry the gradient.  Dice stays at 1.
-  weight_skl:
-    weight: 1.0
-    lambda_bce: 0.1
-    lambda_dice: 1.0
-    lambda_focal: 3.0
-    gamma: 3.0
-  weight_dir:
+  # Raw reconstruction head: linear L1 regression of the (normalised)
+  # input EM intensity -- an auxiliary self-supervised signal that
+  # stabilises the shared decoder features.
+  weight_raw:
     weight: 1.0
     loss: l1
-  weight_cov:
-    weight: 1.0
-    loss: l1
-  # Distance-to-skeleton scalar.  The default ``data.radius_normalize: true``
-  # path gives a per-instance [0, 1] target, so the L1 loss is on the
-  # same scale as ``avg``.
-  weight_rad:
-    weight: 1.0
-    loss: l1
-  weight_avg:
-    weight: 1.0
-    loss: l1
-  weight_emb:
-    weight: 1.0
-    weight_pull: 1.0
-    weight_push: 1.0
-    weight_norm: 0.001
-    delta_v: 0.5
-    delta_d: 1.5
-    normalize_embeddings: false
-    max_hard_pairs: 4096
-  # Derived face-affinity composite heads.  ``tau`` controls the
-  # softness of the ``exp(-tau * L1)`` kernel that turns the
-  # continuous emb / avg field into a soft 12-channel affinity
-  # score; the composite lambdas + gamma are independent per path.
-  #
-  # Imbalance: inside the fg-fg ``pair_mask`` (see
-  # ``CombinedLoss._loss_aff_path``), same-instance face pairs
-  # statistically dominate -- most face pairs between foreground
-  # voxels are within the same neuron, with the rare positives being
-  # the cross-instance boundary pairs.  So the lambdas mirror the
-  # sem head's foreground-major shape: trim ``lambda_bce``, bump
-  # ``lambda_focal`` so focal redirects the gradient onto the rare
-  # between-instance pairs.
-  weight_aff_emb:
-    weight: 1.0
-    tau: 1.0
-    lambda_bce: 0.5
-    lambda_dice: 1.0
-    lambda_focal: 1.5
-    gamma: 2.0
-  weight_aff_avg:
-    weight: 1.0
-    tau: 1.0
-    lambda_bce: 0.5
-    lambda_dice: 1.0
-    lambda_focal: 1.5
-    gamma: 2.0

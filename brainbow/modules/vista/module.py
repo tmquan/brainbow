@@ -1,6 +1,6 @@
 """Vista3D Lightning module for volumetric connectomics segmentation."""
 
-from brainbow.losses import CombinedLoss
+from brainbow.losses import AffinityFGLoss
 from brainbow.models.vista import Vista3DWrapper
 from brainbow.modules.vista.base import BaseVistaModule
 
@@ -14,4 +14,4 @@ class Vista3DModule(BaseVistaModule):
 
     _SPATIAL_DIMS = 3
     _model_cls = Vista3DWrapper
-    _loss_cls = CombinedLoss
+    _loss_cls = AffinityFGLoss

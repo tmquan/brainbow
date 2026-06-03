@@ -41,7 +41,7 @@ import torch.nn as nn
 import pytorch_lightning as pl
 from einops import rearrange, reduce
 
-from brainbow.inference.clusterer import build_clusterer
+from brainbow.inference.mutex_watershed import MutexWatershed
 
 logger = logging.getLogger(__name__)
 from brainbow.metrics import (
@@ -52,7 +52,7 @@ from brainbow.metrics import (
     compute_per_batch_voi,
     compute_per_batch_ted,
 )
-from brainbow.losses import EMB_SLICE, SEM_SLICE
+from brainbow.losses import AFF_SLICE, SEM_SLICE
 
 _SPATIAL_AXES = {2: "h w", 3: "d h w"}
 
@@ -142,17 +142,18 @@ class BaseCircuitModule(pl.LightningModule):
         self.model = self._build_model(dict(model_config or {}))
         self.criterion = self._loss_cls(**loss_config)
 
-        clusterer_config = dict(self.training_config.get("clusterer", {}) or {})
-        clusterer_name = clusterer_config.pop("name", "soft_meanshift")
-        clusterer_config.setdefault(
-            "bandwidth",
-            _head_field(loss_config, "emb", "delta_v", default=0.5),
+        # Validation-time agglomeration: Mutex Watershed over the predicted
+        # affinities (parameter-free; non-differentiable; CPU per crop).
+        # Offsets / n_attractive default to the loss's so the head, target,
+        # and agglomerator all share one edge convention.
+        mws_config = dict(self.training_config.get("mutex_watershed", {}) or {})
+        mws_config.setdefault(
+            "offsets", getattr(self.criterion, "offsets", None),
         )
-        clusterer_config.setdefault(
-            "normalize_embeddings",
-            _head_field(loss_config, "emb", "normalize_embeddings", default=False),
+        mws_config.setdefault(
+            "n_attractive", getattr(self.criterion, "n_attractive", None),
         )
-        self.clusterer = build_clusterer(clusterer_name, **clusterer_config)
+        self.agglomerator = MutexWatershed(**mws_config)
 
         self._eval_accum: Dict[str, List[float]] = defaultdict(lambda: [0.0, 0.0])
 
@@ -356,9 +357,10 @@ class BaseCircuitModule(pl.LightningModule):
     ) -> None:
         """Compute per-head classification / segmentation metrics.
 
-        Metrics are computed from fixed slices of the unified head:
-        semantic from ``SEM_SLICE`` and instance IDs from clustering the
-        embedding slice ``EMB_SLICE``.
+        Metrics are computed from fixed slices of the affinity + sem head:
+        the foreground accuracy / IoU / Dice from ``SEM_SLICE`` and the
+        instance metrics from the Mutex Watershed agglomeration of the
+        affinity slice ``AFF_SLICE``.
         """
         self._accumulate_semantic_metrics(head, targets, prefix, bs)
         self._accumulate_instance_metrics(head, targets, prefix, bs)
@@ -398,9 +400,12 @@ class BaseCircuitModule(pl.LightningModule):
         fg_mask = targets["labels"] > 0
         if not fg_mask.any():
             return
-        ins_pred, _, _ = self.clusterer(head_pred[:, EMB_SLICE].float(), fg_mask)
+        # Mutex Watershed over the predicted affinities, restricted to the
+        # GT foreground (isolates agglomeration quality from the fg head),
+        # matching the region the previous clusterer scored over.
+        ins_pred = self.agglomerator(head_pred[:, AFF_SLICE].float(), fg_mask)
         ins_gt = targets["labels"]
-        metric = f"{prefix}/emb/metric"
+        metric = f"{prefix}/ins/metric"
         self._accum(f"{metric}/ari", compute_per_batch_ari(ins_pred, ins_gt), bs)
         self._accum(f"{metric}/ami", compute_per_batch_ami(ins_pred, ins_gt), bs)
         voi = compute_per_batch_voi(ins_pred, ins_gt)
@@ -441,7 +446,7 @@ class BaseCircuitModule(pl.LightningModule):
             f"{prefix}/sem/metric/acc",
             f"{prefix}/sem/metric/iou",
             f"{prefix}/sem/metric/dice",
-            f"{prefix}/emb/metric/ari",
+            f"{prefix}/ins/metric/ari",
         }
         for i, name in enumerate(names):
             if counts[i] > 0:
@@ -460,13 +465,13 @@ class BaseCircuitModule(pl.LightningModule):
     # ------------------------------------------------------------------
 
     # Fixed per-head metric keys produced by ``_accumulate_metrics``.  The
-    # instance (emb) metrics are foreground-gated, so a rank whose batches
-    # were all background would otherwise omit them -- pre-seeding makes the
+    # instance metrics are foreground-gated, so a rank whose batches were
+    # all background would otherwise omit them -- pre-seeding makes the
     # key set identical across ranks (see ``_seed_eval_accum``).
     _SEM_METRIC_KEYS = ("sem/metric/acc", "sem/metric/iou", "sem/metric/dice")
-    _EMB_METRIC_KEYS = (
-        "emb/metric/ari", "emb/metric/ami", "emb/metric/voi",
-        "emb/metric/voi_split", "emb/metric/voi_merge", "emb/metric/ted",
+    _INSTANCE_METRIC_KEYS = (
+        "ins/metric/ari", "ins/metric/ami", "ins/metric/voi",
+        "ins/metric/voi_split", "ins/metric/voi_merge", "ins/metric/ted",
     )
 
     def _seed_eval_accum(self, stage: str) -> None:
@@ -485,7 +490,7 @@ class BaseCircuitModule(pl.LightningModule):
         prefix = self._scalar_prefix(stage)
         canon = getattr(self.criterion, "canonical_loss_keys", None)
         loss_keys = list(canon()) if callable(canon) else []
-        for key in (*loss_keys, *self._SEM_METRIC_KEYS, *self._EMB_METRIC_KEYS):
+        for key in (*loss_keys, *self._SEM_METRIC_KEYS, *self._INSTANCE_METRIC_KEYS):
             _ = self._eval_accum[f"{prefix}/{key}"]  # materialise (0.0, 0.0)
 
     def on_validation_epoch_start(self) -> None:

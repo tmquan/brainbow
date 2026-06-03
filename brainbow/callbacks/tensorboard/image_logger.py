@@ -13,9 +13,10 @@ import pytorch_lightning as pl
 import torch
 from einops import rearrange
 
-from brainbow.callbacks.tensorboard.heads import GEOMETRY_STYLES, _log_predictions
+from brainbow.callbacks.tensorboard.heads import _log_predictions
 from brainbow.callbacks.tensorboard.tags import TagContext
 from brainbow.callbacks.tensorboard.viz import _to_2d
+from brainbow.losses import AFF_SLICE, AFFINITY_OFFSETS, N_ATTRACTIVE, SEM_SLICE
 
 
 class ImageLogger(pl.Callback):
@@ -36,34 +37,18 @@ class ImageLogger(pl.Callback):
 
     All tags live under ``{stage}/{mode}/...`` where
     ``stage`` ∈ {``train``, ``val``} and ``mode`` = ``"automatic"``.
-    Each affinity direction is prefixed with its 1-based index in
-    :data:`brainbow.losses.DIRECTIONS` (``01_t1`` ... ``12_r2``) so the
-    alphabetical TB sort places each axis-aligned pair on consecutive
-    panels::
+    The affinity panels show a curated subset of offsets (all attractive
+    nearest-neighbours plus a few long-range repulsive ones)::
 
-        {stage}/automatic/true/aff/{01_t1,...,12_r2}            (3-D only)
-        {stage}/automatic/true/avg/val                          (3-D only)
         {stage}/automatic/true/image
         {stage}/automatic/true/label
-        {stage}/automatic/true/skl                              (when label_skl in batch)
-        {stage}/automatic/true/dir                              (when label_direction in batch)
-        {stage}/automatic/true/cov                              (when label_covariance in batch)
-        {stage}/automatic/true/rad                              (when label_radius in batch)
+        {stage}/automatic/true/aff/{offset}                     (3-D only)
         {stage}/automatic/true/wan_decoder                      (Cosmos + VAE only)
-        {stage}/automatic/pred/raw
         {stage}/automatic/pred/sem
-        {stage}/automatic/pred/skl
-        {stage}/automatic/pred/dir
-        {stage}/automatic/pred/cov
-        {stage}/automatic/pred/rad
-        {stage}/automatic/pred/avg/val
-        {stage}/automatic/pred/avg/aff/{01_t1,02_b1,03_u1,04_d1,
-                                       05_l1,06_r1,07_t2,08_b2,
-                                       09_u2,10_d2,11_l2,12_r2}
-        {stage}/automatic/pred/emb/_{pca|svd|umap}
-        {stage}/automatic/pred/emb/aff/{01_t1,...,12_r2}
-        {stage}/automatic/pred/label/pre                        (only with clusterer)
-        {stage}/automatic/pred/label/mul                        (only with clusterer)
+        {stage}/automatic/pred/raw
+        {stage}/automatic/pred/aff/{offset}
+        {stage}/automatic/pred/label/pre                        (Mutex Watershed, 3-D)
+        {stage}/automatic/pred/label/mul                        (× predicted sem)
 
     This matches the scalar hierarchy emitted by
     :class:`brainbow.modules.base.BaseCircuitModule`
@@ -108,11 +93,6 @@ class ImageLogger(pl.Callback):
         geometry_style: str = "glyph",
     ) -> None:
         super().__init__()
-        if geometry_style not in GEOMETRY_STYLES:
-            raise ValueError(
-                f"geometry_style must be one of {GEOMETRY_STYLES}; "
-                f"got {geometry_style!r}."
-            )
         self.every_n_epochs = max(every_n_epochs, 1)
         self.max_images = max_images
         self.spatial_dims = spatial_dims
@@ -299,17 +279,25 @@ class ImageLogger(pl.Callback):
         if tb is None:
             return
 
-        clusterer = (
-            getattr(pl_module, "clusterer", None)
-            or getattr(pl_module, "_clusterer", None)
-        )
-
-        criterion = getattr(pl_module, "criterion", None)
-        aff_emb_tau = float(getattr(criterion, "aff_emb_tau", 1.0)) if criterion else 1.0
-        aff_avg_tau = float(getattr(criterion, "aff_avg_tau", 1.0)) if criterion else 1.0
-        normalize_embeddings = bool(
-            getattr(criterion, "normalize_embeddings", False)
-        ) if criterion else False
+        # Mutex Watershed instance segmentation of the predicted affinities
+        # (3-D only).  Run on the full head BEFORE central-slice extraction
+        # so the agglomeration sees the whole volume, then slice the label
+        # map for display.  Restricted to the predicted foreground (sem).
+        agglomerator = getattr(pl_module, "agglomerator", None)
+        seg_pred_2d = None
+        offsets = AFFINITY_OFFSETS
+        n_attractive = N_ATTRACTIVE
+        if agglomerator is not None:
+            offsets = getattr(agglomerator, "offsets", offsets)
+            n_attractive = getattr(agglomerator, "n_attractive", n_attractive)
+            if self.spatial_dims == 3:
+                aff = head_pred[:, AFF_SLICE].float()
+                sem_fg = head_pred[:, SEM_SLICE][:, 0] > 0.5
+                seg_3d = agglomerator(aff, sem_fg)            # [n, D, H, W] long
+                seg_pred_2d = rearrange(
+                    _to_2d(rearrange(seg_3d, "b ... -> b 1 ...")),
+                    "b 1 ... -> b ...",
+                )
 
         images_2d = _to_2d(images[:n])
         labels_2d = rearrange(
@@ -320,45 +308,15 @@ class ImageLogger(pl.Callback):
             _to_2d(wan_decoder_pred) if wan_decoder_pred is not None else None
         )
 
-        # Forward the precomputed skeleton-geometry targets (if any) so
-        # the orchestrator can emit ``true/skl`` / ``true/dir`` /
-        # ``true/cov`` / ``true/rad`` panels next to their ``pred/``
-        # counterparts.  Falls back to ``None`` when the field is not
-        # in the cached batch (e.g. ``compute_geometry: false``).
-        gt_fields_2d: Dict[str, Optional[torch.Tensor]] = {}
-        for key in ("label_skl", "label_direction",
-                    "label_covariance", "label_radius"):
-            arr = batch.get(key)
-            if arr is None:
-                gt_fields_2d[key] = None
-                continue
-            arr = arr.to(pl_module.device)
-            # Strip any extra leading dim that ``EnsureChannelFirstd``
-            # may have stacked on top of an already-channel-first
-            # field (defensive; matches the model's [B, C, *spatial]
-            # contract).
-            if arr.dim() == self.spatial_dims + 3:
-                arr = rearrange(arr, "b 1 c ... -> b c ...")
-            arr = arr[:n].float()
-            gt_fields_2d[key] = _to_2d(arr)
-
         ctx = TagContext(stage=stage, mode=self.mode)
         _log_predictions(
             tb, ctx, images_2d, labels_2d,
             head_pred, self.spatial_dims, n, epoch,
-            clusterer=clusterer,
+            offsets=offsets,
+            n_attractive=n_attractive,
             labels_3d=labels[:n] if self.spatial_dims == 3 else None,
-            projection_algorithm=self.projection_algorithm,
-            projection_backend=self.projection_backend,
-            aff_emb_tau=aff_emb_tau,
-            aff_avg_tau=aff_avg_tau,
-            normalize_embeddings=normalize_embeddings,
+            seg_pred_2d=seg_pred_2d,
             wan_decoder_2d=wan_decoder_2d,
-            geometry_style=self.geometry_style,
-            gt_skl_2d=gt_fields_2d.get("label_skl"),
-            gt_dir_2d=gt_fields_2d.get("label_direction"),
-            gt_cov_2d=gt_fields_2d.get("label_covariance"),
-            gt_rad_2d=gt_fields_2d.get("label_radius"),
         )
         del head_pred, wan_decoder_pred
 

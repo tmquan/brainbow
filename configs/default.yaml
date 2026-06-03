@@ -81,10 +81,11 @@ model:
   # Cosmos 3 generator); cosmos{transfer,predict}3d -> "2B" / "14B".
   variant: Nano
   in_channels: 1
-  # Unified head: raw(1)+sem(1)+skl(1)+dir(3)+cov(6)+rad(1)+avg(3)+emb(16)
-  # Sigmoid is applied to the contiguous (sem, skl) block at ch [1, 3);
-  # all other channels stay linear.
-  head_channels: 32
+  # Affinity + sem + raw head (HEAD_CHANNELS = N_AFF + 2 = 16):
+  #   aff(N_AFF=14 offsets) + sem(1) + raw(1).  aff + sem are sigmoid;
+  #   raw is linear.  The affinities are agglomerated into instances by
+  #   the Mutex Watershed at eval (see training.mutex_watershed).
+  head_channels: 16
   feature_size: 64
   dropout: 0.2
   # If true, the wrapper will auto-pull pretrained weights from HuggingFace
@@ -111,119 +112,55 @@ optimizer:
     T_max: 100
     eta_min: 1.0e-6
 
-# Loss configuration -- nested per-head schema.
+# Loss configuration -- AffinityFGLoss (affinity + sem + raw head).
 #
 # Each ``weight_<head>`` is either a scalar (head's overall weight; all
 # sub-loss kwargs default) OR a mapping ``{weight: ..., <kwarg>: ...}``
-# whose entries are forwarded to the head's sub-loss constructor.  A
-# nested mapping without ``weight:`` defaults to ``weight: 1.0``; set
-# ``weight: 0`` (scalar or nested) to disable a head entirely.
+# whose entries are forwarded to the head's sub-loss.  A nested mapping
+# without ``weight:`` defaults to ``weight: 1.0``; set ``weight: 0`` to
+# disable a head entirely.
 loss:
-  ignore_index: -100              # sem label value masked from composite target
+  ignore_index: -100              # sem label value masked from the sem target
   background: -1                  # aff target background mask; -1 = keep every voxel
 
-  weight_raw:
+  # Affinity head (per-offset P(same instance)).  Masked BCE + soft-Dice
+  # (+ optional focal) within the fg-fg validity mask; ``attractive_weight``
+  # / ``repulsive_weight`` rebalance the nn vs long-range offset groups.
+  weight_aff:
     weight: 1.0
-    loss: l1
-  # Sigmoid + composite Dice + BCE + Focal on the binary foreground
-  # head (ch 1).  ``lambda_{bce,dice,focal}`` scale each term inside
-  # ``DiceBCEFocalLoss``; ``gamma`` is the focal focusing parameter
-  # (``gamma=0`` makes Focal collapse to plain BCE).  Set any lambda
-  # to ``0`` to disable that term on this head only (e.g. Dice-only
-  # ablation: ``lambda_bce: 0, lambda_focal: 0``).
+    lambda_bce: 1.0
+    lambda_dice: 1.0
+    lambda_focal: 0.0
+    gamma: 2.0
+    attractive_weight: 1.0
+    repulsive_weight: 1.0
+    mask_to_foreground: true
+  # Foreground (semantic) head: sigmoid + composite Dice + BCE + Focal
+  # vs ``labels > 0``.  ``gamma=0`` collapses Focal to plain BCE.
   weight_sem:
     weight: 1.0
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 2.0
-  # Sigmoid + composite Dice + BCE + Focal on the 1-voxel-wide
-  # skeleton mask (ch 2).  The ~99.9% negative target is handled by
-  # Dice's foreground-volume normalisation; the Focal term sharpens
-  # the gradient on the rare positive voxels.  Tune ``gamma`` upward
-  # (e.g. ``3.0``) if the skeleton head is recall-poor after a few
-  # thousand steps.
-  weight_skl:
-    weight: 0.0
-    lambda_bce: 1.0
-    lambda_dice: 1.0
-    lambda_focal: 1.0
-    gamma: 2.0
-  weight_dir:
-    weight: 0.0
-    loss: l1
-  weight_cov:
-    weight: 0.0
-    loss: l1
-  # Distance to nearest same-instance skeleton voxel (head ch 12, L1
-  # foreground-only).  When precomputed by ``SkeletonGeometryd`` with
-  # ``radius_normalize=True`` (default), the target lives in [0, 1]
-  # per-instance; with ``radius_normalize=false`` it lives in voxel
-  # units.
-  weight_rad:
-    weight: 0.0
-    loss: l1
-  weight_avg:
-    weight: 0.0
-    loss: l1
-  weight_emb:
+  # Raw reconstruction head: linear L1 / MSE regression of the
+  # (normalised) input EM intensity.
+  weight_raw:
     weight: 1.0
-    weight_pull: 1.0
-    weight_push: 1.0
-    weight_norm: 0.001
-    delta_v: 0.5
-    delta_d: 1.5
-    normalize_embeddings: false
-    max_hard_pairs: 0
-  # Derived 12-channel face-affinity composite heads.  ``tau``
-  # controls the softness of the ``exp(-tau * L1)`` kernel that turns
-  # the continuous emb / avg field into a soft affinity score.  The
-  # composite (Dice + BCE + Focal) lambdas are per-path; ``aff_eps``
-  # under ``weight_aff_emb`` is the shared Dice smoothing default and
-  # also seeds ``weight_aff_avg`` (override per path with explicit
-  # ``smooth_nr`` / ``smooth_dr``).
-  weight_aff_emb:
-    weight: 0.0
-    tau: 1.0
-    lambda_bce: 1.0
-    lambda_dice: 1.0
-    lambda_focal: 1.0
-    gamma: 2.0
-  weight_aff_avg:
-    weight: 0.0
-    tau: 1.0
-    lambda_bce: 1.0
-    lambda_dice: 1.0
-    lambda_focal: 1.0
-    gamma: 2.0
+    loss: l1
 
 # Training configuration
 training:
-  # Validation-time clusterer.  `bandwidth` defaults to loss.delta_v,
-  # `normalize_embeddings` defaults to loss.normalize_embeddings.
-  # Names: soft_meanshift | hdbscan | meanshift | spatial_cc
-  #
-  #   - soft_meanshift : differentiable mean-shift (historical default).
-  #                      Over-segments on random / untrained embeddings.
-  #   - hdbscan        : density-based, auto-K.  Subsamples to
-  #                      max_points.  GPU via cuML.  Ignores spatial
-  #                      connectivity.
-  #   - meanshift      : classical MeanShift.  GPU only if cuML < 23.x.
-  #   - spatial_cc     : connected components on the per-voxel
-  #                      embedding-affinity graph (see clusterer.py).
-  #                      Respects spatial connectivity, linear time,
-  #                      one threshold.  GPU via cupyx.scipy.sparse.
-  #                      Recommended for dense-EM neurons.
-  clusterer:
-    name: soft_meanshift
-    # Common:
-    # min_cluster_size: 50
-    # backend: auto
-    # hdbscan / meanshift:
-    # max_points: 50000
-    # cluster_selection_epsilon: null   # null → bandwidth
-    # spatial_cc:
-    # connectivity: 1                   # 1 → 6-nbr; else → 26-nbr
+  # Validation-time agglomeration: Mutex Watershed over the predicted
+  # affinities (parameter-free; non-differentiable; CPU per crop).
+  # ``offsets`` / ``n_attractive`` default to the loss's; leave unset
+  # unless you override ``AFFINITY_OFFSETS`` in
+  # ``brainbow/losses/_common.py``.  ``strides`` subsamples the
+  # repulsive (long-range) edges only (throughput lever); ``size_filter``
+  # drops components smaller than N voxels.
+  mutex_watershed:
+    strides: [1, 4, 4]                  # [Z, Y, X]; dense Z, sparse in-plane
+    size_filter: 50
   max_epochs: 100
   accelerator: auto  # Options: cpu, gpu, tpu, auto
   devices: auto
