@@ -366,7 +366,7 @@ model:
   # memory rises sharply -- if this OOMs, flip back to ``true`` or lower
   # ``data.batch_size``.
   gradient_checkpointing: true
-  dropout: 0.2
+  dropout: 0.0
 
 
 # ---------------------------------------------------------------------
