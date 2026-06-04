@@ -55,8 +55,8 @@ Every backbone trains one **affinity + sem + raw per-voxel head**
 | N_AFF+1 (1) | `raw` | input-EM reconstruction (linear, L1) |
 
 The affinity offsets (`brainbow.losses.AFFINITY_OFFSETS`) are 3 **pull**
-(attractive) nearest-neighbours plus 11 **push** (repulsive) long-range
-offsets (anisotropy-aware for EM).  `AffinityFGLoss` supervises the
+nearest-neighbours plus 11 **push** long-range offsets (anisotropy-aware
+for EM).  `AffinityFGLoss` supervises the
 affinities (masked BCE + soft-Dice + focal) directly against the binary
 label-derived target; at evaluation / inference the predicted
 affinities are agglomerated into instances by the **parameter-free
