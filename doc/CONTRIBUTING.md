@@ -14,11 +14,11 @@ Companion docs:
 ## How to add a new ...
 
 1. [Dataset](#1-add-a-new-dataset)
-2. [Loss head](#2-add-a-new-loss-head)
+2. [Head field / loss term](#2-add-a-new-head-field--loss-term)
 3. [Model backbone](#3-add-a-new-model-backbone)
 4. [Transform](#4-add-a-new-transform)
 5. [Callback](#5-add-a-new-callback)
-6. [Clustering algorithm](#6-add-a-new-clustering-algorithm)
+6. [Agglomeration / Mutex Watershed](#6-tune-the-mutex-watershed-agglomeration)
 
 Every recipe sticks to these conventions:
 
@@ -151,23 +151,29 @@ in <1 s.
 
 ---
 
-## 2. Add a new unified-head field / loss term
+## 2. Add a new head field / loss term
 
-Most changes now happen in two places:
+Most changes happen in two places:
 
 ```
 brainbow/losses/_common.py            # channel slice / constants if the head layout changes
-brainbow/losses/combined.py           # loss weights, target build, scalar keys
+brainbow/losses/affinity.py           # loss weights, target build, scalar keys
 ```
 
 ### 2.1 Add a new field
 
-1. Add `CH_<FIELD>` and `<FIELD>_SLICE` to `losses/_common.py`.
+1. Add `<FIELD>_SLICE` (and any constants) to `losses/_common.py`, and
+   extend `SIGMOID_SLICE` if the new field is probabilistic.
 2. Bump `HEAD_CHANNELS` and `model.head_channels` in the configs.
 3. Update `slice_head()` tests in `tests/test_losses.py`.
-4. In `CombinedLoss.__init__`, add `weight_<field>` config parsing.
-5. In `CombinedLoss.forward`, slice the field and add scalar keys under
-   `loss/<field>`.
+4. In `AffinityFGLoss.__init__`, add `weight_<field>` parsing; add a
+   `_loss_<field>` method.
+5. In `AffinityFGLoss.forward`, emit `loss/<field>` and list it in
+   `canonical_loss_keys()` so the eval reducer pre-seeds it.
+
+To instead change the **affinity edge set**, edit `AFFINITY_OFFSETS` /
+`N_PULL` in `_common.py` — `HEAD_CHANNELS`, the target builders, and the
+Mutex Watershed all re-derive from it.
 
 ### 2.2 TensorBoard
 
@@ -218,11 +224,11 @@ brainbow/modules/<arch>/module.py         # concrete Lightning class
 
 * Inherit from `torch.nn.Module` (or `BaseModel` if you want the type
   guarantees).
-* `forward(x: Tensor) -> Tensor` returning the unified
+* `forward(x: Tensor) -> Tensor` returning the
   `[B, HEAD_CHANNELS, *spatial]` tensor.  Route the head output through
   `brainbow.losses.apply_head_activations` so sigmoid lands on the
-  contiguous `SIGMOID_SLICE` (sem + skl) and every other channel stays
-  linear.
+  contiguous `SIGMOID_SLICE` (aff + sem) and the trailing `raw` channel
+  stays linear.
 * If your backbone has frozen modules under DDP, follow Cosmos's
   approach: `requires_grad_(False)` + `.eval()` + `.detach()` on the
   output of the frozen subgraph (see `cosmos_transfer_2_5/wrapper.py`).
@@ -242,14 +248,14 @@ class BaseMyArchModule(BaseCircuitModule):
 
 ```python
 # brainbow/modules/myarch/module.py
-from brainbow.losses import CombinedLoss
+from brainbow.losses import AffinityFGLoss
 from brainbow.models.myarch import MyArchWrapper
 from brainbow.modules.myarch.base import BaseMyArchModule
 
 class MyArchModule(BaseMyArchModule):
     _SPATIAL_DIMS = 3
     _model_cls = MyArchWrapper
-    _loss_cls = CombinedLoss
+    _loss_cls = AffinityFGLoss
 ```
 
 ### 3.3 Wire-in the dispatch
@@ -325,26 +331,27 @@ Re-export from `brainbow/callbacks/__init__.py` and add an `if cfg.callbacks.myc
 
 ---
 
-## 6. Add a new clustering algorithm
+## 6. Tune the Mutex Watershed agglomeration
 
-```python
-# brainbow/inference/clusterer.py
-class MyClusterer(_BaseUnsupervisedClusterer):
-    def _fit_predict_one(self, embeddings, labels=None):
-        ...   # returns (labels, soft_assign, centers)
+Instances come from the parameter-free Mutex Watershed
+(`brainbow/inference/mutex_watershed.py`), not a learned clusterer, so
+there's no algorithm to register — you tune it through
+`training.mutex_watershed` in the config:
+
+```yaml
+training:
+  mutex_watershed:
+    strides: [1, 4, 4]   # per-axis subsample of push edges (Z, Y, X)
+    size_filter: 0       # drop components < N voxels -> background
+    # offsets / n_pull default to AFFINITY_OFFSETS / N_PULL
 ```
 
-Register in `build_clusterer` (same file, ~line 723):
-
-```python
-if name == "myclusterer":
-    return MyClusterer(**kwargs)
-```
-
-The metric path expects a `(labels, soft_assign, centers)` triple.
-Returning ``None`` for `soft_assign` / `centers` is OK; raising or
-returning a single tensor is **not** -- see
-[`GOTCHAS.md` #15](./GOTCHAS.md).
+`MutexWatershed` returns `[B, *spatial]` long instance ids
+(`0` = background), the drop-in contract for the eval metric path.  It
+runs on the CPU (numpy edge build + numba core); see
+[`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md) for the algorithm and why
+it's CPU-only.  To change the edge set, edit `AFFINITY_OFFSETS` /
+`N_PULL` in `losses/_common.py` (§2).
 
 ---
 
@@ -358,8 +365,7 @@ returning a single tensor is **not** -- see
 * **No mutable defaults.**  Use `None` and assign in the body.
 * **No silent `except Exception`.**  Either narrow the exception
   class or re-raise after logging.  See
-  [`GOTCHAS.md` #6, #7, #11](./GOTCHAS.md) for examples of how this
-  bites us.
+  [`GOTCHAS.md` #7](./GOTCHAS.md) for an example of how this bites us.
 * **Comments explain why, not what.**  If the code is doing something
   surprising, leave a one-line comment with a citation.
 
@@ -373,10 +379,10 @@ returning a single tensor is **not** -- see
 | DataModules          | `tests/test_datamodules.py`        |
 | Preprocessors        | `tests/test_preprocessors.py`      |
 | Losses               | `tests/test_losses.py`             |
-| Utils (io / parallel)| `tests/test_utils.py`              |
+| Utils (io)           | `tests/test_utils.py`              |
 | Sliding window       | `tests/test_sliding_window.py`     |
-| Clustering           | `tests/test_clustering.py` (new)   |
-| Modules / Trainer    | `tests/test_modules.py` (new, Phase 5) |
+| Mutex Watershed      | `tests/test_mutex_watershed.py`    |
+| Modules / Trainer    | `tests/test_modules.py`            |
 
 If the test needs CUDA, gate it on `pytest.importorskip("torch.cuda")`
 or `@pytest.mark.skipif(not torch.cuda.is_available(), reason=...)`.

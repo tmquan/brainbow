@@ -3,20 +3,18 @@ Model architectures for connectomics segmentation.
 
 Four end-to-end backbone wrappers live here:
 
-* :class:`Cosmos3Nano3DWrapper` -- Cosmos 3 (Nano) 16B omni
-  Mixture-of-Transformers (``Cosmos3OmniTransformer`` + Wan VAE) with
-  the unified 32-channel head.  The default backbone.  Shares all
-  scaffolding with the Cosmos 2.5 family via
+* :class:`CosmosPredict3DWrapper` -- Cosmos-Predict 2.5 (base DiT +
+  VAE, no ControlNet) with the affinity + sem + raw head
+  (``HEAD_CHANNELS``).  The default backbone.  Shares all scaffolding
+  with the Cosmos 2.5 family via
   :mod:`brainbow.models.cosmos_2_5_common`.
 * :class:`CosmosTransfer3DWrapper` -- Cosmos-Transfer 2.5 (base DiT +
-  ControlNet residual branch + VAE) with a single unified 32-channel
-  head (``raw|sem|dir|cov|avg|emb``).
-* :class:`CosmosPredict3DWrapper` -- Cosmos-Predict 2.5 (base DiT +
-  VAE, no ControlNet) with the same unified 32-channel head.  Shares
-  all scaffolding with Transfer via
-  :mod:`brainbow.models.cosmos_2_5_common`.
+  ControlNet residual branch + VAE) with the same head.
+* :class:`Cosmos3Nano3DWrapper` -- Cosmos 3 (Nano) 16B omni
+  Mixture-of-Transformers (``Cosmos3OmniTransformer`` + Wan VAE) with
+  the same head.
 * :class:`Vista3DWrapper` -- SegResNetDS2 backbone with the same
-  unified 32-channel head, for fast local iteration.
+  head, for fast local iteration.
 
 All wrappers project their backbone features through
 :class:`brainbow.models.vista.VistaTaskHead3D` so the post-backbone

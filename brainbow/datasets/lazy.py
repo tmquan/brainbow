@@ -431,9 +431,9 @@ class LazyVolDataset(Dataset):
         """Check whether the label patch has enough foreground.
 
         Returns ``(ok, label)``.  The label is returned alongside the
-        boolean so ``__getitem__`` can reuse the I/O it just paid for —
-        previously the same chunk was read twice when ``min_foreground``
-        was active (once here, once in the read path below).
+        boolean so ``__getitem__`` can reuse the I/O it just paid for,
+        avoiding a second read of the same chunk when ``min_foreground``
+        is active (once here, once in the read path below).
         """
         if handle.label_path is None:
             return True, None

@@ -8,7 +8,7 @@ A Lightning module is the **glue** between a backbone wrapper
 and the Trainer.  Brainbow keeps the loop in one shared base
 (:class:`BaseCircuitModule`) so that every architecture gets the same
 training step, evaluation accumulation, scalar tag hierarchy and
-clusterer wiring for free.
+Mutex Watershed agglomeration wiring for free.
 
 Architecture-specific concerns -- freeze schedules, optimiser param-
 group splits, gradient sanitisation -- live in a per-family base class.

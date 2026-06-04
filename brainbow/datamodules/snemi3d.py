@@ -3,7 +3,7 @@ SNEMI3D DataModule for PyTorch Lightning.
 
 Uses :class:`LazyVolDataset` for 3D patch mode (reads patches from
 disk on demand — constant memory regardless of volume count) and
-the legacy :class:`SNEMI3DDataset` for 2D slice mode.
+:class:`SNEMI3DDataset` for 2D slice mode.
 """
 
 import logging
@@ -24,7 +24,7 @@ class SNEMI3DDataModule(CircuitDataModule):
     disk per sample — keeping system RAM usage constant regardless of
     how many volumes are configured.
 
-    In 2D slice mode (``slice_mode=True``), falls back to the legacy
+    In 2D slice mode (``slice_mode=True``), uses
     :class:`SNEMI3DDataset` which loads volumes into memory.
 
     Args:

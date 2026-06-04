@@ -114,21 +114,18 @@ data:
   # ---- Loader & batching ----
   batch_size: 8
   # Validation/test batch size.  The eval path runs a full-resolution
-  # decode + the SpatialCC clusterer + contingency-matrix metrics on top
-  # of the 16B forward, so its per-batch peak FAR exceeds the train step
-  # (~207 GB/rank at batch_size=4 on Cosmos3-Nano).  Under DDP that tips
-  # one rank into OOM -> the rank dies -> the survivors' epoch-end
-  # ``dist.all_gather_object`` reports a bogus ">1EB" allocation.  Pin
-  # val to 1 to keep the eval peak well under the per-GPU ceiling; raise
-  # once you've confirmed headroom.  (A per-batch OOM is also caught and
-  # skipped now -- see ``BaseCircuitModule._eval_step_and_accumulate``.)
+  # decode + the Mutex Watershed + contingency-matrix metrics on top of
+  # the forward, so its per-batch peak exceeds the train step.  Under DDP
+  # a too-large val batch can tip one rank into OOM, which kills that rank
+  # and corrupts the survivors' epoch-end reduction.  Keep val modest to
+  # stay under the per-GPU ceiling; raise once you've confirmed headroom.
+  # (A per-batch OOM is also caught and skipped -- see
+  # ``BaseCircuitModule._eval_step_and_accumulate``.)
   val_batch_size: 4
   num_workers: 8
-  # persistent_workers=true.  The earlier ``/dev/shm`` blow-up that
-  # tempted us to disable this was actually a kimimaro pathos leak
-  # (``kimimaro-shm-{dbf,cc-labels}-*`` segments orphaned on worker
-  # SIGKILL when kimimaro 5.x interpreted ``parallel=0`` as "fork
-  # ``cpu_count()`` subprocesses").  The leak is closed at the
+  # persistent_workers=true.  A ``/dev/shm`` blow-up can occur if a
+  # transform forks pathos subprocesses inside DataLoader workers
+  # (orphaned named-shm segments on worker SIGKILL).  The leak is closed at the
   # transform layer by ``parallel=1`` in
   # ``brainbow/transforms/skeleton.py::_skeletonize_all_kimimaro``,
   # which short-circuits kimimaro's parallel code path entirely.  With
@@ -243,7 +240,7 @@ data:
   # MICrONS minnie65 crops are held out from training; the three
   # SNEMI3D-family entries (AC4 + the two neurons / neurite11
   # cylinders) are deliberately shared with ``train_volumes`` so the
-  # val-time clusterer / image-logger panels stay anchored to the same
+  # val-time Mutex Watershed / image-logger panels stay anchored to the same
   # cropped neighbourhoods we see in training (cheap eyeball check
   # against memorisation -- a healthy run still produces qualitatively
   # different predictions per crop because each val draw is a fresh
@@ -376,10 +373,10 @@ model:
 callbacks:
   cuda_empty_cache_before_val: true   # avoids val-peak polluting train pool
   image_logger:
-    # Train + val visualizations at epoch end.  Runs on rank 0 only, so
-    # it does NOT cause the multi-rank validation cascade -- that was the
-    # per-rank val step at val_batch_size=4, now fixed by
-    # ``data.val_batch_size: 1`` + the OOM guard in
+    # Train + val visualizations at epoch end.  Rank 0 writes the images,
+    # but the epoch-end forward runs on ALL ranks so FSDP all-gathers are
+    # satisfied (see the FSDP-safe note below).  Per-rank val memory is
+    # bounded by ``data.val_batch_size`` + the OOM guard in
     # ``BaseCircuitModule._eval_step_and_accumulate``.
     #
     # FSDP-safe: the epoch-end forward runs on ALL ranks (so the model's
@@ -419,12 +416,17 @@ training:
   # this batch size); FSDP is only needed for the 16B Cosmos3 backbone.
   strategy: ddp
   # ``bf16-mixed`` is the recommended DDP precision: params stay fp32 with
-  # an outer bf16 autocast over the step.  (The ``bf16-true`` FSDP path was
-  # specific to the natively-bf16 Cosmos3 backbone + FSDP MixedPrecision.)
+  # an outer bf16 autocast over the step.  (``bf16-true`` is for the
+  # natively-bf16 Cosmos3 backbone under FSDP MixedPrecision.)
   precision: bf16-mixed
   gradient_clip_val: 1.0
   accumulate_grad_batches: 1
   limit_val_batches: 50
+  # Pre-training sanity validation.  At init the affinity head is
+  # near-random, so the Mutex Watershed is in its slowest regime (many
+  # fragments / long mutex chains); the GPU-assisted agglomeration (GPU
+  # edge build + sort, CPU sequential core) keeps that to ~seconds/crop,
+  # so 2 sanity steps are fine.  Set to 0 to skip entirely.
   num_sanity_val_steps: 2
   log_every_n_steps: 100
   check_val_every_n_epoch: 20     # validate every 20 epochs (default 1)
@@ -493,9 +495,9 @@ training:
   #                   are reset to background (despeckle).
   # -------------------------------------------------------------------
   mutex_watershed:
-    # Finer in-plane push sampling (was [1,4,4]) so more long-range
-    # mutex edges are available to actually cut true boundaries -- the
-    # direct lever against the under-segmentation / merge collapse.
+    # Finer in-plane push sampling makes more long-range mutex edges
+    # available to cut true boundaries -- the direct lever against
+    # under-segmentation / merge collapse (coarsen to lower edge count).
     strides: [1, 2, 2]             # [Z, Y, X]; dense Z, denser in-plane push
     size_filter: 50
 
@@ -539,7 +541,7 @@ optimizer:
 #   sem: ch  N_AFF          -> sigmoid foreground / boundary probability
 #   raw: ch  N_AFF + 1      -> linear  L1 reconstruction of the input EM
 #
-# The first ``N_ATTRACTIVE`` (3) offsets are the nearest-neighbour
+# The first ``N_PULL`` (3) offsets are the nearest-neighbour
 # pull edges (z, y, x); the rest are long-range push edges.
 # At eval the affinities are agglomerated into instances by the Mutex
 # Watershed (see ``training.mutex_watershed`` above).

@@ -7,8 +7,8 @@ and Cosmos-Predict 2.5 have in common:
   DiT + Wan-style VAE)
 * random-init ``_StandaloneDiT3D`` fallback for ``pretrained=False``
 * multi-layer DiT feature extraction via persistent forward hooks
-* Wan-VAE encode/decode + the unified 32-channel
-  :class:`_DecoderAdapter3D` head
+* Wan-VAE encode/decode + the ``HEAD_CHANNELS``-wide
+  :class:`_DecoderAdapter3D` head (affinity + sem + raw)
 * freeze plumbing for the DiT, VAE encoder and VAE decoder
 * gradient checkpointing on/off
 * parameter-contiguity fix for DDP

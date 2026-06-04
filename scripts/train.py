@@ -82,14 +82,14 @@ os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
 #   * NCCL_PROTO=Simple    -- avoid LL128 which has tickled the same Xid
 #                              on this driver at the start-of-training
 #                              warm-up burst.
-#   * NCCL_ASYNC_ERROR_HANDLING=1 -- NCCL's own variant of the C10D knob
-#                              above; raise instead of abort on collective
-#                              error so Lightning's crash hook can run.
-# All four are `setdefault` so a user can override them at the shell.
+# (Async error handling is set once above via the current
+# ``TORCH_NCCL_ASYNC_ERROR_HANDLING`` name; the legacy
+# ``NCCL_ASYNC_ERROR_HANDLING`` alias is deprecated and only emits a
+# warning, so it is intentionally not set here.)
+# All three are `setdefault` so a user can override them at the shell.
 os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
 os.environ.setdefault("NCCL_ALGO", "Ring")
 os.environ.setdefault("NCCL_PROTO", "Simple")
-os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 

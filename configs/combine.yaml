@@ -55,18 +55,14 @@ training:
 
 # Post-processing override: SNEMI3D + MICrONS are both ~5:1 anisotropic
 # (30-40 nm Z, 6-8 nm XY).  Neurons routinely touch across Z slices
-# while being genuinely distinct cells (by design of the dataset), so
-# the embedding threshold in Z needs to be well under the XY one --
-# otherwise a single borderline-similar Z neighbour leaks two cells
-# into the same connected component.  The `self` backend runs our
-# self-contained CuPy union-find kernel (no pylibcugraph dependency).
+# while being genuinely distinct cells (by design of the dataset).  The
+# Mutex Watershed already respects this through the anisotropic affinity
+# offset set (short Z reach, long in-plane reach); if needed, tighten the
+# push-edge sampling in Z by overriding ``strides`` here.
 # training:
-#   clusterer:
-#     name: spatial_cc
-#     backend: self
-#     min_cluster_size: 50
-#     connectivity: 1
-#     bandwidth: [0.2, 0.5, 0.5]   # [Z, Y, X]; Z tighter to respect anisotropy
+#   mutex_watershed:
+#     strides: [1, 2, 2]   # [Z, Y, X]; denser in-plane push edges
+#     size_filter: 50
 
 data:
   train_volumes:

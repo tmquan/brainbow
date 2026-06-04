@@ -27,7 +27,7 @@ class CudaEmptyCacheCallback(pl.Callback):
     """Clear the CUDA allocator cache around each validation epoch.
 
     Validation runs a different memory profile from training (sliding-window
-    inference, full-resolution clusterer, image-logger snapshots), so its
+    inference, full-resolution decode, image-logger snapshots), so its
     peak otherwise ends up reserved in the same allocator pool as training.
     Emptying on *both* sides of validation stops the val high-water mark
     from contaminating train memory across epochs.

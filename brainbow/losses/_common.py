@@ -14,8 +14,8 @@ The sigmoid is applied once by the wrapper via
 
 The affinities are predicted for a fixed list of 3-D voxel offsets
 :data:`AFFINITY_OFFSETS` ``(dz, dy, dx)``.  The first :data:`N_PULL`
-offsets are the nearest-neighbour **pull** (attractive) edges (z, y, x);
-the remainder are long-range **push** (repulsive) edges.  This is the edge set the
+offsets are the nearest-neighbour **pull** edges (z, y, x);
+the remainder are long-range **push** edges.  This is the edge set the
 Mutex Watershed (Wolf et al. 2018, *The Mutex Watershed*, CVPR) consumes
 at evaluation / inference time to agglomerate voxels into instances
 (see :mod:`brainbow.inference.mutex_watershed`).
@@ -73,18 +73,18 @@ import torch.nn.functional as F
 # ---------------------------------------------------------------------------
 
 # 3-D voxel offsets ``(dz, dy, dx)``.  The first ``N_PULL`` are the
-# nearest-neighbour pull (attractive) edges; the rest are long-range push
-# (repulsive) edges.  Anisotropy-aware: the in-plane (Y, X) reach is much
-# longer than the across-section (Z) reach, matching EM resolution (~1:5).
+# nearest-neighbour pull edges; the rest are long-range push edges.
+# Anisotropy-aware: the in-plane (Y, X) reach is much longer than the
+# across-section (Z) reach, matching EM resolution (~1:5).
 AFFINITY_OFFSETS: Tuple[Tuple[int, int, int], ...] = (
-    # --- pull (attractive) nearest neighbours (z, y, x) ---
+    # --- pull nearest neighbours (z, y, x) ---
     (-1, 0, 0), (0, -1, 0), (0, 0, -1),
-    # --- push (repulsive) long-range, in-plane ---
+    # --- push long-range, in-plane ---
     (0, -3, 0), (0, 0, -3),
     (0, -9, 0), (0, 0, -9),
     (0, -27, 0), (0, 0, -27),
     (0, -9, -9), (0, 9, -9),
-    # --- push (repulsive) long-range, across sections (short, anisotropic) ---
+    # --- push long-range, across sections (short, anisotropic) ---
     (-2, 0, 0), (-3, 0, 0), (-4, 0, 0),
 )
 N_PULL: int = 3
@@ -113,8 +113,8 @@ HEAD_LAYOUT: Dict[str, slice] = {
     "raw": RAW_SLICE,
 }
 
-# Offset names for TensorBoard panels / logging (``pull`` = attractive nn,
-# ``push`` = repulsive long-range), e.g. ``01_pull_z1``, ``04_push_y3``.
+# Offset names for TensorBoard panels / logging (``pull`` = nearest
+# neighbour, ``push`` = long-range), e.g. ``01_pull_z1``, ``04_push_y3``.
 def _offset_name(idx: int, offset: Tuple[int, int, int]) -> str:
     kind = "pull" if idx < N_PULL else "push"
     dz, dy, dx = offset

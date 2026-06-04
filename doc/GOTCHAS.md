@@ -1,32 +1,7 @@
 # Brainbow — Gotchas and Silent Failure Modes
 
-> **Migration note (affinity + Mutex Watershed head).** Many entries
-> below predate the head change and reference the **32-channel
-> `CombinedLoss`** head (`HEAD_CHANNELS = 32`, fields
-> raw/sem/skl/dir/cov/rad/avg/emb, `weight_emb`/`weight_aff_emb`,
-> `soft_aff_from_field`, `DIRECTIONS`) or the embedding **clusterers**.
-> The current head is 16-channel **affinity + sem + raw**
-> (`HEAD_CHANNELS = 16`, `AffinityFGLoss`, weights `weight_aff` /
-> `weight_sem` / `weight_raw`), and instances come from the **Mutex
-> Watershed**. Entries about freeze schedules, Hydra, the lazy dataset,
-> `torch.compile`, kimimaro shm, and combine-AC4 are still valid; entries
-> about the old head / loss / clusterers are stale — see
-> [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md).
-
 > Audience: anyone debugging an unexpected result, looking for a
 > "this can't be right" moment, or onboarding a new contributor.
-
-> **Phase 1 audit note (April 2026).**  This file is being rewritten
-> in Phase 3 of the audit overhaul.  Phase 1 has only:
-> 1. Marked entries that referenced **deleted modules** or
->    **removed APIs** as `(REMOVED in Phase 1 cleanup)` so they no
->    longer mislead readers.
-> 2. Refreshed the wording of a few entries whose source-line anchors
->    drifted.
->
-> The full rewrite will dedupe overlap with `ORGANIZATION.md` /
-> `WALKTHROUGH.md` and reorder by symptom-frequency.  Treat any entry
-> dated "April 2026 cleanup" as historical context, not active risk.
 
 This file collects the **non-obvious** behaviours that make brainbow
 look like it's running correctly when it isn't.  Every entry follows
@@ -76,63 +51,40 @@ than calling `main()`.
 lambda_focal: 1.0, gamma: 2.0 }` and both work, but you can't tell
 which one is in effect from the config alone.
 
-Historical note: the supervision regime for sem / skl / aff_* has
-churned three times.  Pre-May-2026 took `weight_ce` / `weight_dice` /
-`class_weights`; the brief Dice-only window (entry #44) took only
-`weight`; the present composite-loss regime (entry #45) takes
-`weight` + `lambda_{bce,dice,focal}` + `gamma`.  Any config still
-carrying the old pre-May-2026 keys (`weight_ce`, `class_weights`)
-will trigger a `CombinedLoss: ignoring unknown weight_sem keys: [...]`
-warning at construction.
+A scalar (`weight_sem: 0.5`) sets only the field weight; the nested
+mapping additionally configures the `sem` head's `DiceBCEFocalLoss`
+sub-terms (`lambda_{bce,dice,focal}`, `gamma`).  `weight_aff` /
+`weight_raw` are plain scalars.
 
 **Where.**
-[`brainbow/losses/combined.py`](../brainbow/losses/combined.py),
-in particular the legacy-key migration block in `__init__`.
-`scripts/train.py:_head_weight_scalar` (line 30) and
-`brainbow/modules/base.py:_head_weight` (line 55) implement the same
-read on both shapes.
+[`brainbow/losses/affinity.py`](../brainbow/losses/affinity.py)
+(`AffinityFGLoss.__init__` splits scalar vs nested for `weight_sem`),
+read consistently by `brainbow/modules/base.py`.
 
-**Why.** The codebase shipped with the flat schema; the nested form
-was added later.  Both are accepted for back-compat with old configs
-and old checkpoints' hparams.
+**Why.** A scalar is the common case; the nested form exists so the
+foreground supervision can be tuned without a separate knob block.
 
-**Remediation.** All shipped configs now use the nested form; the
-flat-kwarg path remains in `combined.py` only for back-compat with
-old checkpoints' hparams.  Phase 3b extracts the legacy-key migration
-into `_migrate_legacy_keys` so the back-compat logic is in one place.
+**Remediation.** Prefer the nested form for `weight_sem` when you
+touch its sub-terms; leave it scalar otherwise.
 
 ---
 
-## 3. Heads with `weight: 0.0` are not constructed at all
+## 3. A loss term with `weight: 0.0` is skipped entirely
 
-**Symptom.** You set `weight_geometry: 0.0`, then later try to read
-`module.loss_fn.geometry_loss` and hit `AttributeError`.  Or you
-inspect `module.model.head_geometry` and find it's missing.
+**Symptom.** You set `weight_raw: 0.0`, then look for `loss/raw` in
+TensorBoard and it's absent.
 
-**Where.** `brainbow/losses/combined.py::CombinedLoss.__init__` skips
-`weight=0` heads;
-`brainbow/modules/base.py:151-156` propagates the same set as
-`disabled_heads` to the model wrapper, which skips constructing the
-head module.
+**Where.** `brainbow/losses/affinity.py::AffinityFGLoss.forward` skips
+any field whose weight is `0`, so it never enters the returned loss
+dict (and the `raw` channel gets no gradient).
 
-**Why.** Memory + speed.  An unused head still costs ~0.7 M params
-and a forward pass.
+**Why.** Memory + speed: a zero-weighted term contributes nothing to
+the backward, so computing/logging it is wasted work.
 
-**Remediation.** **Intentional.**  But make sure your tests /
-inspection code does `getattr(..., None)` rather than direct attribute
-access, and that any clusterer / image-logger panel keyed on a head
-checks the prediction dict for the key first.
-
----
-
-## 4. (Removed in Phase 1 cleanup -- `sliding_window_inference` head auto-detect)
-
-`sliding_window_inference` no longer detects head sets from a dummy
-pass.  The unified 32-channel head means the model wrapper returns a
-single tensor `[B, 32, ...]`; the sliding-window code aggregates it as
-one tensor and slices into named fields downstream via
-`brainbow.losses.slice_head`.  See
-[brainbow/inference/sliding_window.py](../brainbow/inference/sliding_window.py).
+**Remediation.** **Intentional.**  Don't key dashboards or assertions
+on a loss term you've zeroed; check the loss dict for the key first.
+The head still emits all `HEAD_CHANNELS` regardless — only the
+supervision is dropped.
 
 ---
 
@@ -154,33 +106,9 @@ The optimizer keeps the DiT param group up front (zero-grad no-op
 steps while frozen), so the thaw flips `requires_grad` without
 rebuilding the optimizer or resetting the LR scheduler.
 
-History: the integer-N schedule was removed in the Phase 1 cleanup
-(non-zero ints became silently truthy) and restored here so warm-ups
-like `freeze_dit_backbone: 2` actually do what the config reads.
-Negative ints and non-bool / non-int values now raise at construction
-instead of being silently truthy.  See also [`ARCHITECT.md`
+Negative ints and non-bool / non-int values raise at construction
+rather than being silently coerced to truthy.  See also [`ARCHITECT.md`
 §1.7](./ARCHITECT.md#17-freeze-flags--what-actually-moves).
-
----
-
-## 6. UMAP "auto" backend silently degrades to PCA
-
-**Symptom.** Your TensorBoard `instance/pred` panel looks like a
-straight 2-D PCA, even though you wrote `projection_algorithm: umap`
-in the config.
-
-**Where.** `brainbow/utils/manifold.py:295-297` -- when no UMAP
-backend is installed and `backend="auto"`, the code prints nothing
-and falls through to PCA.
-
-**Why.** UMAP is an optional GPU-only dependency (cuML).  CPU UMAP is
-slow enough that we'd rather show *something* than block image-logger
-emission.
-
-**Remediation.** Pass `projection_backend: "umap-cuml"` (or
-`"umap-cpu"`) to fail loud when the backend is missing.  Phase 3f's
-narrower-exception sweep ups this to a `logger.warning` so you at
-least see it in the run log.
 
 ---
 
@@ -197,10 +125,9 @@ return None / pass`.
 **Why.** The cache is an optimisation; we never want a permission
 error or a stale file to crash a long DDP run.
 
-**Remediation.** Phase 3f narrows these to
-`(OSError, json.JSONDecodeError)` so a real bug surfaces.  Until
-then, if your workers are slow on first epoch, check the data root
-is writable.
+**Remediation.** The handlers narrow to
+`(OSError, json.JSONDecodeError)` so a real bug surfaces; if your
+workers are slow on the first epoch, check the data root is writable.
 
 ---
 
@@ -219,8 +146,8 @@ expectation was that workers are short-lived.  With
 
 **Remediation.** Either bump `ulimit -n`, set
 `persistent_workers=false` for very-many-volume datasets, or close
-the cache periodically.  Phase 3c's lazy-setup refactor adds a
-`__del__` that closes handles.
+the cache periodically.  The lazy dataset's `__del__` closes handles
+on teardown.
 
 ---
 
@@ -237,10 +164,9 @@ is non-empty; otherwise it stays `None`.
 **Why.** Originally written so `trainer.test` could be invoked
 without populating the train split.
 
-**Remediation.** Phase 3c makes empty `train_volumes` raise during
-`setup` rather than silently succeeding.  Until then, point
-`train_volumes` at a single-volume placeholder when you really want
-val-only.
+**Remediation.** An empty `train_volumes` yields a `None` train
+dataset rather than an error; point `train_volumes` at a
+single-volume placeholder when you really want a val-only run.
 
 ---
 
@@ -256,20 +182,8 @@ hard-codes `self.root_dir`.
 **Why.** Oversight when `root` was added to SNEMI3D and Neurons; the
 MICRONS leaf wasn't updated.
 
-**Remediation.** Phase 3c honours `vol_spec["root"]` consistently in
-all leaves.
-
----
-
-## 11. (Removed in April-2026 cleanup -- ``pmap`` / ``utils.parallel``)
-
-The forkserver-based parallel-map helper backed the boundary /
-skeleton-weight CPU paths in :class:`InstanceLoss`.  Both that helper
-(``brainbow.utils.parallel``) and those weight paths were dropped in
-the lean-up: the production config disabled them anyway
-(``weight_edge: 1.0`` / ``weight_bone: 1.0``), and removing the
-machinery cuts ~150 LOC plus the silent-fallback footgun this gotcha
-described.
+**Remediation.** Set the data `root` globally for MICRONS, or use the
+SNEMI3D / Neurons leaves, which honour the per-volume `root` key.
 
 ---
 
@@ -282,8 +196,8 @@ the training fp16/bf16 forward (especially logits near 0).
 -- runs the forward under `autocast` then casts the output dict back
 to fp32.
 
-**Why.** Image rendering -- HSV→RGB LUTs, eigendecomposition for the
-`cov` overlay, manifold projection -- requires fp32 precision.
+**Why.** Image rendering -- colour-map LUTs, overlay compositing, and
+the affinity / segmentation panels -- expects fp32 precision.
 
 **Remediation.** **Intentional.**  Don't read scalar values off the
 ImageLogger's predictions for non-visualisation purposes.
@@ -321,18 +235,6 @@ recipes (`snemi3d.yaml:222`) had it on.
 it because graph breaks are no longer tolerated.
 
 **Remediation.** Keep `compile_fullgraph: false` on multi-GPU runs.
-Phase 4 reconciles the comment / default mismatch between
-`default.yaml` and `snemi3d.yaml`.
-
----
-
-## 15. (Removed in April-2026 cleanup -- ``HoughVoting`` clusterer)
-
-The Hough-voting clusterer (offset-head based) was dropped: no model
-in the repo emits an offset head, and no shipped config selected
-``name: hough_voting``.  The remaining clusterers are
-``soft_meanshift`` (training-time, differentiable), ``hdbscan``, and
-``spatial_cc`` -- see ``brainbow/inference/clusterer.py``.
 
 ---
 
@@ -363,7 +265,7 @@ write -- they came from `snemi3d.yaml`, and ultimately from `default.yaml`.
 **Why.** Layered overrides keep individual files small and let
 `combine.yaml` only declare what's *different*.
 
-**Remediation.** **Intentional.**  Phase 4 adds a per-file
+**Remediation.** **Intentional.**  Each config carries a per-file
 inheritance-chain comment header so the chain is visible without
 opening every parent.
 
@@ -375,8 +277,8 @@ opening every parent.
 `BasePreprocessor.save(...)` and one of the leaves raises
 `NotImplementedError`.
 
-**Where.** `brainbow/preprocessors/__init__.py` (now fixed in Phase 1)
-and the older `BasePreprocessor` class docstring.
+**Where.** `brainbow/preprocessors/__init__.py` and the
+`BasePreprocessor` class docstring.
 
 **Why.** Some formats are intentionally read-only.
 
@@ -386,88 +288,28 @@ in `try/except NotImplementedError`.
 
 ---
 
-## 19. (Removed in Phase 1 cleanup -- separate `GeometryLoss` head)
+## 20. Affinity targets keep boundary voxels (`background=-1`)
 
-The standalone four-head structure (`semantic`, `instance`, `geometry`,
-`boundary`) was replaced by a unified 32-channel head whose layout is
-owned by `brainbow.losses._common.HEAD_LAYOUT`:
+**Where.** `brainbow/losses/affinity.py` (`AffinityFGLoss(background=-1)`),
+the explicit `loss.background: -1` in the configs, and the target
+builder `affinity_target_from_offsets` in `_common.py`.
 
-```
-raw[0,1) | sem[1,2) | skl[2,3) | dir[3,6) | cov[6,12) | rad[12,13) | avg[13,16) | emb[16,32)
-```
+**Why.** `FindBoundariesd` sets the voxels between adjacent instances to
+label `0`.  `background` is the label value masked out of the affinity
+target across all offsets.  `-1` is a sentinel no voxel ever has, so
+every voxel stays in the target (boundary-to-boundary face pairs become
+`aff=1`, boundary-to-foreground `aff=0`) — denser supervision and no
+checkerboard along instance edges.
 
-The previous geometry-head layout swap (`raw|cov|dir` → `raw|dir|cov`)
-is a non-issue under the unified head — `dir` and `cov` are now fixed
-slices of the single output tensor.  Old `head_geometry` checkpoints
-are not loadable; train fresh under the unified head.
-
----
-
-## 20. Affinity targets default to `background=-1` (no masking)
-
-**Symptom.** A run trained with the old `background=0` mask suddenly
-shows a denser supervised aff target after pulling main; the
-TensorBoard `true/aff/{01_t1,...}` panels are visibly less
-"checkerboard-y" along instance edges.
-
-**Where.**
-[`brainbow/losses/combined.py`](../brainbow/losses/combined.py)
-(`CombinedLoss(__init__)` default `background: int = -1`) and
-the explicit `background: -1` for the unified loss in
-[`configs/default.yaml`](../configs/default.yaml).
-
-**Why.** The `FindBoundariesd` transform sets boundary voxels (the
-ones between adjacent instances) to label `0`.  With `background=0`,
-those voxels were masked out of the aff target, producing alternating
-"aff=1, aff=0" pixels along every instance border — a visible
-checkerboard in TB.  Setting `background=-1` (a sentinel that no
-voxel ever has) keeps every voxel in the target: boundary-to-boundary
-face pairs become `aff=1`, boundary-to-foreground stays `aff=0`.  No
-checkerboard, denser supervision.
-
-**Remediation.** **Intentional**, but if you resume an old checkpoint
-trained with `background=0`, the supervised signal changes.  Loss
-values will jump by a few percent for a few hundred steps while the
-model adapts.  No state-dict fixup is needed; only the target
-construction is affected.  Pass `null` (YAML `~`) to opt out of any
-masking explicitly — semantically identical to `-1` here.
-
----
-
-## 21. `max_hard_pairs` does not bound the push-loss forward peak
-
-**Symptom.** A MICrONS crop with thousands of instances spikes
-`cuda_memory/max_allocated_gb_train` even though
-`weight_emb.max_hard_pairs: 4096` is set.  It looks like the
-knob is broken.
-
-**Where.**
-[`brainbow/losses/combined.py`](../brainbow/losses/combined.py) embedding
-push branch
-(``diff = rearrange(centers, "i e -> i 1 e") - rearrange(centers, "j e -> 1 j e")``).
-
-**Why.** The full ``[K, K, E]`` pairwise difference tensor is
-materialised first, then the upper triangle is taken, then ``topk``
-filters down to ``max_hard_pairs``.  The forward peak therefore
-scales as ``O(K² · E)`` regardless of the post-topk cap.  ``K`` is
-the number of unique instance ids in a single crop, which on dense
-MICrONS volumes can be 1k–4k.  At ``E = 10`` and bf16 batch 4, that's
-``[K, K, 10]`` per batch element — 40 MB at K=1k, 2.5 GB at K=4k.
-
-**Remediation.** ``max_hard_pairs`` still helps gradient memory and
-concentrates supervision on the actually-touching pairs; it just
-doesn't bound the forward.  If you really need to cap the forward
-peak by ``K``, the loss has to compute ``pw`` row-blockwise (e.g. 256
-rows at a time, pre-mining top-k within each block before
-concatenating).  See the comment block in
-[`configs/snemi3d.yaml`](../configs/snemi3d.yaml) `weight_emb`
-for the wording.
+**Remediation.** Set `loss.background: 0` to instead mask the boundary
+voxels out of the affinity target, or `null` (YAML `~`) to disable
+masking entirely.
 
 ---
 
 ## 22. VOI metric is *mean-of-per-volume*, not global
 
-**Symptom.** Comparing your val/automatic/instance/metric/voi to a
+**Symptom.** Comparing your `val/automatic/ins/metric/voi` to a
 literature number ("VOI on MICrONS = ...") gives a confusing offset.
 
 **Where.**
@@ -483,16 +325,6 @@ class distribution.
 **Remediation.** Document expected delta when comparing to
 literature; if you need the global value, dump per-batch contingency
 tables and aggregate offline.
-
----
-
-## 23. (Removed in Phase 1 cleanup -- multi-head `get_output_channels`)
-
-The four-head dict has been replaced by a unified 32-channel head, so
-`BaseModel.get_output_channels()` returns the single integer
-`HEAD_CHANNELS = 32` (or whatever the wrapper was configured with).
-Per-field widths are read from `brainbow.losses.HEAD_LAYOUT`, e.g.
-`HEAD_LAYOUT["dir"].stop - HEAD_LAYOUT["dir"].start`.
 
 ---
 
@@ -521,205 +353,12 @@ non-zero ranks attempt their `local_files_only` load.
 
 ---
 
-## 25. `loss/emb/norm` rises monotonically during training
-
-**Symptom.** Embedding-norm regulariser scalar climbs steadily from
-~3 to ~4 over 30 epochs even though `weight_norm: 0.001` is enabled.
-
-**Where.**
-[`brainbow/losses/combined.py`](../brainbow/losses/combined.py)
-embedding-norm branch and the `weight_norm` knob in
-[`configs/default.yaml`](../configs/default.yaml) under `weight_emb`.
-
-**Why.** The push term repels centroids out to a margin of
-`2 * delta_d = 3.0`.  When a single crop contains many instances
-(MICrONS minnie65 averages 100s-1000s), centroids are pushed in many
-directions simultaneously, growing their norms.  The norm
-regulariser only damps proportionally to its weight (`0.001`), so it
-tames but doesn't reverse the growth.
-
-**Remediation.** **Intentional but tunable.**  Either (a) raise
-`weight_norm` (e.g. to `0.01`) for a stronger pull toward the origin,
-(b) set `normalize_embeddings: true` to bound each centroid to the
-unit hypersphere (eliminates the norm growth entirely; you'll also
-want to lower `delta_d` since distances are now bounded by `2`), or
-(c) lower `delta_d` so the push margin is reachable without
-inflating norms.  Watch
-`val/automatic/instance/metric/ari` to confirm the trade-off doesn't
-hurt clustering.
-
----
-
-## 26. Eval pipeline used to apply random augmentations (fixed April 2026)
-
-**Symptom (historical).** Validation / test metrics
-(`val/automatic/instance/metric/{ari,ami,voi,ted}`,
-`val/automatic/semantic/metric/{acc,iou,dice}`) drift run-to-run with
-the same checkpoint, and disagree with metrics measured by an
-external evaluator on the same volumes.  Loss curves look noisier on
-val than on train despite val being a smaller, fixed set.
-
-**Where.**
-[`brainbow/datamodules/base.py::CircuitDataModule.get_val_transforms`](../brainbow/datamodules/base.py).
-
-**Why.** Before the fix, `get_val_transforms` chained
-`*_original_transforms(sd)` and `*_semantic_transforms(sd)` -- the
-exact same hooks that the train pipeline uses -- which meant every
-val pass ran:
-
-| Transform                | Probability                |
-| ------------------------ | -------------------------- |
-| ``RandFlipd`` × 3 axes   | 0.5 each                   |
-| ``RandRotate90d``        | 0.5                        |
-| ``RandTransposeXYd``     | 0.5                        |
-| ``Rand3DElasticd``       | ``data.elastic_prob``      |
-| ``RandGaussianNoised``   | **1.0**  (always applied)  |
-| ``RandAdjustContrastd``  | **1.0**  (always applied)  |
-
-Because these were random, validation metrics measured **model + a
-fresh stochastic augmentation realisation per batch**, not the
-model's response to the held-out volume.  ARI / AMI / VOI on
-SNEMI3D's `val/automatic/instance/metric/*` curves up to commit
-`<this fix>` are therefore lower-bounded by what the model would
-score on clean inputs.
-
-**Remediation.** Fixed: `get_val_transforms` now only runs
-deterministic ops (`EnsureChannelFirstd` → `FindBoundariesd` →
-pad+center-crop or resize → `_instance_transforms` (CC relabel) →
-`_geometry_transforms` (direction / covariance)).  In-progress runs
-will see the val curves shift on the **next** validation tick after
-pulling main; the train curves are unaffected.
-
----
-
-## 27. `freeze_dit_backbone: N` epoch warm-up (restored)
+## 27. `freeze_dit_backbone: N` epoch warm-up
 
 The integer-N epoch warm-up (frozen for epochs `0..N-1`, thawed at
-epoch `N`) is supported again -- see #5 for the full spec.  Per-block
-layer freezing is still not exposed via Hydra; walk
+epoch `N`) is supported alongside the bool form — see #5 for the full
+spec.  Per-block layer freezing is not exposed via Hydra; walk
 `self.dit.blocks[:N].requires_grad_(False)` yourself if you need it.
-
----
-
-## 28. (Removed in Phase 1 cleanup -- `weight_geometry.dir_target`)
-
-`GeometryLoss` is gone; direction supervision is now a slice of the
-unified head (`HEAD_LAYOUT["dir"]`).  There is currently no
-configurable direction target -- centroid-pointing is the only
-implementation in `brainbow/transforms/direction.py`.  Adding a
-skeleton target is a clean follow-up but not exposed via Hydra today.
-
----
-
-## 29. `dataset: neurons` used to crash at startup
-
-**Symptom (historical).** Setting ``data.dataset: neurons`` in the
-config raised
-``ValueError: Unknown dataset type: 'neurons'`` from
-``scripts/train.py::build_datamodule`` even though
-``NeuronsDataModule`` was exported by ``brainbow.datamodules``.
-
-**Where.** ``scripts/train.py::build_datamodule`` registry.
-
-**Why.** The registry only listed ``snemi3d`` and ``microns``.
-
-**Remediation.** Fixed: ``"neurons": NeuronsDataModule`` is now in
-the registry.  Other datasets follow the same one-line edit pattern.
-
----
-
-## 30. `dit_backbone_lr: 0` silently fell back to base LR
-
-**Symptom (historical).** A config block::
-
-    optimizer:
-      lr: 2e-4
-      dit_backbone_lr: 0
-
-reported four parameter groups with the **same** LR (``2e-4``) on
-all of them, not a frozen-rate backbone.
-
-**Where.**
-[`brainbow/modules/cosmos_transfer_2_5/base.py::configure_optimizers`](../brainbow/modules/cosmos_transfer_2_5/base.py).
-
-**Why.** Before the fix the line was
-``backbone_lr = self.optimizer_config.get("dit_backbone_lr") or lr`` --
-``0 or lr`` is ``lr`` because Python ``or`` returns the first truthy
-value and ``0`` is falsy.  The argument was effectively
-"any non-zero number, or default".
-
-**Remediation.** Fixed: explicit ``is None`` check -- a deliberate
-``0`` is now honoured.
-
----
-
-## 31. Resume-from-checkpoint path in YAML comment was wrong
-
-**Symptom (historical).** The header comment in
-[`configs/snemi3d.yaml`](../configs/snemi3d.yaml) suggested::
-
-    training.resume_from_checkpoint=<output_dir>/<run_dir>/checkpoints/last.ckpt
-
-but ``output_dir`` doesn't contain the run dir at runtime.
-
-**Where.**
-[`scripts/train.py`](../scripts/train.py) -- the timestamped run
-directory **overwrites** ``cfg.output_dir`` via
-``OmegaConf.update(cfg, "output_dir", str(run_dir), force_add=True)``
-just after creating it.
-
-**Why.** Two-segment templates (``<output_dir>/<run_dir>``) read
-naturally but didn't survive that overwrite.  Every checkpoint write
-afterward uses ``Path(output_dir) / "checkpoints"`` -- which is now
-``<run_dir>/checkpoints``.
-
-**Remediation.** Fixed: the YAML comment now reads
-``training.resume_from_checkpoint=<run_dir>/checkpoints/last.ckpt``
-and points at the literal "Run directory: ..." line printed at the
-top of every training log.
-
----
-
-## 32. Vista regression channels were sigmoided in early versions (resolved by #39)
-
-**Symptom (historical).** Training the **Vista3D** wrapper with
-``weight_raw > 0`` (or any other regression head) produced a high
-``loss/raw`` that didn't decay below ~0.5 even after many epochs,
-while the same loss config dropped to ~0.07 on the Cosmos wrapper.
-
-**Resolved by #39.**  The activation policy is now uniform across
-both wrappers: every regression channel (raw, avg, dir, cov) is
-linear; only `sem` (binary semantic) carries sigmoid; the derived
-12-channel affinity heads compute their own sigmoids inside
-`soft_aff_from_field`.
-
----
-
-## 33. `loss.weight_geometry: { weight_dir: 1.0 }` (no `weight:`) used to silently disable the head
-
-**Symptom (historical).**  A nested mapping omits the field's
-``weight:`` key, intending to inherit the default::
-
-    weight_dir:
-      loss: l1
-
-The field is then **not instantiated** and every sub-loss kwarg is
-silently dropped.  No warning, no zero-scalar, just nothing.
-
-**Where.**
-[`brainbow/losses/combined.py::_split_field`](../brainbow/losses/combined.py).
-
-**Why.** Before the fix, ``_split_field`` used a per-field
-``default_weight`` argument (``0.0`` for some fields, ``1.0`` for
-others).  In the nested-mapping branch
-``d.pop("weight", default_weight)`` therefore returned ``0.0`` for
-those fields, and they were skipped.
-
-**Remediation.** Fixed: a nested mapping without ``weight:`` is now
-treated as ``weight: 1.0`` regardless of field -- a user who wrote a
-nested block clearly intended to enable the field.  If you want the
-field disabled, write ``weight_<field>: 0`` (scalar) or
-``weight_<field>: { weight: 0 }`` (nested explicit).
 
 ---
 
@@ -808,16 +447,13 @@ LRU patch cache on top of ``LazyVolDataset`` if you really need it.
 
 ---
 
-## 37. `include_clefts` / `include_mito` config keys are dropped
+## 37. There are no `include_clefts` / `include_mito` config keys
 
-**Resolved by the April-2026 cleanup**: ``include_clefts`` /
-``include_mito`` were dropped from ``configs/default.yaml`` and from
-``scripts/train.py::_build_datamodule_kwargs``.  Multi-channel
-MICrONS supervision was never implemented in any datamodule; the
-config knobs were forward-looking placeholders and accumulated
-config noise, so they're now gone.  If you do need cleft / mito
-supervision later, add the channels to the relevant
-``MICRONSDataModule`` constructor and re-introduce the keys then.
+Multi-channel MICrONS supervision (clefts / mitochondria) is not
+implemented in any datamodule, so there are no `include_clefts` /
+`include_mito` knobs — adding them to a config does nothing.  If you
+need cleft / mito supervision, add the channels to the relevant
+``MICRONSDataModule`` constructor and introduce the keys alongside.
 
 ---
 
@@ -847,306 +483,26 @@ one canonical location.
 
 ---
 
-## 39. Activation policy migration April 2026: regression heads are now linear
+## 45. Composite ``DiceBCEFocalLoss`` supervises the `sem` head
 
-**Symptom (historical).** Regression-supervised channels (raw, dir,
-cov, avg) decayed slower than expected and stalled with a saturation
-plateau.  Loading any pre-April 2026 checkpoint under the new code
-produces nonsense on those channels.
-
-**Where.**
-[`brainbow/models/cosmos_transfer_2_5/decoder.py`](../brainbow/models/cosmos_transfer_2_5/decoder.py)
-(``_DecoderAdapter3D.forward`` -- the activation contract),
-[`brainbow/models/vista/wrapper.py`](../brainbow/models/vista/wrapper.py)
-(forward -- mirrors the contract),
-[`brainbow/losses/combined.py`](../brainbow/losses/combined.py)
-(field docstrings document the linear regression contract).
-
-**Why.** The previous policy was "sigmoid everywhere we could".  For
-the **classification-supervised** channels (semantic, skeleton, and
-the two derived affinities) that's correct -- Dice / IoU / BCE on
-probabilities all consume probabilities by construction.  For the
-**regression-supervised** channels (raw, dir, cov, avg) sigmoid + L1
-has a saturation problem: the chain-rule factor through
-``sigmoid'(x) = p(1-p)`` collapses to ~0 whenever the target is near
-``0`` or ``1``, so very dark / very bright voxels get effectively
-zero gradient and the loss stalls.  Moving those heads to linear
-gives the regression loss a constant gradient magnitude (``±1`` for
-L1 everywhere except the kink) and lets the model actually reach the
-extremes.
-
-The current rule is **sigmoid only where the loss is the composite
-``DiceBCEFocalLoss``**:
-
-| Field        | Slice         | Supervision                | Activation |
-| ------------ | ------------- | -------------------------- | ---------- |
-| `raw`        | `[0, 1)`      | L1 / MSE                   | linear     |
-| `sem`        | `[1, 2)`      | Dice + BCE + Focal         | sigmoid    |
-| `skl`        | `[2, 3)`      | Dice + BCE + Focal         | sigmoid    |
-| `dir`        | `[3, 6)`      | L1 / MSE                   | linear     |
-| `cov`        | `[6, 12)`     | L1 / MSE                   | linear     |
-| `rad`        | `[12, 13)`    | L1 / MSE                   | linear     |
-| `avg`        | `[13, 16)`    | L1 / MSE                   | linear     |
-| `emb`        | `[16, 32)`    | discriminative             | linear     |
-| `aff_avg`/`aff_emb` (derived) | n/a | Dice + BCE + Focal | applied internally by `soft_aff_from_field` (``exp(-tau * L1) ∈ (0, 1]``) |
-
-The sem / skl / aff_* heads' supervision has been: BCE + Dice (pre-
-May 2026) → Dice-only (briefly, see entry #44) → Dice + BCE + Focal
-(current; see entry #45 below).  The activation contract (sigmoid /
-``exp(-tau * L1)`` into the loss) has remained constant throughout
-because all three supervision regimes consume probabilities; the
-composite simply adds the BCE and Focal terms back on the same
-``[0, 1]`` inputs that Dice has been seeing all along.
-
-**Remediation.** Old four-head checkpoints can't be loaded under the
-unified head -- train fresh.  Inside the unified head, regression
-fields are linear and visualisation panels apply a `clamp(0, 1)` for
-display only (see
-[`brainbow/callbacks/tensorboard/heads.py`](../brainbow/callbacks/tensorboard/heads.py)).
-
-**Replaces gotcha #32** (Vista regression raw not sigmoided).  Under
-the new uniform policy, both wrappers emit linear regression and the
-mismatch is gone.
-
----
-
-## 40. April-2026 cleanup -- features removed for leanness
-
-A pass over the codebase dropped a handful of features that no
-shipped config exercised and that contributed cognitive overhead
-without paying their way in production.  If you're reading old
-notebooks or external code that imported any of these, here's the
-shortest path forward.
-
-| Removed                                                  | Replacement                                                            |
-| -------------------------------------------------------- | ---------------------------------------------------------------------- |
-| ``HoughVoting`` clusterer + ``cluster_offsets_hough``    | none -- no model emits offsets; use ``soft_meanshift`` / ``hdbscan`` / ``spatial_cc`` |
-| ``MeanShiftClusterer`` + ``cluster_embeddings_meanshift`` | ``HDBSCANClusterer`` (cuML / CPU; auto-K) or ``SpatialCCClusterer`` (anisotropy-aware) |
-| AXI metric (geometric mean of ARI and AMI)               | log ARI and AMI separately; plot the geometric mean offline if needed  |
-| ``InstanceLoss(weight_edge=..., weight_bone=...)``       | per-voxel boundary / skeleton weighting was disabled in the production config (=1.0) and the cpu/torch kernels were 4 paths (~150 LOC) keeping a feature nobody used |
-| ``InstanceLoss(anchor_to_centroid=..., centroid_scale=...)`` | sinusoidal-encoding centroid anchor; experimental, never enabled in any config |
-| ``InstanceLoss(... semantic_ids=...)`` multi-class branch | no datamodule populated ``semantic_ids``; the loss is single-class only |
-| ``CombinedLoss(... learned_task_weights=True)``          | Kendall-Gal uncertainty weighting; never enabled in any shipped config |
-| ``SemanticLoss(label_smoothing=...)``                    | sigmoid BCE has no native smoothing knob; the param was stored but never used.  BCE itself was briefly dropped (entry #44) then reinstated inside the composite ``DiceBCEFocalLoss`` (entry #45) -- the new ``gamma`` knob plays a similar "soften the per-voxel signal" role to label-smoothing if you set ``gamma > 0`` (default ``2.0``). |
-| Flat-form loss config schema (``weight_ce`` at top level, ``boundary_*`` prefix) | nested form (``weight_<head>: { weight: ..., ... }``) is the only schema; sem / skl / aff_* now take ``lambda_{bce,dice,focal}`` + ``gamma`` (see entry #45).  The legacy ``weight_ce`` / ``weight_dice`` / ``class_weights`` keys are silently dropped with a typo-defence warning. |
-| ``data.include_clefts`` / ``data.include_mito``          | placeholders for a multi-channel MICrONS pipeline that was never wired in |
-| Vista ``PointPromptEncoder`` + ``sample_point_prompts`` + ``forward(... point_prompts=...)`` | interactive proofreading was never wired into a training loop; the encoder was added then frozen on every step |
-| ``CosmosTransfer3DWrapper._try_load_raw_checkpoint``     | the dead third loader path that loaded HF safetensors into a ``_StandaloneDiT3D`` (different architecture) -- the `_try_load_diffusers` and `_try_load_cosmos_package` paths cover the production path; if both fail the wrapper now uses the random-init standalone DiT explicitly |
-| ``brainbow.utils.parallel`` (``pmap``)                   | only used by the boundary / skeleton-weight CPU path that's also gone |
-
-Total: ~1,300 LOC removed, 8 files / modules deleted, two tests
-classes (AXI, MeanShift) dropped.  185/185 remaining tests pass.
-
-If you discover something you actually need that was cut, the
-restoration recipe is one of:
-
-1. ``git revert`` the cleanup commit's removal of the specific file
-   / branch.
-2. Re-apply the patch from a previous commit (``git log --all -- <path>``
-   to find the last revision that had it).
-
----
-
-## 41. cov-overlay eigendecomposition does **not** use `torch.linalg.eigh`
-
-**Symptom.** Training crashes during sanity check (or the first few
-ImageLogger panels) with::
-
-    cusolver error: CUSOLVER_STATUS_INTERNAL_ERROR, when calling
-    `cusolverDnXsyevBatched(...)`. ... try linear algebra operators
-    with other supported backends.
-
-**Where.** `brainbow/callbacks/tensorboard/geometry.py::_eigh_2x2_sym`
-and its caller `_render_cov_flow`.
-
-**Why.** The `pred/cov` panel needs the principal eigenvector of a
-2x2 symmetric structure-tensor matrix at **every foreground pixel**.
-At a typical 4×512×512 panel that's ~1M matrices per epoch.
-``torch.linalg.eigh`` dispatches to cuSOLVER's batched ``syevj``
-kernel (``cusolverDnXsyevBatched``), which is iterative and unstable
-on million-matrix batches when the inputs are still random or
-contain NaN/Inf -- exactly the situation during PyTorch Lightning's
-sanity-check pass and the first training epochs.  The crash
-manifests as the cuSOLVER status code above and aborts training.
-
-**Remediation.** **Intentional.**  We use a closed-form 2×2
-analytical eigendecomposition (`_eigh_2x2_sym`) that is exact,
-dispatch-free, fp32-safe, and requires no cuSOLVER call.  The input
-is also `nan_to_num`-sanitised so a single bad pixel cannot poison
-the whole panel.  Do **not** "simplify" this back to
-``torch.linalg.eigh`` -- the previous implementation crashed every
-fresh run before the first checkpoint.
-
-If you ever extend the cov overlay to 3×3 (full ZYX submatrix) you
-will need a closed-form 3×3 routine, **not** ``eigh``; do it on CPU
-or via Cardano's formula rather than reintroducing the cuSOLVER
-batched path.
-
----
-
-## 42. kimimaro skeletonization runs inside DataLoader workers (CPU only)
-
-**Symptom (debugging mode).** With `data.num_workers: 0`, every
-training step blocks for ~100 ms on the main process while
-`SkeletonGeometryd` runs `kimimaro.skeletonize` and the per-instance
-Euclidean distance transform.  Throughput is much lower than expected.
-
-**Where.**
-[`brainbow/transforms/skeleton.py`](../brainbow/transforms/skeleton.py)
-inside :class:`SkeletonGeometryd` and :func:`compute_skeleton_geometry`.
-
-**Why.**  kimimaro is CPU-only and we call it with `parallel=1` (NOT
-`0`) so it stays single-threaded under MONAI's `forkserver` DataLoader
-workers.  kimimaro 5.x interprets `parallel <= 0` as "fork
-`cpu_count()` subprocesses" via pathos, each backed by named POSIX
-shm segments `kimimaro-shm-{dbf,cc-labels}-*` (see entry #43 below
-for the original `/dev/shm` blow-up).  `parallel=1` short-circuits
-that branch entirely.  With `num_workers > 0` the per-crop kimimaro
-cost is hidden by the dataloader prefetch queue; with
-`num_workers: 0` it lands directly on the training loop's critical
-path.
-
-**Remediation.**
-- For real training, leave `data.num_workers >= 4` so kimimaro overlaps
-  with the GPU forward.  At ~50 instances on a 64³ crop the geometry
-  pass is ~100-200 ms, well under the typical prefetch budget.
-- For step-through debugging (a profiler, `breakpoint()`, etc.), set
-  `loss.weight_skl: 0`, `loss.weight_dir: 0`, `loss.weight_cov: 0`,
-  `loss.weight_rad: 0` -- this disables `compute_geometry` end-to-end
-  and skips `SkeletonGeometryd` entirely.  Or set `data.num_workers >= 4`
-  even in single-step debugging and place breakpoints inside
-  `training_step` only.
-
-**Falls back gracefully.** When kimimaro fails to import (no wheel
-for the platform, or fresh editable install without the dep), the
-transform silently downgrades to
-`skimage.morphology.skeletonize` per instance.  Topology is preserved
-but the centerline can be 1-2 voxels off where the two algorithms
-disagree (most prominent at branch points).
-
----
-
-## 43. `/dev/shm` invariant: kimimaro must run with `parallel=1`
-
-**Symptom (historical -- 2026-05-17 04:26:50).**  The user session was
-OOM-killed after a multi-day combine.yaml run; `/dev/shm` was
-filled with ~50 k orphaned `kimimaro-shm-{dbf,cc-labels}-*` POSIX
-named-shm segments totalling ~984 GB.  Every DataLoader worker
-restart leaked another ~2 segments per crop.
-
-**Where.**
-[`brainbow/transforms/skeleton.py::_skeletonize_all_kimimaro`](../brainbow/transforms/skeleton.py)
--- the multi-label kimimaro call inside MONAI's `forkserver`
-DataLoader workers.
-
-**Why.** kimimaro 5.x maps `parallel <= 0` to "spawn `cpu_count()`
-pathos subprocesses" (see `kimimaro/intake.py` ~line 195).  Each
-pathos child mmaps two named POSIX shm segments for its
-distance-field and CC-labels scratch space.  Those segments are
-only `shm_unlink()`-ed on the success / SIGINT / SIGTERM paths of
-the **parent** kimimaro call.  Under MONAI's `forkserver` workers,
-abnormal exits are common (DataLoader tear-down, SIGKILL from
-systemd, unhandled exceptions in `compute_skeleton_geometry`, etc.)
-and orphan the segments in `/dev/shm`, where nothing else cleans
-them up.  At 8 workers x ~2 leaks/crop x 16 000 crops/epoch, a single
-overnight run can fill a 1 TB `tmpfs`.
-
-**Invariant.** Brainbow's `forkserver`-based DataLoader workers
-**must not** spawn additional pathos / multiprocessing pools.  The
-single source of truth is
-`brainbow/transforms/skeleton.py::_skeletonize_all_kimimaro`, which
-hard-codes `parallel=1` in the kimimaro call.  Anywhere else that
-intends to parallelise CPU work inside a worker must use
-`np.vectorize` / numpy ufuncs / threadpoolctl-bounded BLAS rather
-than spawning subprocesses.
-
-**Audit checklist (2026-05 sweep).**
-
-| Vector                                     | Current state                               |
-| ------------------------------------------ | ------------------------------------------- |
-| `kimimaro.skeletonize`                     | `parallel=1` (skeleton.py L195) -- safe     |
-| `pathos` / `multiprocessing.Pool`          | not imported anywhere in `brainbow/`        |
-| `multiprocessing.shared_memory`            | not imported anywhere in `brainbow/`        |
-| MONAI `CacheDataset` / `SmartCacheDataset` | not used (lazy path bypasses it; `cache_rate=0` in snemi3d.yaml is a no-op) |
-| `torch.multiprocessing.set_sharing_strategy` | not called -- defaults to `file_descriptor` under `forkserver` |
-| cuPy IPC handles                           | not used; cucim/cupy run only inside the GPU-bound path of `_use_gpu()` |
-| DataLoader `multiprocessing_context`       | `forkserver` (datamodules/base.py L537/550/562) |
-
-**Remediation.** Don't touch `parallel=` in `skeleton.py` without
-re-doing the audit.  If you add a new transform that wants pathos /
-multiprocessing parallelism, gate it behind a check that the worker
-isn't already a forkserver child (e.g. test
-`multiprocessing.parent_process() is None`) -- otherwise you will
-re-create this leak.  And before merging anything that imports
-`pathos` / `multiprocessing.Pool` / `multiprocessing.shared_memory`
-into a hot DataLoader path, run the combine.yaml recipe overnight
-and check `df -h /dev/shm`.
-
----
-
-## 44. May-2026 brief Dice-only window for sem / skl / aff_* (superseded by #45)
-
-**Status.**  Reverted by entry #45 (composite ``DiceBCEFocalLoss``)
-within the same release cycle.  This entry is kept for archaeological
-reasons -- the brief Dice-only window is why some intermediate
-configs in version control carry only ``weight_<head>: { weight: N }``
-with no ``lambda_*`` sub-knobs.
-
-**Symptom (during the Dice-only window).** Configs setting
-`weight_ce`, `weight_dice`, or `class_weights` under `weight_sem` /
-`weight_skl` / `weight_aff_emb` / `weight_aff_avg` emitted a
-`CombinedLoss: ignoring unknown weight_<head> keys: [...]` warning,
-and TB tags ``loss/{sem,skl,aff_emb,aff_avg}/{ce,dice}`` disappeared.
-
-**Why we backed out.** Dice alone is imbalance-robust, but the
-gradient through ``DiceLoss`` collapses at saturation (when the head
-predicts ``p ≈ 1`` or ``p ≈ 0``) because ``∂Dice/∂p`` shrinks with
-foreground volume.  On the 1-voxel-wide skeleton target the head
-would saturate early and the per-voxel gradient on positives faded
-faster than we wanted.  Adding BCE back gives the head a constant
-per-voxel signal that survives saturation; adding Focal sharpens
-that signal on the rare hard positives.
-
-**Where the revert lives.**
-[`brainbow/losses/dice_bce_focal.py`](../brainbow/losses/dice_bce_focal.py)
-(``DiceBCEFocalLoss`` -- the composite supervisor),
-[`brainbow/losses/combined.py`](../brainbow/losses/combined.py)
-(``_pop_composite_loss`` + per-head ``_sem_loss`` / ``_skl_loss`` /
-``_aff_emb_loss`` / ``_aff_avg_loss`` instances), and
-[`brainbow/losses/_common.py`](../brainbow/losses/_common.py)
-(reinstated ``stable_bce_on_probs``).
-
-**See also.** Entry #45 (the present supervision regime) and entry
-#39 (activation policy that has been stable across all three
-regimes).
-
----
-
-## 45. Composite ``DiceBCEFocalLoss`` is the current sem / skl / aff_* supervisor
-
-**Symptom (running configs).** TensorBoard tags for the
-classification-style heads collapse to just ``loss/sem``,
-``loss/skl``, ``loss/aff_emb``, ``loss/aff_avg`` -- no per-sub-term
-``/ce``, ``/dice``, or ``/focal`` breakdown -- even though the
-composite mixes three terms.  The per-head config now takes a
-nested mapping with ``lambda_{bce,dice,focal}`` + ``gamma``.
+**Symptom.** The TensorBoard tag for the foreground head is just
+``loss/sem`` — no per-sub-term ``/ce``, ``/dice``, or ``/focal``
+breakdown — even though the composite mixes three terms.  The
+foreground supervision is configured by a nested mapping with
+``lambda_{bce,dice,focal}`` + ``gamma`` under `loss.weight_sem`.
 
 **Where.**
 [`brainbow/losses/dice_bce_focal.py`](../brainbow/losses/dice_bce_focal.py)
-defines the composite; ``CombinedLoss`` (in
-[`brainbow/losses/combined.py`](../brainbow/losses/combined.py))
-instantiates one per composite-loss head via the
-``_pop_composite_loss`` helper.  Default schema in
+defines the composite; `AffinityFGLoss` (in
+[`brainbow/losses/affinity.py`](../brainbow/losses/affinity.py))
+instantiates one for the `sem` head.  Default schema in
 [`configs/default.yaml`](../configs/default.yaml).
 
-**Why.** Pre-May-2026 the loss was BCE + Dice with a ``pos_weight`` /
-``class_weights`` tuning loop to balance the per-voxel BCE term on
-the imbalanced ``skl`` target (see entry #44 for the brief Dice-only
-interlude).  The present regime keeps Dice's imbalance-robustness,
-brings BCE back without the ``pos_weight`` knob (Focal's
-``(1 - p_t)^gamma`` term handles the imbalance instead), and
-parameterises the mix with three independent lambdas plus the focal
-``gamma``.  Schema::
+**Why.** Dice is imbalance-robust but its gradient collapses at
+saturation (``∂Dice/∂p`` shrinks with foreground volume); BCE gives a
+constant per-voxel signal that survives saturation, and Focal's
+``(1 - p_t)^gamma`` term sharpens the rare hard positives without a
+``pos_weight`` knob.  Schema::
 
 ```yaml
 weight_sem:
@@ -1155,39 +511,16 @@ weight_sem:
   lambda_bce: 1.0
   lambda_focal: 1.0
   gamma: 2.0            # 0 collapses focal back to plain BCE
-weight_aff_emb:
-  weight: 2.0
-  tau: 1.0              # softness of the exp(-tau * L1) aff kernel
-  lambda_dice: 1.0
-  lambda_bce: 1.0
-  lambda_focal: 1.0
-  gamma: 2.0
 ```
 
-The aff_* paths instantiate their own ``DiceBCEFocalLoss`` so the
-two paths can be tuned independently; ``aff_eps`` under
-``weight_aff_emb`` seeds the shared Dice smoothing default and is
-inherited by ``weight_aff_avg`` unless overridden by per-path
-``smooth_nr`` / ``smooth_dr``.
+**Activation contract.** The composite expects probabilities — `sem`
+arrives post-sigmoid via ``apply_head_activations``.  We use MONAI's
+``DiceLoss(sigmoid=False)`` for the Dice term and roll BCE / Focal on
+probabilities ourselves (sharing ``stable_bce_on_probs`` for the
+fp32-clamped log math), because MONAI's CE / Focal branches assume
+logits.
 
-**Activation contract (unchanged across all three regimes).** The
-composite expects probabilities -- (sem, skl) arrive post-sigmoid
-via ``apply_head_activations``, and the aff_* paths arrive
-post-``exp(-tau * L1)`` via ``soft_aff_from_field``.  MONAI's
-``DiceCELoss`` / ``FocalLoss`` *can't* be used directly because their
-CE / Focal branches assume logits; we use MONAI's ``DiceLoss(sigmoid=False)``
-for the Dice term and roll the BCE / Focal terms on probabilities
-ourselves (sharing ``stable_bce_on_probs`` for the fp32-clamped log
-math).  See the module docstring on
-``brainbow/losses/dice_bce_focal.py`` for the derivation.
+**Ablations.** Set any ``lambda_*`` to ``0`` to disable that term;
+``gamma: 0`` reduces the focal term exactly to per-voxel BCE.
 
-**Ablations.** Set any ``lambda_*`` to ``0`` to disable that term on
-one head only -- e.g. ``lambda_bce: 0, lambda_focal: 0`` recovers
-Dice-only behaviour for an ablation run without touching the
-sibling heads.  ``gamma: 0`` makes the focal term reduce exactly to
-per-voxel BCE (the focal weight ``(1 - p_t)^0 == 1``); this is
-useful when you want BCE supervision without the focal sharpening.
-
-**See also.** Entry #2 (loss-config schema), entry #44 (the brief
-Dice-only window this regime replaces), entry #39 (activation
-policy).
+**See also.** Entry #2 (loss-config schema).

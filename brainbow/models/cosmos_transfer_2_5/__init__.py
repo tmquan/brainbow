@@ -2,12 +2,12 @@
 Cosmos-Transfer 2.5 **3D** model wrapper for volumetric connectomics segmentation.
 
 Adapts the Cosmos-Transfer 2.5 DiT backbone (2B or 14B) as a feature
-extractor for the unified 32-channel volumetric segmentation head:
+extractor for the volumetric segmentation head:
 
-``raw(1) | sem(1) | dir(3) | cov(6) | avg(3) | emb(16)``
+``aff(N_AFF) | sem(1) | raw(1)``  (``HEAD_CHANNELS`` total)
 
 See :mod:`brainbow.losses._common` for the canonical slice constants and
-12-direction second-order affinity convention.
+the affinity offset set.
 
 Cosmos-Transfer 2.5 is natively a video model with temporal + spatial
 dimensions.  For volumetric EM data the depth axis maps directly to the

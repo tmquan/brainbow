@@ -1,4 +1,4 @@
-"""Vista3D wrapper with one unified 32-channel dense-prediction head."""
+"""Vista3D wrapper with the affinity + sem + raw dense-prediction head."""
 
 import logging
 from typing import Any, Dict, Optional

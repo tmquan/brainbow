@@ -301,7 +301,7 @@ class BaseCircuitModule(pl.LightningModule):
         images = self._expand_image_channel(batch["image"])
 
         # OOM guard.  A single heavy validation crop (many instances ->
-        # large clusterer / contingency-matrix allocation, on top of the
+        # large contingency-matrix allocation, on top of the
         # full-resolution decode) can exhaust GPU memory on big backbones.
         # Under DDP a CUDA OOM kills that rank, and the survivors then trip
         # the epoch-end ``dist.all_gather_object`` in ``_reduce_and_log_accum``
@@ -386,8 +386,7 @@ class BaseCircuitModule(pl.LightningModule):
         if not fg_mask.any():
             return
         # Mutex Watershed over the predicted affinities, restricted to the
-        # GT foreground (isolates agglomeration quality from the fg head),
-        # matching the region the previous clusterer scored over.
+        # GT foreground (isolates agglomeration quality from the fg head).
         ins_pred = self.agglomerator(head_pred[:, AFF_SLICE].float(), fg_mask)
         ins_gt = targets["labels"]
         metric = f"{prefix}/ins/metric"

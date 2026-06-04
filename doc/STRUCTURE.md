@@ -1,17 +1,5 @@
 # Brainbow — File Structure
 
-> **Migration note (affinity + Mutex Watershed head).** The 32-channel
-> `CombinedLoss` unified head and the embedding clusterers
-> (mean-shift / HDBSCAN / spatial_cc) have been replaced by a 16-channel
-> **affinity + sem + raw** head (`brainbow/losses/affinity.py::AffinityFGLoss`,
-> layout in `brainbow/losses/_common.py`) with instances from the
-> **Mutex Watershed** (`brainbow/inference/mutex_watershed.py`). The file
-> The following files have been **removed**: `brainbow/losses/combined.py`,
-> `brainbow/inference/clusterer.py`, `brainbow/utils/clustering.py`,
-> `brainbow/utils/manifold.py`, and `brainbow/callbacks/tensorboard/geometry.py`
-> (the old embedding-clusterer / geometry-overlay path). Table rows below
-> that still list them are stale. See [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md).
-
 What lives where.  For the *why* behind the layout (design patterns,
 conventions, adding-new-X checklists), see
 [`ORGANIZATION.md`](./ORGANIZATION.md).
@@ -69,15 +57,16 @@ applicable or directly: `python scripts/<name>.py`.
 
 | File                               | Covers                                                     |
 | ---------------------------------- | ---------------------------------------------------------- |
-| `tests/test_losses.py`             | Unified 32-channel `CombinedLoss` (field slicing, sigmoid policy, 12-aff targets/kernels, scalar keys, backward). |
-| `tests/test_skeleton_transform.py` | `SkeletonGeometryd` transform end-to-end: skl/dir/cov/rad shapes, kimimaro+skimage backends, `rad × dir == s* − v` reconstruction identity, Voronoi-cell covariance eigenstructure. |
+| `tests/test_losses.py`             | `AffinityFGLoss` (channel layout, sigmoid policy, uint8 affinity target + validity mask, chunked-loss parity, scalar keys, backward) + `DiceBCEFocalLoss`. |
+| `tests/test_tensorboard_heads.py`  | `_log_predictions` panel set (true/pred aff, sem, raw, Mutex Watershed `pred/label`). |
+| `tests/test_skeleton_transform.py` | `SkeletonGeometryd` transform end-to-end: skeleton / direction / covariance / radius shapes, kimimaro+skimage backends, reconstruction identity, covariance eigenstructure. |
 | `tests/test_datasets.py`           | `CircuitDataset` abstract contract (resolution, anisotropy, length virtualisation). |
 | `tests/test_datamodules.py`        | `CircuitDataModule` augmentation pipeline (via a synthetic in-memory dataset). |
 | `tests/test_preprocessors.py`      | HDF5 / NRRD / TIFF / NfTy converters.                      |
 | `tests/test_utils.py`              | label / io / parallel helpers.                             |
 
-Tests for the freeze schedule, `build_clusterer`, and
-`sliding_window_inference` are not yet shipped (tracked under the
+Tests for the freeze schedule and `sliding_window_inference` are not
+yet shipped (tracked under the
 audit overhaul backlog -- see
 [`doc/CONTRIBUTING.md`](./CONTRIBUTING.md) for where to land them).
 
@@ -126,13 +115,13 @@ and the loss targets.  No learnable state.
 | `microns.py`    | MICrONS datamodule leaf.                                            |
 | `neurons.py`    | Internal neurons datamodule leaf.                                   |
 
-### `brainbow/losses/` — unified 32-channel loss
+### `brainbow/losses/` — affinity + sem + raw loss
 
 | File            | Purpose                                                                        |
 | --------------- | ------------------------------------------------------------------------------ |
-| `_common.py`         | Single source of truth for the unified head layout (`raw|sem|skl|dir|cov|rad|avg|emb`), the contiguous `SIGMOID_SLICE` over (sem, skl), `apply_head_activations` helper, 12-direction affinity geometry, slicing helpers, regression utilities, and the fp32-clamped `stable_bce_on_probs` consumed by the composite Dice + BCE + Focal supervisor. |
-| `dice_bce_focal.py`  | `DiceBCEFocalLoss` — composite probability-input supervisor for the (sem, skl, aff_emb, aff_avg) heads.  Composes MONAI's `DiceLoss(sigmoid=False)` with custom BCE-on-probs (`stable_bce_on_probs`) and a focal-on-probs path; ``lambda_{bce,dice,focal}`` + ``gamma`` parameterise the mix. |
-| `combined.py`        | `CombinedLoss` — one monolithic loss over the 32-channel head: raw, sem, skl, dir, cov, rad, avg, emb, derived `aff_avg`, derived `aff_emb`.  Each composite-loss head instantiates its own `DiceBCEFocalLoss` so the lambdas can be tuned independently per path. |
+| `_common.py`         | Single source of truth for the head layout: `AFFINITY_OFFSETS` / `N_PULL`, `AFF_SLICE` / `SEM_SLICE` / `RAW_SLICE`, `HEAD_CHANNELS`, the contiguous `SIGMOID_SLICE` over (aff, sem), `apply_head_activations`, the affinity-target / validity-mask builders, slicing helpers, and the fp32-clamped `stable_bce_on_probs`. |
+| `affinity.py`        | `AffinityFGLoss` — the head's supervisor: masked + offset-weighted (pull/push) affinity composite (BCE + soft-Dice + focal), a `DiceBCEFocalLoss` foreground (`sem`) term, and an L1 `raw` reconstruction term.  Emits `loss/aff`, `loss/sem`, `loss/raw`. |
+| `dice_bce_focal.py`  | `DiceBCEFocalLoss` — composite probability-input supervisor used by `AffinityFGLoss` for the `sem` head.  Composes MONAI's `DiceLoss(sigmoid=False)` with BCE-on-probs (`stable_bce_on_probs`) and a focal-on-probs path; `lambda_{bce,dice,focal}` + `gamma` parameterise the mix. |
 
 ### `brainbow/metrics/` — per-head eval metrics
 
@@ -159,7 +148,7 @@ each backbone-specific package only owns its true delta.
 | `wrapper_base.py`     | `_BaseCosmos25Wrapper` — abstract wrapper with extension hooks.       |
 | `variants.py`         | `_VariantConfigBase` dataclass (each backbone extends as needed).     |
 | `layers.py`           | Shared primitives (`_NORM`, `_PointwiseLinear`, `_adapt_to_rgb`).     |
-| `decoder.py`          | `_FeatureProjector3D` / `_DecoderAdapter3D` (VAE + unified head).     |
+| `decoder.py`          | `_FeatureProjector3D` / `_DecoderAdapter3D` (VAE decoder + affinity + sem + raw head). |
 | `standalone_dit.py`   | Random-init `_StandaloneDiT3D` fallback for `pretrained=False`.       |
 | `hf_loader.py`        | Rank-aware HF snapshot download (ignores `text_encoder/*`).           |
 
@@ -193,7 +182,7 @@ extension hooks.
 | File                       | Purpose                                                             |
 | -------------------------- | ------------------------------------------------------------------- |
 | `__init__.py`              | Re-exports `Vista3DWrapper`, `VistaTaskHead3D`.                     |
-| `wrapper.py`               | `Vista3DWrapper` — the public class (3 heads: semantic/instance/geometry). |
+| `wrapper.py`               | `Vista3DWrapper` — SegResNetDS2 backbone + the affinity + sem + raw head. |
 | `heads.py`                 | `VistaTaskHead3D` (MONAI `UnetrBasicBlock`).                        |
 | `hf_loader.py`             | MONAI `VISTA3D-HF` encoder download + partial-load.                 |
 
@@ -222,16 +211,15 @@ concrete `module.py`.
 | `callbacks/tensorboard/`          | `ImageLogger` — hierarchical TB visualisation (package).                |
 | `callbacks/tensorboard/image_logger.py` | `ImageLogger` callback (the public class).                        |
 | `callbacks/tensorboard/tags.py`   | `TagContext` — single source of `{stage}/{mode}/[{head}/]{panel}`.      |
-| `callbacks/tensorboard/heads.py`  | `_log_predictions` (unified-head orchestrator) + `_add_aff_panels` / `_aff_fg_mask_2d` helpers. |
-| `callbacks/tensorboard/geometry.py` | `pred/dir` and `pred/cov` renderers in two families: `"glyph"` (default, matplotlib quiver + ellipse glyphs) and `"flow"` (vectorised optical-flow HSV). Both soft-composite onto the raw EM with the predicted sigmoid sem as the per-pixel blend weight. Style is picked via `image_logger.geometry_style`. |
+| `callbacks/tensorboard/heads.py`  | `_log_predictions` — emits `true/{image,label,aff/*}`, `pred/{sem,raw,aff/*}`, and the Mutex Watershed `pred/label/{pre,mul}` panels; `aff_panel_indices` selects which affinity offsets to show. |
 | `callbacks/tensorboard/viz.py`    | Colour-map, overlay, tile builders.                                     |
 
-### `brainbow/inference/` — sliding-window + clustering
+### `brainbow/inference/` — sliding-window + Mutex Watershed
 
 | File                    | Purpose                                                             |
 | ----------------------- | ------------------------------------------------------------------- |
 | `sliding_window.py`     | Blended sliding-window inference over arbitrarily large volumes.    |
-| `clusterer.py`          | Discriminative-embedding → instance-id clustering. Three strategies via `build_clusterer(name=...)`: `soft_meanshift` (differentiable, training-time default), `hdbscan` (auto-K density clustering; cuML or CPU), and `spatial_cc` (connected components on the spatial-neighbour embedding-affinity graph; CuPy or scipy). |
+| `mutex_watershed.py`    | Parameter-free Mutex Watershed agglomeration of the predicted affinities into instance ids (`mutex_watershed` functional + `MutexWatershed` nn.Module). The eval / inference instance-segmentation step; see [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md). |
 
 ### `brainbow/preprocessors/` — format converters
 
@@ -250,8 +238,6 @@ concrete `module.py`.
 | File            | Purpose                                                 |
 | --------------- | ------------------------------------------------------- |
 | `io.py`         | Volume read / write façade over `preprocessors/*`.      |
-| `clustering.py` | Embedding-clustering primitives (`cluster_embeddings`, `cluster_spatial_cc`) shared by the inference clusterers and notebooks. |
-| `manifold.py`   | PCA / UMAP / t-SNE helpers for embedding-space diagnostics. |
 
 ### `brainbow/visualizer/` — interactive web volume renderer
 
@@ -294,6 +280,6 @@ concrete `module.py`.
 - [`ORGANIZATION.md`](./ORGANIZATION.md) — design patterns, conventions, and
   "how to add a new …" checklists.
 - `configs/*.yaml` — every knob is documented inline.
-- `brainbow/losses/combined.py` — `CombinedLoss` consumes the model's
-  single 32-channel head tensor plus a target dict and returns
-  per-field scalar losses.
+- `brainbow/losses/affinity.py` — `AffinityFGLoss` consumes the model's
+  single `[B, HEAD_CHANNELS, …]` head tensor plus a target dict and
+  returns `loss/aff`, `loss/sem`, `loss/raw`.

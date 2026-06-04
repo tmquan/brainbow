@@ -70,7 +70,7 @@ class VistaTaskHead3D(nn.Module):
         in_channels: Channel count of the backbone/decoder feature map
             fed into the head.
         out_channels: Task-specific output width.  In Brainbow's current
-            wrappers this is the unified 32-channel head width.
+            wrappers this is ``HEAD_CHANNELS`` (affinity + sem + raw).
         refine_channels: Width at which the residual refinement blocks
             operate.  Defaults to ``in_channels`` (VISTA3D's convention).
             Passing a smaller value (e.g. ``feature_size=64``) is the

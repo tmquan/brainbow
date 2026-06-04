@@ -140,8 +140,8 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         self.batch_size = batch_size
         # Validation / test batch size.  Defaults to ``batch_size``.  Set
         # lower (e.g. 1) when the eval-time forward + full-resolution decode
-        # + clusterer/metrics peak exceeds the train-step memory -- common on
-        # large backbones where validation is the memory-binding path.
+        # + Mutex Watershed / metrics peak exceeds the train-step memory --
+        # common on large backbones where validation is the memory-binding path.
         self.val_batch_size = val_batch_size if val_batch_size is not None else batch_size
         self.num_workers = num_workers
         self.cache_rate = cache_rate

@@ -1,16 +1,5 @@
 # Brainbow — End-to-end Walkthrough ("Follow One Batch")
 
-> **Migration note (affinity + Mutex Watershed head).** The training /
-> eval loop is unchanged in shape, but the head is now 16-channel
-> **affinity + sem + raw** (`AffinityFGLoss`, keys `loss/aff` `loss/sem`
-> `loss/raw`) instead of the 32-channel `CombinedLoss`, and validation
-> instances come from `self.agglomerator` (**Mutex Watershed**) rather
-> than `self.clusterer` / `build_clusterer`. Skeleton geometry
-> (skl/dir/cov/rad) is no longer used by the loss. Any step below
-> referencing `[B, 30/32, ...]`, `combined.py`, embedding clusterers, or
-> `pred/dir`/`pred/cov`/`pred/emb` panels is stale — see
-> [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md).
-
 > Audience: anyone who wants to understand how a single training step
 > actually flows through brainbow, with file paths and line numbers so
 > you can step through it in an editor.
@@ -46,9 +35,9 @@ flowchart LR
     DM -.batch.-> LOOP
     LOOP -.training_step.-> MOD
     MOD --> WRAP["model wrapper\n(forward)"]:::wrap
-    WRAP --> HEAD["unified 32-channel head\nraw|sem|skl|dir|cov|rad|avg|emb"]:::heads
-    HEAD --> LOSS["CombinedLoss"]:::loss
-    LOSS --> METRICS["per-field\nscalars / metrics"]:::metric
+    WRAP --> HEAD["affinity + sem + raw head\naff(N_AFF) | sem | raw"]:::heads
+    HEAD --> LOSS["AffinityFGLoss"]:::loss
+    LOSS --> METRICS["loss + Mutex Watershed\ninstance metrics"]:::metric
     METRICS --> TB[("TensorBoard /\nW&B logs")]:::tb
     CB -.|on_batch_end\non_epoch_end|.-> TB
 
@@ -125,14 +114,11 @@ flowchart LR
 
 Key decisions made here:
 
-* `compute_geometry` (lines `166-169`) is set to `True` if any of
-  `loss.weight_skl`, `loss.weight_dir`, `loss.weight_cov`, or
-  `loss.weight_rad` is `> 0`.  This decides whether the datamodule
-  precomputes the skeleton-relative geometry quartet via the
-  `SkeletonGeometryd` MONAI transform (single per-instance EDT pass
-  emitting `label_skl`, `label_direction`, `label_covariance`, and
-  `label_radius`).  The rest of the loss config is opaque to the data
-  path.  See [brainbow/datamodules/base.py](../brainbow/datamodules/base.py)
+* `AffinityFGLoss` builds its targets in-module from the instance
+  `label` (affinity + sem) and the input `image` (raw reconstruction),
+  so the data path only needs to emit `image` + `label`.  The affinity
+  stack is built on the GPU in the Lightning step, never in the loader.
+  See [brainbow/datamodules/base.py](../brainbow/datamodules/base.py)
   for the MONAI pipeline assembly.
 * `inspect.signature(cls).parameters` (line `217`) filters kwargs so
   older datamodule signatures don't `TypeError` on a new YAML knob.
@@ -146,15 +132,15 @@ lazily.
 ## 3. Lightning module construction
 
 `scripts/train.py:build_module` (line 222) maps `cfg.model.type` to
-`Vista3DModule` / `CosmosTransfer3DModule` and forwards four config
-sub-dicts:
+`CosmosPredict3DModule` / `CosmosTransfer3DModule` / `Cosmos3Nano3DModule`
+/ `Vista3DModule` and forwards four config sub-dicts:
 
 ```python
 return cls(
     model_config=model_cfg,        # network shape + freeze flags
     optimizer_config=...,           # AdamW lr, weight_decay, schedule
-    loss_config=...,                # head weights + sub-weights
-    training_config=...,            # clusterer, gradient_clip_val, etc.
+    loss_config=...,                # weight_aff / weight_sem / weight_raw
+    training_config=...,            # mutex_watershed, gradient_clip_val, etc.
 )
 ```
 
@@ -166,10 +152,12 @@ What `BaseCircuitModule.__init__` does
    key as a kwarg to `_model_cls`.  Cosmos overrides this in
    [modules/cosmos_transfer_2_5/base.py](../brainbow/modules/cosmos_transfer_2_5/base.py)
    to surface the freeze knobs and the `dit_backbone_lr` parameter group.
-3. Constructs `self.criterion = self._loss_cls(**loss_config)`; for
-   :class:`CombinedLoss`, fields with `weight: 0` are not instantiated
-   at all (memory + speed win).
-4. Builds the validation-time clusterer via `build_clusterer(...)`.
+3. Constructs `self.criterion = self._loss_cls(**loss_config)`
+   (`AffinityFGLoss`); a field with `weight: 0` is skipped in the
+   forward and absent from the loss dict.
+4. Builds the validation-time agglomerator
+   `self.agglomerator = MutexWatershed(**training_config["mutex_watershed"])`
+   (offsets / `n_pull` default to the loss's).
 5. Initialises the per-epoch metric accumulator
    (`self._eval_accum`).
 
@@ -202,82 +190,62 @@ sequenceDiagram
     participant DL as DataLoader
     participant Mod as BaseCircuitModule
     participant Wrap as Backbone Wrapper
-    participant Loss as CombinedLoss
+    participant Loss as AffinityFGLoss
     participant TB as TensorBoard
 
     DL->>Mod: training_step(batch, idx)
     Note over Mod: brainbow/modules/base.py:243
     Mod->>Wrap: self.model(images)
     Note over Wrap: cosmos / vista wrapper.forward
-    Wrap-->>Mod: head tensor [B, 30, ...]
-    Mod->>Loss: self.loss_fn(head, targets)
-    Note over Loss: brainbow/losses/combined.py
-    Loss-->>Mod: {"loss", "loss/<field>", ...}
+    Wrap-->>Mod: head tensor [B, HEAD_CHANNELS, ...]
+    Mod->>Loss: self.criterion(head, targets)
+    Note over Loss: brainbow/losses/affinity.py
+    Loss-->>Mod: {"loss", "loss/aff", "loss/sem", "loss/raw"}
     Mod->>TB: self.log_dict("train/automatic/...", scalars, sync_dist=True)
     Mod-->>DL: total_loss (scalar)
 ```
 
-### 5.1 Where the unified head comes from
+### 5.1 Where the head comes from
 
-Both wrappers return one tensor, not a dict of seven heads:
+Every wrapper returns one tensor, not a dict of heads:
 
 | Wrapper | Source | Output |
 | ------- | ------ | ------ |
-| Cosmos  | `decoder_adapter.head(decoder_features)` | `[B, 32, D, H, W]` |
-| Vista   | `head(backbone_features)`                | `[B, 32, D, H, W]` |
+| Cosmos  | `decoder_adapter.head(decoder_features)` | `[B, HEAD_CHANNELS, D, H, W]` |
+| Vista   | `head(backbone_features)`                | `[B, HEAD_CHANNELS, D, H, W]` |
 
 Channel layout is owned by `brainbow.losses._common`:
 
 | Field | Slice | Channels | Activation | Supervision |
 | ----- | ----- | -------- | ---------- | ----------- |
-| raw | `[0, 1)`  | 1  | linear | L1 / MSE / Smooth-L1 |
-| sem | `[1, 2)`  | 1  | sigmoid | Dice + BCE + Focal (``DiceBCEFocalLoss``) |
-| skl | `[2, 3)`  | 1  | sigmoid | Dice + BCE + Focal (``DiceBCEFocalLoss``) |
-| dir | `[3, 6)`  | 3  | linear | L1 / MSE / Smooth-L1 (fg-only) |
-| cov | `[6, 12)` | 6  | linear | L1 / MSE / Smooth-L1 (fg-only) |
-| rad | `[12, 13)`| 1  | linear | L1 / MSE / Smooth-L1 (fg-only) |
-| avg | `[13, 16)`| 3  | linear | L1 (fg-only) + derived 12-aff Dice + BCE + Focal |
-| emb | `[16, 32)`| 16 | linear | pull / push / norm + derived 12-aff Dice + BCE + Focal |
+| aff | `[0, N_AFF)` | `N_AFF` (14) | sigmoid | masked BCE + soft-Dice + focal vs `affinity_target_from_offsets` |
+| sem | `[N_AFF, N_AFF+1)` | 1 | sigmoid | Dice + BCE + Focal (`DiceBCEFocalLoss`) vs `labels > 0` |
+| raw | `[N_AFF+1, N_AFF+2)` | 1 | linear | L1 reconstruction of the input EM |
 
-### 5.2 What `CombinedLoss` returns
+### 5.2 What `AffinityFGLoss` returns
 
-`brainbow/losses/combined.py:CombinedLoss.forward` returns a flat dict
-whose keys mirror the image-tag layout used by the `ImageLogger`
-(image: `pred/<field>[/<panel>]` / scalar: `loss/<field>[/<component>]`):
+`brainbow/losses/affinity.py:AffinityFGLoss.forward` returns a flat dict
+whose keys sit next to the matching image panels emitted by the
+`ImageLogger`:
 
 ```
-loss                                       # scalar total (we backprop this)
-loss/raw
-loss/sem
-loss/skl
-loss/dir
-loss/cov
-loss/rad
-loss/avg
-loss/emb[/pull|/push|/norm]
-loss/aff_emb
-loss/aff_avg
+loss            # scalar total (we backprop this)
+loss/aff        # affinity composite
+loss/sem        # foreground (semantic) composite
+loss/raw        # raw reconstruction
 ```
 
-The composite-loss heads (sem, skl, aff_emb, aff_avg) emit only the
-field-level total; the three sub-terms inside ``DiceBCEFocalLoss``
-are already weighted-in by ``lambda_{bce,dice,focal}`` so we don't
-log them separately (see GOTCHAS entries #44 and #45 for the
-supervision-regime history).
-
-So e.g. `loss/aff_emb` accompanies
-`pred/emb/aff/{01_t1,02_b1,03_u1,04_d1,05_l1,06_r1,07_t2,08_b2,09_u2,10_d2,11_l2,12_r2}`,
-both produced from the embedding via `soft_aff_from_field`;
-`loss/aff_avg` pairs with `pred/avg/aff/{...}`.  The 1-based
-index prefix matches the order of `brainbow.losses.DIRECTIONS` and
-keeps each axis-aligned pair (T/B, U/D, L/R) on consecutive
-panels under TensorBoard's alphabetical tag sort.
+(A field with `weight: 0` is skipped and absent from the dict.)
+`loss/aff` accompanies the `pred/aff/{offset}` / `true/aff/{offset}`
+panels, `loss/sem` the `pred/sem` panel, `loss/raw` the `pred/raw`
+panel.  At eval the predicted affinities also feed the Mutex Watershed,
+whose instances appear as `pred/label/{pre,mul}` and are scored under
+`ins/metric/*`.
 
 `BaseCircuitModule.training_step`
-([brainbow/modules/base.py:243](../brainbow/modules/base.py)) prefixes
-every key with `train/automatic/` and calls
-`self.log_dict(..., sync_dist=True)`, which is what TensorBoard
-eventually sees.
+([brainbow/modules/base.py](../brainbow/modules/base.py)) prefixes
+every key with `train/automatic/` and logs it, which is what
+TensorBoard eventually sees.
 
 ### 5.3 Optimiser parameter groups
 
@@ -323,9 +291,10 @@ by `_try_load_diffusers` / `_try_load_controlnet`; the ControlNet's
   group with `lr = optimizer.dit_backbone_lr` /
   `optimizer.controlnet_lr` (each defaulting to `lr` if unset).
 
-Defaults in `configs/snemi3d.yaml`: VAE encoder frozen, **base DiT
-frozen, ControlNet trainable** (the natural ControlNet pattern), VAE
-decoder frozen except the fine-tuning shim.  See
+Defaults in `configs/snemi3d.yaml` (`cosmospredict3d`, 2B, no
+ControlNet): VAE encoder frozen, **base DiT trainable**
+(`freeze_dit_backbone: false`, full fine-tune under DDP), VAE decoder
+frozen except the fine-tuning shim.  See
 [`ARCHITECT.md` §1.6](./ARCHITECT.md#16-freeze-flags--what-actually-moves)
 for parameter-budget consequences.
 
@@ -342,9 +311,10 @@ Once per `every_n_epochs` (default 1), on rank 0 only:
 2. At epoch end, `_run_visualization` moves the cached batch back to
    the device, runs a single eval-mode forward under autocast, casts
    predictions back to fp32.
-3. `_log_predictions(...)` renders the unified fields: raw, sem, dir,
-   cov, avg, emb projection, derived 12-affinity panels for avg/emb,
-   true 12-affinity panels, and the clusterer-output label overlay.
+3. `_log_predictions(...)` renders `true/{image,label}`, the
+   `true/aff/{offset}` and `pred/aff/{offset}` affinity panels,
+   `pred/sem`, `pred/raw`, and the Mutex Watershed instance
+   segmentation `pred/label/{pre,mul}`.
 4. Every tag is built through `TagContext.tag(panel)` so the resulting
    path is exactly `{stage}/{mode}/{panel}`.
 
@@ -353,26 +323,23 @@ TensorBoard's Images and Scalars tabs.
 
 ---
 
-## 8. Validation step + clustering
+## 8. Validation step + Mutex Watershed
 
-`BaseCircuitModule.validation_step` (line 436) calls
-`_eval_step_and_accumulate` (line 311).  That function:
+`BaseCircuitModule.validation_step` calls `_eval_step_and_accumulate`.
+That function:
 
 1. Forward the batch.
-2. Apply `CombinedLoss` (validation loss).
-3. **Cluster** the instance embedding into a per-voxel ID map using
-   `self.clusterer(...)` (built by `build_clusterer` from
-   `training.clusterer.*`).
-4. Accumulate per-batch metrics (`per_batch_ari`, `per_batch_voi`,
-   `per_batch_dice`, ...).
+2. Apply `AffinityFGLoss` (validation loss).
+3. Foreground metrics from `head[:, SEM_SLICE]` (`acc / iou / dice`).
+4. **Agglomerate** the predicted affinities into a per-voxel instance
+   ID map with `self.agglomerator(head[:, AFF_SLICE], fg)` (the Mutex
+   Watershed), and score `ari / ami / voi / ted` against the GT
+   instances.
 5. On epoch end, all-reduce the accumulators across ranks and log them
-   under `val/automatic/{head}/metric/{name}`.
+   under `val/automatic/{sem,ins}/metric/{name}`.
 
-Clusterers live in
-`brainbow/inference/clusterer.py:build_clusterer` (line 525); the
-default is :class:`SoftMeanShift` (line 60).  The other registered
-strategies are :class:`HDBSCANClusterer` (line 334) and
-:class:`SpatialCCClusterer` (line 408).
+The agglomerator is `brainbow/inference/mutex_watershed.py::MutexWatershed`
+(parameter-free; see [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md)).
 
 ### 8.1 Val/test transform pipeline (deterministic)
 
@@ -383,7 +350,6 @@ intentionally diverges from the train pipeline:
 EnsureChannelFirst → [FindBoundaries(prob=1.0)]
 → [Pad + CenterCrop(patch_size)]   # or Resize(image_size)
 → instance_transforms (CC relabel, deterministic)
-→ geometry_transforms (Direction, Covariance — deterministic)
 → EnsureType
 ```
 
@@ -391,8 +357,7 @@ No `RandFlip`, no `RandRotate90`, no `RandTransposeXY`, no
 `Rand3DElastic`, no `RandGaussianNoise`, no `RandAdjustContrast`.
 The eval crops are deterministic (center crop) so the same volume
 produces the same patch every epoch and the metrics are comparable
-across runs.  See [`GOTCHAS.md` #26](./GOTCHAS.md) for the historical
-bug (eval used to share the train pipeline's random hooks).
+across runs.
 
 ---
 
@@ -404,12 +369,13 @@ entry point.  It:
 
 1. Iterates patch starts on a regular grid with a configurable overlap.
 2. Forwards each patch through the wrapped model — input
-   `[B, C_in, D, H, W]`, output `[B, 30, D, H, W]` (the unified head).
+   `[B, C_in, D, H, W]`, output `[B, HEAD_CHANNELS, D, H, W]`.
 3. Accumulates patch outputs in a full-volume buffer with gaussian /
    average / max blending weights.
 4. Normalises by the accumulated weight map and returns the final
-   `[1, 30, D_full, H_full, W_full]` tensor; downstream code slices
-   it via `slice_head(...)` to recover the named fields.
+   `[1, HEAD_CHANNELS, D_full, H_full, W_full]` tensor; downstream code
+   slices it via `slice_head(...)` (`aff` / `sem` / `raw`) and runs the
+   Mutex Watershed on the affinities to get instances.
 
 `scripts/train.py` does **not** call this path; it's invoked from
 `trainer.test(...)` and from notebook code that wants an offline
@@ -422,12 +388,12 @@ prediction map.
 | Curious about ...                 | Read first ...                                                                  |
 | --------------------------------- | ------------------------------------------------------------------------------- |
 | Augmentation order                | `brainbow/datamodules/base.py::CircuitDataModule.get_train_transforms`          |
-| Loss target construction          | `brainbow/losses/combined.py::CombinedLoss.build_targets` + `build_avg_target`, `affinity_target` in `_common.py` |
-| Channel layout (raw…emb slices)   | `brainbow/losses/_common.py::HEAD_LAYOUT`                                       |
+| Loss + affinity targets           | `brainbow/losses/affinity.py::AffinityFGLoss` + `affinity_target_from_offsets` in `_common.py` |
+| Channel layout (aff/sem/raw)      | `brainbow/losses/_common.py::HEAD_LAYOUT`                                       |
 | TensorBoard tag layout            | `brainbow/callbacks/tensorboard/tags.py::TagContext` + `heads.py::_log_predictions` |
-| Freeze flags                      | `brainbow/models/cosmos_transfer_2_5/wrapper.py::CosmosTransfer3DWrapper.__init__` |
-| Param-group split                 | `brainbow/modules/cosmos_transfer_2_5/base.py::configure_optimizers`            |
-| Clustering algorithms             | `brainbow/inference/clusterer.py::build_clusterer`                              |
+| Freeze flags                      | `brainbow/models/cosmos_2_5_common/wrapper_base.py`                            |
+| Param-group split                 | `brainbow/modules/cosmos_2_5_common/base.py::configure_optimizers`             |
+| Mutex Watershed agglomeration     | `brainbow/inference/mutex_watershed.py` ([`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md)) |
 | Adding a new dataset/head/...     | [`CONTRIBUTING.md`](./CONTRIBUTING.md)                                          |
 | Silent failure modes              | [`GOTCHAS.md`](./GOTCHAS.md)                                                    |
 | Parameter budgets                 | [`ARCHITECT.md`](./ARCHITECT.md)                                                |

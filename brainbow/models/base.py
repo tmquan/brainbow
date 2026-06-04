@@ -4,9 +4,9 @@ Abstract base for backbone wrappers in :mod:`brainbow.models`.
 Why this file exists
 --------------------
 A "model wrapper" in brainbow is the *whole* network: encoder, decoder
-and the multiple task heads that produce ``semantic`` / ``instance`` /
-``geometry`` / ``boundary`` outputs.  This file declares the minimum
-contract every wrapper honours so that downstream code
+and the single dense head that produces the ``[B, HEAD_CHANNELS, *spatial]``
+affinity + sem + raw tensor.  This file declares the minimum contract
+every wrapper honours so that downstream code
 (:class:`brainbow.modules.base.BaseCircuitModule`,
 :class:`brainbow.callbacks.tensorboard.ImageLogger`,
 :func:`brainbow.inference.sliding_window_inference`) can stay agnostic
@@ -15,22 +15,19 @@ of the specific backbone.
 Public surface
 --------------
 * :class:`BaseModel` -- abstract :class:`torch.nn.Module` whose
-  :meth:`forward` returns a ``Dict[str, Tensor]`` keyed by head name.
+  :meth:`forward` returns the ``[B, HEAD_CHANNELS, *spatial]`` head tensor
+  and whose :meth:`get_output_channels` returns ``HEAD_CHANNELS``.
 
 Note on subclassing
 -------------------
-The two production wrappers (:class:`CosmosTransfer3DWrapper`,
-:class:`Vista3DWrapper`) currently inherit directly from
-:class:`torch.nn.Module` rather than :class:`BaseModel` (legacy reasons).
-The ``forward`` -> dict contract is still respected; the
-:meth:`get_output_channels` helper is only required when a future
-sliding-window or post-processing path needs head widths without a real
-forward pass.  New backbone wrappers are encouraged to inherit
+The concrete wrappers (Cosmos-Predict / Transfer / Cosmos3-Nano / Vista)
+inherit directly from :class:`torch.nn.Module` rather than
+:class:`BaseModel`; the single-tensor ``forward`` contract is still
+respected.  New backbone wrappers are encouraged to inherit
 :class:`BaseModel` for consistency.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -41,16 +38,13 @@ class BaseModel(nn.Module, ABC):
 
     Required overrides
     ------------------
-    * :meth:`forward(x)` -- return a ``Dict[str, Tensor]`` keyed by head
-      name (e.g. ``"semantic"``, ``"instance"``, ``"geometry"``,
-      ``"boundary"``).  The convention used elsewhere in brainbow is
-      that **every present key is a logit / regression tensor of shape**
-      ``[B, C, *spatial]`` -- no activations are applied here so the
-      losses can stay numerically stable.
-    * :meth:`get_output_channels()` -- ``Dict[str, int]`` mapping head
-      name to channel width.  Used by sliding-window inference and the
-      image logger to allocate output buffers without a real forward
-      pass.
+    * :meth:`forward(x)` -- return the ``[B, HEAD_CHANNELS, *spatial]``
+      head tensor.  Activations are applied via
+      :func:`brainbow.losses.apply_head_activations` (sigmoid on the
+      ``aff + sem`` block, linear ``raw``) before the tensor is returned.
+    * :meth:`get_output_channels()` -- the integer ``HEAD_CHANNELS``.
+      Used by sliding-window inference and the image logger to allocate
+      output buffers without a real forward pass.
 
     Args:
         in_channels: Number of input channels.
@@ -70,16 +64,17 @@ class BaseModel(nn.Module, ABC):
         self.spatial_dims = spatial_dims
 
     @abstractmethod
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass.
 
         Args:
             x: Input tensor ``[B, C, *spatial]``.
 
         Returns:
-            Dict of ``{head_name: Tensor[B, head_channels, *spatial]}``.
-            By convention, no activation is applied -- losses receive
-            raw logits / regression outputs.
+            The ``[B, HEAD_CHANNELS, *spatial]`` head tensor, with
+            activations already applied (sigmoid on the ``aff + sem``
+            block via :func:`brainbow.losses.apply_head_activations`,
+            linear ``raw``).
         """
         raise NotImplementedError
 

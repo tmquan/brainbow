@@ -35,9 +35,6 @@ Module layout::
                          batch of each epoch, forward under eval +
                          autocast, dispatch)
 
-    (``geometry.py`` -- legacy ``pred/dir`` / ``pred/cov`` overlays for
-    the retired skeleton-geometry head; no longer wired in.)
-
 End-to-end flow (rank-0 only, once per ``every_n_epochs``)::
 
         ┌────────────────────────┐

@@ -64,7 +64,7 @@ class BaseCosmosModule(BaseCircuitModule):
             :class:`brainbow.models.cosmos_2_5_common.wrapper_base._BaseCosmos25Wrapper`).
         optimizer_config: Optimizer / scheduler settings.
         loss_config: Forwarded as ``**loss_config`` to ``_loss_cls``.
-        training_config: Training behaviour (clusterer, freeze schedule, ...).
+        training_config: Training behaviour (mutex_watershed, freeze schedule, ...).
     """
 
     _SPATIAL_DIMS = 3

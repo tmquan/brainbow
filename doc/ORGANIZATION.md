@@ -1,14 +1,5 @@
 # Brainbow — Code Organization & Design Patterns
 
-> **Migration note (affinity + Mutex Watershed head).** Sections that
-> describe the **32-channel `CombinedLoss`** unified head (raw/sem/skl/
-> dir/cov/rad/avg/emb, derived 12-direction `soft_aff`, `DIRECTIONS`) or
-> the embedding **clusterers** are stale: the head is now 16-channel
-> **affinity + sem + raw** (`AffinityFGLoss`) and instances come from the
-> parameter-free **Mutex Watershed**. The design-pattern principles below
-> still hold; for the current head / loss / eval specifics see
-> [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md).
-
 This document describes **how** the Brainbow codebase is organized and **why**
 — the recurring patterns that every new file should follow.  For a plain
 file-by-file tree, see [`STRUCTURE.md`](./STRUCTURE.md).
@@ -55,14 +46,14 @@ brainbow/
     ├── callbacks/        # TensorBoard + memory callbacks.
     ├── datamodules/      # Lightning DataModules (base + per-dataset).
     ├── datasets/         # MONAI CacheDatasets (base + per-dataset + lazy).
-    ├── inference/        # sliding-window inference + instance clustering.
-    ├── losses/           # Unified 32-channel CombinedLoss + shared helpers.
-    ├── metrics/          # per-head evaluation metrics.
+    ├── inference/        # sliding-window inference + Mutex Watershed.
+    ├── losses/           # AffinityFGLoss (affinity + sem + raw) + helpers.
+    ├── metrics/          # foreground + instance evaluation metrics.
     ├── models/           # model wrappers (BaseModel + per-arch packages).
     ├── modules/          # Lightning modules (BaseCircuitModule + per-arch).
     ├── preprocessors/    # format converters (base + per-format).
-    ├── transforms/       # deterministic ops (direction, covariance, EDT, ...).
-    ├── utils/            # io, clustering, manifold.
+    ├── transforms/       # deterministic ops (boundaries, EDT, skeleton, ...).
+    ├── utils/            # io helpers.
     └── visualizer/       # web volume renderer.
 ```
 
@@ -121,7 +112,7 @@ wrapper.py           # CosmosTransfer3DWrapper (the public class)
 
 ```
 __init__.py              # re-exports Vista3DWrapper, VistaTaskHead3D
-wrapper.py               # Vista3DWrapper (the public class; unified head)
+wrapper.py               # Vista3DWrapper (the public class; affinity head)
 heads.py                 # VistaTaskHead3D (MONAI UnetrBasicBlock)
 hf_loader.py             # MONAI/VISTA3D-HF encoder download + partial-load
 ```
@@ -131,15 +122,9 @@ hf_loader.py             # MONAI/VISTA3D-HF encoder download + partial-load
 ```
 __init__.py      # re-exports ImageLogger
 tags.py          # TagContext: {stage}/{mode}/{panel}
-geometry.py      # `pred/dir` + `pred/cov` renderers in two families,
-                 # picked by `image_logger.geometry_style`:
-                 #   - "glyph" (default): matplotlib quiver arrows for
-                 #     `dir` and ellipse glyphs for `cov`
-                 #   - "flow" : vectorised optical-flow-style HSV colour
-                 #     map (no matplotlib, ~10x faster)
-                 # Both soft-composite onto the raw EM with the
-                 # predicted sigmoid sem as the per-pixel blend weight.
-heads.py         # unified-head panel logger (`_log_predictions`)
+heads.py         # panel logger (`_log_predictions`): true/{image,label,
+                 # aff/*}, pred/{sem,raw,aff/*}, and the Mutex Watershed
+                 # pred/label/{pre,mul} instance panels
 viz.py           # colour-map, overlay, tile builders
 image_logger.py  # ImageLogger callback (the public class)
 ```
@@ -156,123 +141,74 @@ image_logger.py  # ImageLogger callback (the public class)
 
 ---
 
-## 5. Unified 32-channel loss
+## 5. Affinity + sem + raw loss
 
-The current loss package has one public loss, `CombinedLoss`, and one
-shared helper module, `_common.py`.
+The loss package has one public loss, `AffinityFGLoss` (`affinity.py`),
+the shared `DiceBCEFocalLoss` supervisor, and the layout/helper module
+`_common.py`.  Instance segmentation at eval is produced by the Mutex
+Watershed (`inference/mutex_watershed.py`) -- see
+[`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md) for the head, loss, and eval
+in depth.
 
 `_common.py` owns the channel layout:
 
-| Field | Slice | Channels |
-| ----- | ----- | -------- |
-| `raw` | `[0, 1)` | 1 |
-| `sem` | `[1, 2)` | 1 |
-| `skl` | `[2, 3)` | 1 |
-| `dir` | `[3, 6)` | 3 |
-| `cov` | `[6, 12)` | 6 |
-| `rad` | `[12, 13)` | 1 |
-| `avg` | `[13, 16)` | 3 |
-| `emb` | `[16, 32)` | 16 |
+| Field | Slice | Channels | Activation |
+| ----- | ----- | -------- | ---------- |
+| `aff` | `[0, N_AFF)` | `N_AFF` (14) | sigmoid |
+| `sem` | `[N_AFF, N_AFF+1)` | 1 | sigmoid |
+| `raw` | `[N_AFF+1, N_AFF+2)` | 1 | linear |
 
-Activation policy: sigmoid on the contiguous `SIGMOID_SLICE = [1, 3)`
-(sem + skl); linear elsewhere.  Wrappers route their head output
-through `apply_head_activations` (one helper, two sigmoid channels).
+Activation policy: sigmoid on the contiguous `SIGMOID_SLICE =
+[0, N_AFF+1)` (aff + sem), linear on the trailing `raw` channel.
+Wrappers route their head output through `apply_head_activations` once.
 
-`dir`, `cov`, and `rad` are **skeleton-relative**: their targets are
-precomputed by `SkeletonGeometryd` in
-[brainbow/transforms/skeleton.py](../brainbow/transforms/skeleton.py)
-from a single per-instance Euclidean distance transform whose seeds
-are the instance's skeleton voxels (kimimaro or skimage fallback).
-See ARCHITECT.md §1.6 for the algorithm.
+`_common.py` also owns `AFFINITY_OFFSETS` / `N_PULL` (3 pull
+nearest-neighbour + 11 push long-range offsets), the
+`affinity_target_from_offsets` / `affinity_validity_mask` builders,
+`slice_head`, and the fp32-clamped `stable_bce_on_probs`.
 
-It also owns the 12-direction second-order affinity convention
-(`T1/B1/U1/D1/L1/R1/T2/B2/U2/D2/L2/R2`) and helpers such as
-`slice_head`, `affinity_target`, `soft_aff_from_field`, and
-`upper_tri_to_matrix`.
-
-`CombinedLoss` consumes the model's unified head tensor directly:
+`AffinityFGLoss` consumes the head tensor directly:
 
 ```python
-out = criterion(head, {
-    "labels": labels,
-    "raw_image": image,
-    "label_direction": direction,
-    "label_covariance": covariance,
-})
+out = criterion(head, {"labels": labels, "raw_image": image})
+# out -> {"loss", "loss/aff", "loss/sem", "loss/raw"}
 ```
-
-It emits scalar keys under `loss/<field>`:
 
 | Scalar group | Meaning |
 | ------------ | ------- |
-| `loss/raw` | raw reconstruction |
-| `loss/sem/{ce,dice}` | binary foreground supervision |
-| `loss/dir`, `loss/cov`, `loss/avg` | foreground-only regression fields |
-| `loss/emb/{pull,push,norm}` | discriminative embedding |
-| `loss/aff_emb/{ce,dice}` | 12-aff derived from embedding |
-| `loss/aff_avg/{ce,dice}` | 12-aff derived from avg |
+| `loss/aff` | masked + offset-weighted (pull/push) affinity composite (BCE + soft-Dice + focal) |
+| `loss/sem` | foreground (semantic) `DiceBCEFocalLoss` vs `labels > 0` |
+| `loss/raw` | L1 reconstruction of the input EM intensity |
 
 ---
 
-## 6. CombinedLoss: head-oriented key hierarchy
+## 6. Tag hierarchy (scalars ↔ image panels)
 
-`CombinedLoss` emits scalars using a field-oriented tag hierarchy that
-**mirrors the image-tag layout** emitted by
-`callbacks.tensorboard.ImageLogger`:
-
-```
-loss                                       # global total
-loss/<field>[/<component>]                 # per-field breakdown
-```
-
-When the same predicted *field* feeds both a visualisation and a loss,
-both live under the same `<field>` subgroup in TB.  Concrete pairs
-(see `image_logger.py` for the full image side):
-
-| image tag                                          | scalar tag(s)                                                          |
-| -------------------------------------------------- | ----------------------------------------------------------------------- |
-| `pred/emb/aff/{01_t1,...,12_r2}`                   | `loss/aff_emb`                                                          |
-| `pred/avg/aff/{01_t1,...,12_r2}`                   | `loss/aff_avg`                                                          |
-| `pred/dir`, `pred/cov`, `pred/raw`, `pred/avg/val` | `loss/dir`, `loss/cov`, `loss/raw`, `loss/avg`                          |
-| `true/avg/val`, `true/aff/{01_t1,...,12_r2}` (3-D only)| (target side of `loss/avg`, `loss/aff_*`)                           |
-
-This way, when TensorBoard alphabetically sorts tags, each field's
-scalars cluster next to its images — e.g. `train/automatic/loss/aff_emb`
-sits beside `train/automatic/pred/emb/aff/{01_t1,...}`.
-
-Note: the composite-loss heads (sem, skl, aff_emb, aff_avg) emit
-only the field-level total -- their three sub-terms (Dice, BCE,
-Focal) are already weighted-in by ``lambda_{bce,dice,focal}`` inside
-``DiceBCEFocalLoss``, so logging them separately would re-introduce
-the per-config-knob tuning loop the simplification was meant to
-eliminate.  Only the discriminative `emb` head still emits a
-per-sub-component breakdown (`loss/emb/{pull,push,norm}`).  See
-`GOTCHAS.md` entries #44 and #45 for the supervision-regime history.
-
-**Affinity tag ordering.**  Each affinity panel is prefixed with its
-1-based position in `brainbow.losses.DIRECTIONS`, zero-padded to two
-digits.  This forces TensorBoard's alphabetical sort to keep each
-axis-aligned pair on consecutive (even / odd) panel positions:
+Scalars and image panels share a `{stage}/{mode}/...` hierarchy so each
+field's loss sits next to its visualisation in TensorBoard:
 
 ```
-01_t1, 02_b1   # z stride 1   (top    / bottom)
-03_u1, 04_d1   # y stride 1   (up     / down)
-05_l1, 06_r1   # x stride 1   (left   / right)
-07_t2, 08_b2   # z stride 2
-09_u2, 10_d2   # y stride 2
-11_l2, 12_r2   # x stride 2
+loss                          # global total
+loss/{aff,sem,raw}            # per-field totals
+{sem,ins}/metric/<name>       # eval metrics
 ```
 
-**Visualisation-only mask on aff panels.**  The `pred/emb/aff`,
-`pred/avg/aff`, and `true/aff` panels are multiplied by the predicted
-semantic foreground (or GT labels for true panels) before being written
-to TB.  This is display-only; the loss uses the unmasked tensors.
+| image tag (`heads.py`)                 | scalar tag(s)                         |
+| -------------------------------------- | ------------------------------------- |
+| `pred/aff/{offset}`, `true/aff/{offset}` | `loss/aff`                          |
+| `pred/sem`                             | `loss/sem`, `sem/metric/{acc,iou,dice}` |
+| `pred/raw`                             | `loss/raw`                            |
+| `pred/label/{pre,mul}` (Mutex Watershed) | `ins/metric/{ari,ami,voi,ted}`      |
 
-**Convention:** all `loss/<field>/<sub>` scalars hold the unweighted
-sub-loss value; only `loss/<field>` and `loss` include the field/path
-weights.
-This is what lets you reason about each component's contribution
-independent of its multiplier in the current run.
+**Affinity tag ordering.**  Each affinity panel is named by its offset
+(`brainbow.losses.AFF_NAMES`, e.g. `01_pull_z1`, `04_push_y3`) with a
+1-based numeric prefix, so TensorBoard's alphabetical sort keeps the
+panels in offset order.  A curated subset (or all `N_AFF`) is chosen by
+`aff_panel_indices`.
+
+**Visualisation-only mask.**  The `pred/aff` panels are multiplied by
+the predicted `sem`, and `true/aff` by the GT foreground, before being
+written to TB.  Display-only; the loss uses the unmasked tensors.
 
 Task losses whose weight is `0.0` are **not instantiated** (not just
 zeroed) so training is faster and memory is smaller.
@@ -285,8 +221,8 @@ All modules in `brainbow.modules.*` inherit `BaseCircuitModule`, which
 captures the entire training/eval loop:
 
 1. forward the volume through the wrapper (`self.model`),
-2. apply `CombinedLoss`,
-3. accumulate per-head metrics during validation/test,
+2. apply `AffinityFGLoss`,
+3. accumulate foreground + Mutex Watershed instance metrics during validation/test,
 4. all-reduce once per epoch and log under the scalar hierarchy.
 
 Subclasses only declare:
@@ -294,7 +230,7 @@ Subclasses only declare:
 ```python
 class MyModule(BaseCircuitModule):
     _model_cls = MyWrapper
-    _loss_cls  = CombinedLoss
+    _loss_cls  = AffinityFGLoss
     # Optional: override configure_optimizers, freeze schedule hooks.
 ```
 
@@ -337,7 +273,7 @@ the child's overrides.  The real chain (parent → child) is::
 
 - `default.yaml`: every knob with a sensible default.  Also the
   canonical home for **shared model / loss hyperparameters**
-  (e.g. `model.boundary_channels`).
+  (e.g. `model.head_channels`).
 - `snemi3d.yaml`: SNEMI3D volume list + the bulk of the model / loss
   hyperparameters (batch size, augmentation mix, dense `loss:` block
   whose comments document every head and sub-weight, and the
@@ -436,16 +372,16 @@ Rules:
 
 ## 13. Checklist for adding a new ...
 
-### ... task loss
+### ... task term or affinity offset
 
-1. Create `losses/<name>.py` following the loss skeleton in §5.
-2. Declare `task_channels`, `_build_target_*`, `compute_weights`
-   (or default to `None`), `_compute_loss_*`, `forward`, `__repr__`.
-3. Register in `losses/__init__.py` and wire into `CombinedLoss`
-   with its own `weight_<name>` flag and result-dict section.
-4. Add a `<head>/loss/{component}` block to `CombinedLoss.forward`'s
-   output dict.
-5. Tests in `tests/test_losses.py` (shape / gradients / edge cases).
+1. To add a supervised term, add a `weight_<name>` field + a
+   `_loss_<name>` method to `AffinityFGLoss` (`losses/affinity.py`),
+   emit `loss/<name>` in `forward`, and list it in
+   `canonical_loss_keys()` (so the eval reducer pre-seeds it).
+2. To change the affinity edge set, edit `AFFINITY_OFFSETS` / `N_PULL`
+   in `losses/_common.py` — `HEAD_CHANNELS`, the target builders, and the
+   Mutex Watershed all re-derive from it; bump `model.head_channels`.
+3. Tests in `tests/test_losses.py` (shape / gradients / edge cases).
 
 ### ... model architecture
 

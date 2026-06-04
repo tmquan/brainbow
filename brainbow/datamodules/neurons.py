@@ -1,7 +1,7 @@
 """
 Neurons DataModule for PyTorch Lightning.
 
-Uses :class:`LazyVolDataset` for 3D patch mode and the legacy
+Uses :class:`LazyVolDataset` for 3D patch mode and
 :class:`NeuronsDataset` for 2D slice mode.
 """
 
