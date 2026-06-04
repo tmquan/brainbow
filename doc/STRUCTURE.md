@@ -6,9 +6,11 @@
 > **affinity + sem + raw** head (`brainbow/losses/affinity.py::AffinityFGLoss`,
 > layout in `brainbow/losses/_common.py`) with instances from the
 > **Mutex Watershed** (`brainbow/inference/mutex_watershed.py`). The file
-> `brainbow/losses/combined.py` is gone; `clusterer.py`, `utils/clustering.py`,
-> `manifold.py`, and `callbacks/tensorboard/geometry.py` are legacy / no
-> longer wired in. See [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md).
+> The following files have been **removed**: `brainbow/losses/combined.py`,
+> `brainbow/inference/clusterer.py`, `brainbow/utils/clustering.py`,
+> `brainbow/utils/manifold.py`, and `brainbow/callbacks/tensorboard/geometry.py`
+> (the old embedding-clusterer / geometry-overlay path). Table rows below
+> that still list them are stale. See [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md).
 
 What lives where.  For the *why* behind the layout (design patterns,
 conventions, adding-new-X checklists), see
