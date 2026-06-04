@@ -1,5 +1,14 @@
 # Brainbow — Code Organization & Design Patterns
 
+> **Migration note (affinity + Mutex Watershed head).** Sections that
+> describe the **32-channel `CombinedLoss`** unified head (raw/sem/skl/
+> dir/cov/rad/avg/emb, derived 12-direction `soft_aff`, `DIRECTIONS`) or
+> the embedding **clusterers** are stale: the head is now 16-channel
+> **affinity + sem + raw** (`AffinityFGLoss`) and instances come from the
+> parameter-free **Mutex Watershed**. The design-pattern principles below
+> still hold; for the current head / loss / eval specifics see
+> [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md).
+
 This document describes **how** the Brainbow codebase is organized and **why**
 — the recurring patterns that every new file should follow.  For a plain
 file-by-file tree, see [`STRUCTURE.md`](./STRUCTURE.md).

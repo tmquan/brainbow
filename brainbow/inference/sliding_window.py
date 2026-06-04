@@ -36,7 +36,7 @@ def sliding_window_inference(
 
     Args:
         model: Model returning ``[B, C, D, H, W]``.  For Brainbow,
-            ``C = HEAD_CHANNELS`` (currently 32).
+            ``C = HEAD_CHANNELS`` (affinity + sem + raw head).
         volume: Input volume ``[C, D, H, W]`` or ``[D, H, W]``.
         patch_size: Patch size ``(D, H, W)``.
         stride: Patch stride.  Defaults to ``patch_size // 2``.

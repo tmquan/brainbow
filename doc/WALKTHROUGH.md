@@ -1,5 +1,16 @@
 # Brainbow — End-to-end Walkthrough ("Follow One Batch")
 
+> **Migration note (affinity + Mutex Watershed head).** The training /
+> eval loop is unchanged in shape, but the head is now 16-channel
+> **affinity + sem + raw** (`AffinityFGLoss`, keys `loss/aff` `loss/sem`
+> `loss/raw`) instead of the 32-channel `CombinedLoss`, and validation
+> instances come from `self.agglomerator` (**Mutex Watershed**) rather
+> than `self.clusterer` / `build_clusterer`. Skeleton geometry
+> (skl/dir/cov/rad) is no longer used by the loss. Any step below
+> referencing `[B, 30/32, ...]`, `combined.py`, embedding clusterers, or
+> `pred/dir`/`pred/cov`/`pred/emb` panels is stale — see
+> [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md).
+
 > Audience: anyone who wants to understand how a single training step
 > actually flows through brainbow, with file paths and line numbers so
 > you can step through it in an editor.

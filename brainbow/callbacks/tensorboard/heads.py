@@ -25,7 +25,7 @@ from brainbow.losses import (
     AFF_NAMES,
     AFFINITY_OFFSETS,
     HEAD_CHANNELS,
-    N_ATTRACTIVE,
+    N_PULL,
     affinity_target_from_offsets,
     slice_head,
 )
@@ -33,24 +33,24 @@ from brainbow.losses import (
 
 def aff_panel_indices(
     n_offsets: int,
-    n_attractive: int,
-    max_repulsive: Optional[int] = None,
+    n_pull: int,
+    max_push: Optional[int] = None,
 ) -> List[int]:
     """Affinity channels to visualise.
 
-    By default every offset is shown (``max_repulsive=None`` -> all
-    ``n_offsets`` channels: the attractive nearest-neighbours followed by
-    every long-range repulsive offset).  Pass an integer ``max_repulsive``
-    to instead show all attractive offsets plus that many evenly-spaced
-    repulsive ones.
+    By default every offset is shown (``max_push=None`` -> all
+    ``n_offsets`` channels: the pull nearest-neighbours followed by
+    every long-range push offset).  Pass an integer ``max_push``
+    to instead show all pull offsets plus that many evenly-spaced
+    push ones.
     """
-    if max_repulsive is None:
+    if max_push is None:
         return list(range(n_offsets))
-    idxs = list(range(min(n_attractive, n_offsets)))
-    repulsive = list(range(n_attractive, n_offsets))
-    if repulsive and max_repulsive > 0:
-        step = max(1, len(repulsive) // max_repulsive)
-        idxs += repulsive[::step][:max_repulsive]
+    idxs = list(range(min(n_pull, n_offsets)))
+    push = list(range(n_pull, n_offsets))
+    if push and max_push > 0:
+        step = max(1, len(push) // max_push)
+        idxs += push[::step][:max_push]
     return idxs
 
 
@@ -84,7 +84,7 @@ def _log_predictions(
     epoch: int,
     *,
     offsets: Sequence[Sequence[int]] = AFFINITY_OFFSETS,
-    n_attractive: int = N_ATTRACTIVE,
+    n_pull: int = N_PULL,
     labels_3d: Optional[torch.Tensor] = None,
     seg_pred_2d: Optional[torch.Tensor] = None,
     wan_decoder_2d: Optional[torch.Tensor] = None,
@@ -111,7 +111,7 @@ def _log_predictions(
 
     head = ctx
     fields = slice_head(head_pred[:n])
-    indices = aff_panel_indices(len(offsets), n_attractive)
+    indices = aff_panel_indices(len(offsets), n_pull)
 
     # ----- true panels -----
     gt_fg_2d = rearrange((labels[:n] > 0).float(), "b ... -> b 1 ...")

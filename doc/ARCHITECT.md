@@ -1,5 +1,18 @@
 # Brainbow — Model Architecture & Parameter Budget
 
+> **Migration note (affinity + Mutex Watershed head).** The output head
+> changed: the old **32-channel `CombinedLoss`** unified head
+> (raw/sem/skl/dir/cov/rad/avg/emb + embedding clusterer) is gone. The
+> current head is **16-channel affinity + sem + raw** (`HEAD_CHANNELS =
+> N_AFF + 2`), supervised by `AffinityFGLoss`, with instances produced by
+> the parameter-free **Mutex Watershed**. This doc is still accurate for
+> the **backbone data flow and parameter budgets** (VAE / DiT / decoder);
+> any section below describing the **32-channel head, the skeleton
+> geometry fields (skl/dir/cov/rad/avg/emb), or `CombinedLoss`** is stale
+> — see [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md) for the current head,
+> loss, and eval. Note the shipped `snemi3d.yaml` default backbone is now
+> `cosmospredict3d` (Cosmos-Predict 2.5 2B) under DDP.
+
 Three end-to-end wrappers live under `brainbow/models/`:
 
 1. [`CosmosTransfer3DWrapper`](#1-cosmostransfer3dwrapper) — EM → pretrained Wan VAE → Cosmos-Transfer 2.5 (base DiT **+ ControlNet residual branch**) → one VISTA-style **32-channel unified head**.

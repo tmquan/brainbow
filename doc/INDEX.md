@@ -7,8 +7,8 @@ Pick the doc that matches *your* current question.  All six live in
 | ----------------------------------------------------------------- | ------------------------------------------------------------- |
 | "What is in each folder?"                                         | [`STRUCTURE.md`](./STRUCTURE.md)                              |
 | "Why is the code organised this way?  What pattern do you reach for?" | [`ORGANIZATION.md`](./ORGANIZATION.md)                    |
-| "What are the model channel layouts and the math behind each head?"  | [`ARCHITECT.md`](./ARCHITECT.md)                          |
-| "How does the affinity head + Mutex Watershed turn predictions into instances?" | [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md)        |
+| "How does the affinity head + loss + Mutex Watershed work (channel layout, math, eval)?" | [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md)        |
+| "What are the backbone parameter budgets / data flow?"               | [`ARCHITECT.md`](./ARCHITECT.md)                          |
 | "What actually happens when I run `python scripts/train.py`?  Take me through one batch." | [`WALKTHROUGH.md`](./WALKTHROUGH.md) |
 | "Why is my run silently doing the wrong thing?"                   | [`GOTCHAS.md`](./GOTCHAS.md)                                  |
 | "How do I add a new dataset / loss / backbone / transform?"       | [`CONTRIBUTING.md`](./CONTRIBUTING.md)                        |
@@ -25,8 +25,8 @@ Pick the doc that matches *your* current question.  All six live in
 
 ## Reading order for an ML researcher already familiar with PyTorch Lightning
 
-1. **[`ARCHITECT.md`](./ARCHITECT.md)** — channel layouts straight to the head math.
-2. **[`WALKTHROUGH.md`](./WALKTHROUGH.md)** — for the freeze schedule + clusterer dispatch.
+1. **[`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md)** — the affinity head, loss, and Mutex Watershed eval (the current head math).
+2. **[`WALKTHROUGH.md`](./WALKTHROUGH.md)** — for the freeze schedule + Mutex Watershed agglomeration at eval.
 3. **[`GOTCHAS.md`](./GOTCHAS.md)** — read this *before* you trust any number.
 
 ## Reading order for "future me, six months from now"

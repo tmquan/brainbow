@@ -4,7 +4,7 @@ PyTorch Lightning modules for connectomics segmentation training.
 Why this package exists
 -----------------------
 A Lightning module is the **glue** between a backbone wrapper
-(:mod:`brainbow.models`), the loss (:class:`brainbow.losses.CombinedLoss`),
+(:mod:`brainbow.models`), the loss (:class:`brainbow.losses.AffinityFGLoss`),
 and the Trainer.  Brainbow keeps the loop in one shared base
 (:class:`BaseCircuitModule`) so that every architecture gets the same
 training step, evaluation accumulation, scalar tag hierarchy and

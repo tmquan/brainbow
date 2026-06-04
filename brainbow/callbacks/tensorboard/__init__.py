@@ -11,11 +11,12 @@ where
 * ``stage``  -- ``"train"`` | ``"val"``
 * ``mode``   -- ``"automatic"`` (single mode today; structured so
   additional modes such as ``"prompted"`` can slot in later)
-* ``panel``  -- e.g. ``true/image``, ``true/avg/val``,
-  ``true/wan_decoder``, ``pred/raw``, ``pred/sem``, ``pred/avg/val``,
-  ``pred/avg/aff/01_t1``, ``pred/emb/_pca``, ``pred/label/{pre,mul}``.  Affinity panels are prefixed with their 1-based
-  position in :data:`brainbow.losses.DIRECTIONS` so the alphabetical
-  TB sort pairs each axis (T/B, U/D, L/R) on consecutive panels.
+* ``panel``  -- e.g. ``true/image``, ``true/label``, ``true/aff/*``,
+  ``true/wan_decoder``, ``pred/sem``, ``pred/raw``, ``pred/aff/*``,
+  ``pred/label/{pre,mul}`` (the Mutex Watershed instances).  Affinity
+  panels are named by their offset (``brainbow.losses.AFF_NAMES``, e.g.
+  ``01_pull_z1`` / ``04_push_y3``) with a 1-based numeric prefix so the
+  alphabetical TB sort keeps them in offset order.
 
 The scalar logs emitted by
 :class:`brainbow.modules.base.BaseCircuitModule` use the same
@@ -27,26 +28,15 @@ Module layout::
     tags.py           -- TagContext (tag assembly; single source of
                          truth for the ``{stage}/{mode}/`` hierarchy)
     viz.py            -- low-level image utilities (central-slice,
-                         per-image min-max normalise, HSV palette,
-                         manifold projection of embeddings)
-    geometry.py       -- ``pred/dir`` and ``pred/cov`` overlays in two
-                         renderer families, picked by
-                         ``image_logger.geometry_style``:
-                           * ``"glyph"`` (default) -- matplotlib quiver
-                             arrows for ``dir`` and ellipse glyphs for
-                             ``cov``; literal arrow / ellipse depiction.
-                           * ``"flow"``  -- vectorised optical-flow-style
-                             HSV colour map (no matplotlib, pure
-                             GPU-tensor ops, ~10× faster).
-                         Both styles soft-composite onto the raw EM
-                         using the predicted sigmoid sem as the
-                         per-pixel blend weight (matches
-                         ``pred/avg/val`` / ``pred/emb/_{algo}`` /
-                         ``pred/label/mul``).
-    heads.py          -- unified-head panel logger
+                         per-image min-max normalise, label HSV palette)
+    heads.py          -- affinity + sem + raw panel logger (incl. the
+                         Mutex Watershed ``pred/label`` instances)
     image_logger.py   -- Lightning callback ``ImageLogger`` (cache first
                          batch of each epoch, forward under eval +
                          autocast, dispatch)
+
+    (``geometry.py`` -- legacy ``pred/dir`` / ``pred/cov`` overlays for
+    the retired skeleton-geometry head; no longer wired in.)
 
 End-to-end flow (rank-0 only, once per ``every_n_epochs``)::
 
@@ -61,13 +51,13 @@ End-to-end flow (rank-0 only, once per ``every_n_epochs``)::
         └──────────┬─────────────┘
                    ▼
         ┌────────────────────────┐   move batch back to device, run a
-        │ ImageLogger            │   single eval-mode forward under
+        │ ImageLogger            │   per-image eval-mode forward under
         │ ._run_visualization    │   autocast, cast preds back to fp32
         └──────────┬─────────────┘
                    ▼
-        ┌────────────────────────┐   unified 32-channel head panels
-        │ heads._log_predictions │   (raw, sem, dir, cov, avg, emb,
-        │                        │   derived 12-aff panels)
+        ┌────────────────────────┐   affinity + sem + raw head panels
+        │ heads._log_predictions │   (pred/sem, pred/raw, pred/aff/*,
+        │                        │   Mutex Watershed pred/label/*)
         └──────────┬─────────────┘
                    ▼
         ┌────────────────────────┐

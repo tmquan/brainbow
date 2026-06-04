@@ -13,7 +13,7 @@ supervises both:
   composite (masked BCE + masked soft-Dice + optional focal).  Edges
   with a non-foreground endpoint are masked out (see
   :func:`~brainbow.losses._common.affinity_validity_mask`), and the
-  short-range *attractive* offsets and long-range *repulsive* offsets
+  short-range *pull* offsets and long-range *push* offsets
   carry independent weights.
 * **sem** -- the foreground / boundary (semantic) probability against
   ``labels > 0``, via the shared
@@ -38,8 +38,8 @@ the field weight) or a mapping ``{weight: ..., **sub_kwargs}``::
       lambda_dice: 1.0
       lambda_focal: 0.0
       gamma: 2.0
-      attractive_weight: 1.0     # multiplier on the nn (attractive) offsets
-      repulsive_weight: 1.0      # multiplier on the long-range offsets
+      pull_weight: 1.0     # multiplier on the nn (pull) offsets
+      push_weight: 1.0      # multiplier on the long-range offsets
       mask_to_foreground: true   # drop edges with a background endpoint
     weight_sem:
       weight: 1.0
@@ -72,7 +72,7 @@ from brainbow.losses._common import (
     AFFINITY_OFFSETS,
     SEM_SLICE,
     HEAD_CHANNELS,
-    N_ATTRACTIVE,
+    N_PULL,
     RAW_SLICE,
     affinity_target_from_offsets,
     affinity_validity_mask,
@@ -103,7 +103,7 @@ class AffinityFGLoss(nn.Module):
     Args:
         weight_aff: Field-level config for the affinity head (scalar or
             ``{weight, lambda_bce, lambda_dice, lambda_focal, gamma,
-            attractive_weight, repulsive_weight, mask_to_foreground}``).
+            pull_weight, push_weight, mask_to_foreground}``).
         weight_sem: Field-level config for the foreground (semantic) head
             (scalar or ``{weight, lambda_bce, lambda_dice, lambda_focal,
             gamma}``).
@@ -112,14 +112,14 @@ class AffinityFGLoss(nn.Module):
             ``l1 / mse / smooth_l1``).
         offsets: Affinity offsets ``(dz, dy, dx)``.  Defaults to
             :data:`brainbow.losses._common.AFFINITY_OFFSETS`.
-        n_attractive: Number of leading offsets treated as attractive
-            (the rest are repulsive).  Only affects the per-offset loss
+        n_pull: Number of leading offsets treated as pull
+            (the rest are push).  Only affects the per-offset loss
             weighting here; the actual mutex behaviour lives in the
             agglomerator.
         background: Label value treated as background when building the
             affinity target (its rows are zeroed).  ``None`` disables.
         ignore_index: Label value masked out of the foreground target
-            (those voxels contribute as background, like ``CombinedLoss``).
+            (those voxels contribute as background in the sem target).
     """
 
     num_channels: int = HEAD_CHANNELS
@@ -131,19 +131,23 @@ class AffinityFGLoss(nn.Module):
         weight_raw: HeadConfig = 1.0,
         *,
         offsets: Sequence[Sequence[int]] = AFFINITY_OFFSETS,
-        n_attractive: int = N_ATTRACTIVE,
+        n_pull: int = N_PULL,
         background: Optional[int] = -1,
         ignore_index: int = -100,
         eps: float = 1e-7,
         dice_eps: float = 1e-5,
+        aff_chunk_size: int = 4,
     ) -> None:
         super().__init__()
         self.offsets = tuple(tuple(int(c) for c in o) for o in offsets)
-        self.n_attractive = int(n_attractive)
+        self.n_pull = int(n_pull)
         self.background = int(background) if background is not None else None
         self.ignore_index = int(ignore_index)
         self.eps = float(eps)
         self.dice_eps = float(dice_eps)
+        # Offset-axis chunk size for the affinity loss (memory lever; the
+        # dense [B, N_AFF, D, H, W] stack is the largest step transient).
+        self.aff_chunk_size = int(aff_chunk_size)
 
         # ----- aff -----
         self.weight_aff, aff_kw = _split_field(weight_aff)
@@ -151,8 +155,8 @@ class AffinityFGLoss(nn.Module):
         self.aff_lambda_dice = float(aff_kw.pop("lambda_dice", 1.0))
         self.aff_lambda_focal = float(aff_kw.pop("lambda_focal", 0.0))
         self.aff_gamma = float(aff_kw.pop("gamma", 2.0))
-        self.attractive_weight = float(aff_kw.pop("attractive_weight", 1.0))
-        self.repulsive_weight = float(aff_kw.pop("repulsive_weight", 1.0))
+        self.pull_weight = float(aff_kw.pop("pull_weight", 1.0))
+        self.push_weight = float(aff_kw.pop("push_weight", 1.0))
         self.mask_to_foreground = bool(aff_kw.pop("mask_to_foreground", True))
         if aff_kw:
             import warnings
@@ -198,8 +202,8 @@ class AffinityFGLoss(nn.Module):
 
         # Per-offset channel weight vector (registered so it follows the
         # module's device / dtype under FSDP MixedPrecision).
-        ch_w = torch.full((len(self.offsets),), self.repulsive_weight)
-        ch_w[: self.n_attractive] = self.attractive_weight
+        ch_w = torch.full((len(self.offsets),), self.push_weight)
+        ch_w[: self.n_pull] = self.pull_weight
         self.register_buffer("_offset_weights", ch_w, persistent=False)
 
     # ------------------------------------------------------------------
@@ -242,45 +246,69 @@ class AffinityFGLoss(nn.Module):
     ) -> torch.Tensor:
         """Masked, offset-weighted composite on the affinity head.
 
-        ``probs`` / ``target`` are ``[B, N_AFF, D, H, W]`` (probs already
-        sigmoided).  ``mask`` is ``[B, N_AFF, D, H, W]`` (or ``None`` for
-        all-valid).  Channels are weighted by :attr:`_offset_weights`
-        (attractive vs repulsive).
+        ``probs`` is ``[B, N_AFF, D, H, W]`` (already sigmoided); ``target``
+        / ``mask`` are ``[B, N_AFF, D, H, W]`` ``uint8`` (or ``mask=None``
+        for all-valid).  Channels are weighted by :attr:`_offset_weights`
+        (pull vs push).
+
+        Computed by **chunking over the offset axis** so the peak fp32
+        intermediate is ``[B, chunk, D, H, W]`` rather than several
+        ``[B, N_AFF, D, H, W]`` tensors at once -- the dense affinity stack
+        is the largest transient in the step.  BCE / focal are summed and
+        the global soft-Dice numerator / denominator are accumulated across
+        chunks, so the result is numerically identical to the unchunked
+        form (sums are linear; Dice is a global ratio).
         """
-        probs = probs.float()
-        target = target.float()
-        ch_w = self._offset_weights.to(probs.device).view(1, -1, 1, 1, 1)
-        if mask is None:
-            mask = torch.ones_like(target)
-        else:
-            mask = mask.float()
-        weighted_mask = mask * ch_w
-        denom = weighted_mask.sum().clamp_min(1.0)
+        n = probs.shape[1]
+        ch_w = self._offset_weights.to(probs.device, torch.float32)
+        chunk = max(1, int(self.aff_chunk_size))
 
-        total = probs.new_zeros(())
+        zero = probs.new_zeros((), dtype=torch.float32)
+        bce_sum = zero.clone()
+        focal_sum = zero.clone()
+        wmask_sum = zero.clone()
+        dice_inter = zero.clone()
+        dice_pm = zero.clone()
+        dice_tm = zero.clone()
 
+        for c0 in range(0, n, chunk):
+            c1 = min(c0 + chunk, n)
+            p = probs[:, c0:c1].float()
+            t = target[:, c0:c1].float()
+            cw = ch_w[c0:c1].view(1, -1, 1, 1, 1)
+            if mask is None:
+                wm_full = torch.ones_like(p) * cw
+            else:
+                wm_full = mask[:, c0:c1].float() * cw
+            wmask_sum = wmask_sum + wm_full.sum()
+
+            if self.aff_lambda_bce > 0:
+                bce = stable_bce_on_probs(p, t, eps=self.eps)
+                bce_sum = bce_sum + (bce * wm_full).sum()
+
+            if self.aff_lambda_focal > 0:
+                pc = p.clamp(self.eps, 1.0 - self.eps)
+                p_t = t * pc + (1.0 - t) * (1.0 - pc)
+                focal = (1.0 - p_t).pow(self.aff_gamma) * (-p_t.log())
+                focal_sum = focal_sum + (focal * wm_full).sum()
+
+            if self.aff_lambda_dice > 0:
+                pm = p * wm_full
+                dice_inter = dice_inter + (pm * t).sum()
+                dice_pm = dice_pm + pm.sum()
+                dice_tm = dice_tm + (t * wm_full).sum()
+
+        denom = wmask_sum.clamp_min(1.0)
+        total = zero.clone()
         if self.aff_lambda_bce > 0:
-            bce = stable_bce_on_probs(probs, target, eps=self.eps)
-            total = total + self.aff_lambda_bce * (bce * weighted_mask).sum() / denom
-
+            total = total + self.aff_lambda_bce * bce_sum / denom
         if self.aff_lambda_focal > 0:
-            p = probs.clamp(self.eps, 1.0 - self.eps)
-            p_t = target * p + (1.0 - target) * (1.0 - p)
-            focal = (1.0 - p_t).pow(self.aff_gamma) * (-p_t.log())
-            total = total + self.aff_lambda_focal * (
-                focal * weighted_mask
-            ).sum() / denom
-
+            total = total + self.aff_lambda_focal * focal_sum / denom
         if self.aff_lambda_dice > 0:
-            # Masked soft Dice on probabilities, reduced over the whole
-            # (channel-weighted) volume.  1 - 2|p*t| / (|p| + |t|).
-            pm = probs * weighted_mask
-            tm = target * weighted_mask
-            inter = (pm * target).sum()
-            denom_d = (pm).sum() + (tm).sum()
-            dice = 1.0 - (2.0 * inter + self.dice_eps) / (denom_d + self.dice_eps)
+            dice = 1.0 - (2.0 * dice_inter + self.dice_eps) / (
+                dice_pm + dice_tm + self.dice_eps
+            )
             total = total + self.aff_lambda_dice * dice
-
         return total
 
     def _loss_sem(
@@ -390,7 +418,7 @@ class AffinityFGLoss(nn.Module):
         return (
             f"{self.__class__.__name__}("
             f"channels={self.num_channels}, n_offsets={len(self.offsets)}, "
-            f"n_attractive={self.n_attractive}, "
+            f"n_pull={self.n_pull}, "
             f"weight_aff={self.weight_aff}, weight_sem={self.weight_sem}, "
             f"weight_raw={self.weight_raw})"
         )

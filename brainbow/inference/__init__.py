@@ -8,34 +8,21 @@ Public surface
 --------------
 - :func:`brainbow.inference.sliding_window.sliding_window_inference`
   -- patch-wise blended inference over volumes that don't fit on the GPU.
-- :func:`brainbow.inference.clusterer.build_clusterer`
-  -- factory for the per-instance clustering step (soft mean-shift,
-  HDBSCAN, spatial connected-components).
-- :class:`brainbow.inference.clusterer.SoftMeanShift` and the other
-  ``*Clusterer`` classes that ``build_clusterer`` returns.
+- :class:`brainbow.inference.mutex_watershed.MutexWatershed` /
+  :func:`brainbow.inference.mutex_watershed.mutex_watershed` -- the
+  parameter-free agglomeration that turns predicted affinities into
+  instance ids (the production eval / inference path; see
+  :doc:`MUTEXWATERSHED`).
 
-Extending this module: a new clusterer should subclass
-:class:`brainbow.inference.clusterer._BaseUnsupervisedClusterer` and
-register itself in :func:`build_clusterer`'s ``_CLUSTERER_REGISTRY``.
-Sliding-window aggregation operates on the unified 32-channel head
-tensor; see :mod:`sliding_window` for the gaussian-blended patch
-fusion logic.
+Sliding-window aggregation operates on the affinity + sem + raw head
+tensor (``C = HEAD_CHANNELS``); see :mod:`sliding_window` for the
+gaussian-blended patch fusion logic.
 """
 
-from brainbow.inference.clusterer import (
-    HDBSCANClusterer,
-    SoftMeanShift,
-    SpatialCCClusterer,
-    build_clusterer,
-)
 from brainbow.inference.mutex_watershed import MutexWatershed, mutex_watershed
 from brainbow.inference.sliding_window import sliding_window_inference
 
 __all__ = [
-    "HDBSCANClusterer",
-    "SoftMeanShift",
-    "SpatialCCClusterer",
-    "build_clusterer",
     "MutexWatershed",
     "mutex_watershed",
     "sliding_window_inference",

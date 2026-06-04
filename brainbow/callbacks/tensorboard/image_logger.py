@@ -16,7 +16,7 @@ from einops import rearrange
 from brainbow.callbacks.tensorboard.heads import _log_predictions
 from brainbow.callbacks.tensorboard.tags import TagContext
 from brainbow.callbacks.tensorboard.viz import _to_2d
-from brainbow.losses import AFF_SLICE, AFFINITY_OFFSETS, N_ATTRACTIVE, SEM_SLICE
+from brainbow.losses import AFF_SLICE, AFFINITY_OFFSETS, N_PULL, SEM_SLICE
 
 
 class ImageLogger(pl.Callback):
@@ -37,8 +37,8 @@ class ImageLogger(pl.Callback):
 
     All tags live under ``{stage}/{mode}/...`` where
     ``stage`` ∈ {``train``, ``val``} and ``mode`` = ``"automatic"``.
-    The affinity panels show a curated subset of offsets (all attractive
-    nearest-neighbours plus a few long-range repulsive ones)::
+    The affinity panels show a curated subset of offsets (all pull
+    nearest-neighbours plus a few long-range push ones)::
 
         {stage}/automatic/true/image
         {stage}/automatic/true/label
@@ -61,25 +61,6 @@ class ImageLogger(pl.Callback):
         max_images: maximum batch elements to log (default 4).
         spatial_dims: 2 or 3 — controls central-slice extraction for 3-D.
         mode: mode name to place after the stage (default ``"automatic"``).
-        projection_algorithm: Manifold reducer for instance embeddings.
-            One of ``"pca"`` (default, linear), ``"svd"`` (linear, no
-            centering), or ``"umap"`` (non-linear, highlights local
-            cluster structure but ~10-100× slower).
-        projection_backend: Backend for the projection.  ``"auto"`` picks
-            cuML on CUDA inputs when RAPIDS is available, else torch /
-            umap-learn.  Explicit choices: ``"cuml"`` (forces GPU),
-            ``"torch"`` (pca/svd CPU or CUDA SVD), ``"umap-learn"``
-            (forces CPU UMAP).
-        geometry_style: Renderer family for the ``pred/dir`` and
-            ``pred/cov`` panels.  ``"glyph"`` (default) draws
-            matplotlib quiver arrows for ``dir`` and ellipse glyphs for
-            ``cov`` -- the most literal reading.  ``"flow"`` uses a
-            vectorised optical-flow-style HSV colour map (no
-            matplotlib, ~10× faster).  Both styles composite onto the
-            raw EM with the soft predicted sem as the per-pixel blend
-            weight.  Validated against
-            :data:`brainbow.callbacks.tensorboard.heads.GEOMETRY_STYLES`
-            at construction time so a typo in the YAML fails fast.
     """
 
     def __init__(
@@ -88,18 +69,12 @@ class ImageLogger(pl.Callback):
         max_images: int = 4,
         spatial_dims: int = 2,
         mode: str = "automatic",
-        projection_algorithm: str = "pca",
-        projection_backend: str = "auto",
-        geometry_style: str = "glyph",
     ) -> None:
         super().__init__()
         self.every_n_epochs = max(every_n_epochs, 1)
         self.max_images = max_images
         self.spatial_dims = spatial_dims
         self.mode = mode
-        self.projection_algorithm = projection_algorithm
-        self.projection_backend = projection_backend
-        self.geometry_style = geometry_style
         self._train_batch: Optional[Dict[str, torch.Tensor]] = None
         self._val_batch: Optional[Dict[str, torch.Tensor]] = None
 
@@ -243,7 +218,12 @@ class ImageLogger(pl.Callback):
             # sharded 1-D weights ("weight should have at least three
             # dimensions").  Identical behaviour under DDP / single.
             fwd_module = getattr(trainer, "model", None) or pl_module
-            head_pred = fwd_module(images[:n])
+            # Forward one image at a time to keep the epoch-end activation
+            # peak to a single sample (this runs on ALL ranks in addition
+            # to the GPU agglomeration below, so the peak matters near OOM).
+            head_pred = torch.cat(
+                [fwd_module(images[i:i + 1]) for i in range(n)], dim=0,
+            )
 
             # Wan-VAE reconstruction panel (Cosmos diagnostic) is a wrapper
             # METHOD, not the forward, so it can't ride the root unshard --
@@ -260,7 +240,8 @@ class ImageLogger(pl.Callback):
                 else getattr(pl_module.model, "wan_decoder_output", None)
             )
             wan_decoder_pred = (
-                wan_decoder(images[:n]) if callable(wan_decoder) else None
+                torch.cat([wan_decoder(images[i:i + 1]) for i in range(n)], dim=0)
+                if callable(wan_decoder) else None
             )
 
         # Autocast-returned tensors may be bf16/fp16.  Cast back to fp32
@@ -286,10 +267,10 @@ class ImageLogger(pl.Callback):
         agglomerator = getattr(pl_module, "agglomerator", None)
         seg_pred_2d = None
         offsets = AFFINITY_OFFSETS
-        n_attractive = N_ATTRACTIVE
+        n_pull = N_PULL
         if agglomerator is not None:
             offsets = getattr(agglomerator, "offsets", offsets)
-            n_attractive = getattr(agglomerator, "n_attractive", n_attractive)
+            n_pull = getattr(agglomerator, "n_pull", n_pull)
             if self.spatial_dims == 3:
                 aff = head_pred[:, AFF_SLICE].float()
                 sem_fg = head_pred[:, SEM_SLICE][:, 0] > 0.5
@@ -313,7 +294,7 @@ class ImageLogger(pl.Callback):
             tb, ctx, images_2d, labels_2d,
             head_pred, self.spatial_dims, n, epoch,
             offsets=offsets,
-            n_attractive=n_attractive,
+            n_pull=n_pull,
             labels_3d=labels[:n] if self.spatial_dims == 3 else None,
             seg_pred_2d=seg_pred_2d,
             wan_decoder_2d=wan_decoder_2d,

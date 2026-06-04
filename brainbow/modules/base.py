@@ -5,8 +5,9 @@ All modules in :mod:`brainbow.modules` (``Vista3DModule``,
 ``CosmosTransfer3DModule``) run the same training / evaluation loop:
 
 * forward the volume through the wrapper (``self.model``)
-* apply :class:`brainbow.losses.CombinedLoss`
-* accumulate per-head metrics during validation / test
+* apply :class:`brainbow.losses.AffinityFGLoss`
+* accumulate foreground + Mutex Watershed instance metrics during
+  validation / test
 * all-reduce once per epoch and log under a single scalar hierarchy
 
 This module captures that loop so the subclasses only have to declare
@@ -33,7 +34,7 @@ scalars for a given head collapse into the same TensorBoard group.
 import logging
 import warnings
 from collections import defaultdict
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 import torch.distributed as dist
@@ -57,16 +58,6 @@ from brainbow.losses import AFF_SLICE, SEM_SLICE
 _SPATIAL_AXES = {2: "h w", 3: "d h w"}
 
 
-def _head_field(
-    loss_config: Dict[str, Any], head: str, field: str, default: Any = None,
-) -> Any:
-    """Read a sub-loss field from a nested ``weight_<field>`` mapping."""
-    v = loss_config.get(f"weight_{head}")
-    if isinstance(v, Mapping) and field in v:
-        return v[field]
-    return default
-
-
 class BaseCircuitModule(pl.LightningModule):
     """Shared Lightning loop for Brainbow's segmentation modules.
 
@@ -75,7 +66,7 @@ class BaseCircuitModule(pl.LightningModule):
     * :attr:`_model_cls`  -- model wrapper class (called via
       :meth:`_build_model` with the ``model_config`` dict)
     * :attr:`_loss_cls`   -- loss class (typically
-      :class:`brainbow.losses.CombinedLoss`)
+      :class:`brainbow.losses.AffinityFGLoss`)
 
     Subclasses **may** override:
 
@@ -144,14 +135,14 @@ class BaseCircuitModule(pl.LightningModule):
 
         # Validation-time agglomeration: Mutex Watershed over the predicted
         # affinities (parameter-free; non-differentiable; CPU per crop).
-        # Offsets / n_attractive default to the loss's so the head, target,
+        # Offsets / n_pull default to the loss's so the head, target,
         # and agglomerator all share one edge convention.
         mws_config = dict(self.training_config.get("mutex_watershed", {}) or {})
         mws_config.setdefault(
             "offsets", getattr(self.criterion, "offsets", None),
         )
         mws_config.setdefault(
-            "n_attractive", getattr(self.criterion, "n_attractive", None),
+            "n_pull", getattr(self.criterion, "n_pull", None),
         )
         self.agglomerator = MutexWatershed(**mws_config)
 
@@ -203,8 +194,8 @@ class BaseCircuitModule(pl.LightningModule):
     ) -> Dict[str, torch.Tensor]:
         """Build the targets dict consumed by ``self.criterion``.
 
-        Also pre-builds ``targets["_cached_targets"]`` inside this
-        no-grad scope so avg / affinity / geometry target ops don't pay
+        Also pre-builds ``targets["_cached_targets"]`` (the affinity target
+        + validity mask) inside this no-grad scope so they don't pay
         autograd-tape overhead on every step.
         """
         ndim_with_channel = self._SPATIAL_DIMS + 2
@@ -214,18 +205,12 @@ class BaseCircuitModule(pl.LightningModule):
         if labels.dim() == ndim_with_channel:
             labels = rearrange(labels, squeeze)
 
-        # Binary FG/BG semantic target: foreground is anything with a
-        # positive instance id.  No multi-class semantic supervision is
-        # populated by any current datamodule.
+        # ``AffinityFGLoss`` consumes only the instance ``labels`` (affinity
+        # + foreground targets) and, for the raw head, the input image.
         targets: Dict[str, Any] = {"labels": labels}
-        needs_raw = (
-            getattr(self.criterion, "weight_raw", 0.0) > 0
-        )
+        needs_raw = getattr(self.criterion, "weight_raw", 0.0) > 0
         if "image" in batch and needs_raw:
             targets["raw_image"] = batch["image"]
-        for key in ("label_skl", "label_direction", "label_covariance", "label_radius"):
-            if key in batch:
-                targets[key] = batch[key]
         targets["_cached_targets"] = self.criterion.build_targets(
             targets["labels"], targets,
         )

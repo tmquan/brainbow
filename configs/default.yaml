@@ -124,16 +124,16 @@ loss:
   background: -1                  # aff target background mask; -1 = keep every voxel
 
   # Affinity head (per-offset P(same instance)).  Masked BCE + soft-Dice
-  # (+ optional focal) within the fg-fg validity mask; ``attractive_weight``
-  # / ``repulsive_weight`` rebalance the nn vs long-range offset groups.
+  # (+ optional focal) within the fg-fg validity mask; ``pull_weight``
+  # / ``push_weight`` rebalance the nn vs long-range offset groups.
   weight_aff:
     weight: 1.0
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 0.0
     gamma: 2.0
-    attractive_weight: 1.0
-    repulsive_weight: 1.0
+    pull_weight: 1.0
+    push_weight: 1.0
     mask_to_foreground: true
   # Foreground (semantic) head: sigmoid + composite Dice + BCE + Focal
   # vs ``labels > 0``.  ``gamma=0`` collapses Focal to plain BCE.
@@ -153,10 +153,10 @@ loss:
 training:
   # Validation-time agglomeration: Mutex Watershed over the predicted
   # affinities (parameter-free; non-differentiable; CPU per crop).
-  # ``offsets`` / ``n_attractive`` default to the loss's; leave unset
+  # ``offsets`` / ``n_pull`` default to the loss's; leave unset
   # unless you override ``AFFINITY_OFFSETS`` in
   # ``brainbow/losses/_common.py``.  ``strides`` subsamples the
-  # repulsive (long-range) edges only (throughput lever); ``size_filter``
+  # push (long-range) edges only (throughput lever); ``size_filter``
   # drops components smaller than N voxels.
   mutex_watershed:
     strides: [1, 4, 4]                  # [Z, Y, X]; dense Z, sparse in-plane
@@ -216,27 +216,10 @@ callbacks:
     enabled: true
     every_n_epochs: 1
     max_images: 4
-    # Manifold projection used for the `instance_<algo>` TB panel.
-    # algorithm: pca | svd | umap
-    #   - pca  (default): linear, centered SVD; fast & deterministic
-    #   - svd            : linear, uncentered; slightly cheaper than pca
-    #   - umap           : non-linear, highlights local clusters (~10-100× slower)
-    # backend:   auto | cuml | torch | umap-learn
-    #   - auto (default): cuML on CUDA when available, else torch / umap-learn
-    projection_algorithm: pca
-    projection_backend: auto
-    # Renderer style for the `pred/dir` and `pred/cov` panels.
-    # See ``brainbow/callbacks/tensorboard/geometry.py`` module docstring.
-    #   - glyph (default): matplotlib quiver arrows for `dir` and ellipse
-    #     glyphs for `cov`; the most literal reading of the predictions.
-    #     ~50ms / panel (matplotlib).
-    #   - flow            : optical-flow-style HSV colour map for both;
-    #     pure GPU-tensor ops, ~10× faster, but reads as a colour field
-    #     rather than discrete arrows / ellipses.
-    # Both styles composite onto the raw EM with the soft predicted sem
-    # as the per-pixel blend weight (matches `pred/avg/val`,
-    # `pred/emb/_{algo}`, `pred/label/mul`).
-    geometry_style: glyph
+    # Panels (rank 0, epoch end): true/image, true/label, true/aff/*,
+    # pred/sem, pred/raw, pred/aff/*, and the Mutex Watershed instance
+    # segmentation pred/label/{pre,mul}.  See
+    # ``brainbow/callbacks/tensorboard/heads.py``.
 
   # Clear the CUDA allocator cache on *both* sides of validation
   # (before + after).  Helps large 3-D models at the train/val boundary

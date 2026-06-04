@@ -10,30 +10,15 @@ I/O (:mod:`brainbow.utils.io`)
     * :func:`load_volume` / :func:`save_volume` -- format-agnostic
       reader / writer dispatching to :mod:`brainbow.preprocessors`.
 
-Clustering (:mod:`brainbow.utils.clustering`)
-    * :func:`cluster_embeddings` -- generic dispatch over per-voxel
-      embedding tensors (``soft_meanshift`` / ``hdbscan`` /
-      ``spatial_cc``).  Used both by inference-time clusterers and by
-      diagnostic notebooks.
-    * :func:`cluster_spatial_cc` -- connected-components clusterer on
-      the spatial-neighbour embedding-affinity graph.
-
-Manifold projection (:mod:`brainbow.utils.manifold`)
-    * :func:`project_batch` -- PCA / UMAP / t-SNE projection of
-      per-voxel embeddings for TensorBoard previews.
-
 Extending this module: anything reused by **two or more** subpackages
 and with no better home belongs here.  Anything used by exactly one
 subpackage should live next to its consumer.
 """
 
 from brainbow.utils.io import find_folder, load_volume, save_volume
-from brainbow.utils.clustering import cluster_embeddings, cluster_spatial_cc
 
 __all__ = [
     "find_folder",
     "load_volume",
     "save_volume",
-    "cluster_embeddings",
-    "cluster_spatial_cc",
 ]

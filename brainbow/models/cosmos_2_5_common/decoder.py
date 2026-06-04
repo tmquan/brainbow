@@ -1,11 +1,11 @@
 """Decoder-side modules shared by the Cosmos 2.5 wrappers.
 
-The decoder hosts one unified Vista-style task head that emits the
-canonical ``[B, 32, D, H, W]`` tensor consumed by
-``brainbow.losses.CombinedLoss``.  Activation policy is applied exactly
+The decoder hosts one unified task head that emits the canonical
+``[B, HEAD_CHANNELS, D, H, W]`` affinity + sem + raw tensor consumed by
+``brainbow.losses.AffinityFGLoss``.  Activation policy is applied exactly
 once here via :func:`brainbow.losses.apply_head_activations`: sigmoid on
-the semantic and skeleton channels (the contiguous run
-:data:`brainbow.losses.SIGMOID_SLICE`), linear everywhere else.
+the contiguous affinity + sem run (:data:`brainbow.losses.SIGMOID_SLICE`),
+linear on the trailing raw-reconstruction channel.
 """
 
 import logging
@@ -100,7 +100,7 @@ class _DecoderAdapter3D(nn.Module):
     """Reuses pretrained VAE decoder for multi-head volumetric segmentation.
 
     Replaces the decoder's final output convolution with the unified
-    32-channel task head while preserving all pretrained upsampling
+    affinity + sem + raw task head while preserving all pretrained upsampling
     weights.  The pretrained ``conv_out`` itself is kept on the side as
     :attr:`original_conv_out` (frozen) so the original Wan pixel
     reconstruction can still be emitted for diagnostic visualisation
@@ -157,7 +157,7 @@ class _DecoderAdapter3D(nn.Module):
         # ``ClassMappingClassify.image_post_mapping`` (2× residual
         # UnetrBasicBlock at a shared refinement width with instance
         # norm) and replaces the class-embedding mask-attention with a
-        # 1×1 conv so we can emit the 32-channel dense field.  Refinement
+        # 1×1 conv so we can emit the HEAD_CHANNELS dense field.  Refinement
         # runs at ``feature_size`` so parameter cost stays
         # independent of the VAE decoder's output width (``_hidden_ch``
         # can be much larger on the 14B variant).

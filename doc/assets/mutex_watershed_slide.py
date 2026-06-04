@@ -3,8 +3,8 @@
 A 6-voxel chain worked example whose merge / mutex decisions follow
 ``brainbow/inference/mutex_watershed.py::_mws_core`` exactly:
 
-* attractive (nearest-neighbour, "single-step") edges carry priority = affinity;
-* repulsive (long-range, "multi-step") edges carry priority = 1 - affinity;
+* pull (nearest-neighbour, "single-step") edges carry priority = affinity;
+* push (long-range, "multi-step") edges carry priority = 1 - affinity;
 * all edges are processed in descending priority with a union-find +
   mutual-exclusion constraints.
 
@@ -22,10 +22,10 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 # True segmentation: {1,2,3} | {4,5,6}.  Boundary is between node 3 and 4.
 POS = {i: (i - 1, 0.0) for i in range(1, 7)}
 
-# (u, v, priority) where priority = affinity for attractive edges.
-ATTR = [(1, 2, 0.95), (2, 3, 0.90), (3, 4, 0.08), (4, 5, 0.92), (5, 6, 0.93)]
-# (u, v, priority) where priority = 1 - affinity (repulsion strength).
-REP = [(2, 4, 0.88), (3, 5, 0.85), (1, 3, 0.12), (4, 6, 0.10)]
+# (u, v, priority) where priority = affinity for pull edges.
+PULL = [(1, 2, 0.95), (2, 3, 0.90), (3, 4, 0.08), (4, 5, 0.92), (5, 6, 0.93)]
+# (u, v, priority) where priority = 1 - affinity (push / separation strength).
+PUSH = [(2, 4, 0.88), (3, 5, 0.85), (1, 3, 0.12), (4, 6, 0.10)]
 
 GREEN = "#2e8b57"
 RED = "#c0392b"
@@ -66,8 +66,8 @@ def straight_edge(ax, u, v, color, weight=None, lw=2.2, ls="-", alpha=1.0):
 
 def arc_edge(ax, u, v, color, weight=None, lw=2.0, ls=(0, (4, 3)), rad=0.45):
     # Always bulge the arc UPWARD (negative rad for a left->right path) so
-    # repulsive long-range arcs sit above the chain, clear of the
-    # attractive nn edges and their weight labels.
+    # push long-range arcs sit above the chain, clear of the
+    # pull nn edges and their weight labels.
     (x0, y0), (x1, y1) = POS[u], POS[v]
     p = FancyArrowPatch((x0, y0), (x1, y1),
                         connectionstyle=f"arc3,rad={-abs(rad)}",
@@ -93,7 +93,7 @@ def base_axes(ax, title, ylim=(-1.25, 2.3)):
 # ---------------------------------------------------------------------------
 fig = plt.figure(figsize=(16, 9), dpi=130)
 fig.suptitle(
-    "Mutex Watershed: attractive (single-step) + repulsive (multi-step) "
+    "Mutex Watershed: pull (single-step) + push (multi-step) "
     "graph partition",
     fontsize=17, fontweight="bold", y=0.975,
 )
@@ -103,15 +103,15 @@ gs = fig.add_gridspec(2, 3, hspace=0.28, wspace=0.12,
 # ---- Panel 1: the affinity graph --------------------------------------
 ax = fig.add_subplot(gs[0, 0])
 base_axes(ax, "1.  Affinity graph (per-voxel edges)")
-for u, v, w in ATTR:
+for u, v, w in PULL:
     straight_edge(ax, u, v, GREEN, w)
-for u, v, w in REP:
+for u, v, w in PUSH:
     arc_edge(ax, u, v, RED, w, rad=0.5 if abs(u - v) == 2 else 0.32)
 for i in range(1, 7):
     draw_node(ax, i, "#eeeeee")
 ax.text(2.5, -1.05,
-        "solid green = attractive nearest-neighbour (priority = affinity)\n"
-        "dashed red = repulsive long-range / multi-step (priority = 1 - affinity)",
+        "solid green = pull nearest-neighbour (priority = affinity)\n"
+        "dashed red = push long-range / multi-step (priority = 1 - affinity)",
         ha="center", va="center", fontsize=9.0)
 
 # ---- Panel 2: sorted priority queue -----------------------------------
@@ -126,7 +126,7 @@ ax.text(0.02, y, "prio  edge        type        decision", fontsize=10.5,
 y -= 0.10
 for kind, u, v, p, dec in QUEUE:
     col = GREEN if kind == "a" else RED
-    sym = "attract" if kind == "a" else "repulse"
+    sym = "pull" if kind == "a" else "push"
     decol = {"merge": GREEN, "mutex": RED}.get(dec, "#333333")
     if dec == "BLOCKED":
         decol = RED
@@ -148,10 +148,10 @@ rule = (
     "   find roots ru, rv\n"
     "   if ru == rv:            skip\n"
     "   if mutex(ru, rv):       skip\n\n"
-    "   if edge is ATTRACTIVE:\n"
+    "   if edge is PULL:\n"
     "        union(ru, rv)\n"
     "        (merge clusters)\n\n"
-    "   if edge is REPULSIVE:\n"
+    "   if edge is PUSH:\n"
     "        add_mutex(ru, rv)\n"
     "        (forbid future merge)\n\n"
     "no threshold, no seeds\n"
@@ -159,11 +159,11 @@ rule = (
 )
 ax.text(0.04, 0.96, rule, fontsize=10.5, family="monospace", va="top")
 
-# ---- Panel 4: attractive merges ---------------------------------------
+# ---- Panel 4: pull merges ---------------------------------------
 ax = fig.add_subplot(gs[1, 0])
-base_axes(ax, "4.  High-priority attractive edges -> MERGE")
+base_axes(ax, "4.  High-priority pull edges -> MERGE")
 group = {1: CLUST_A, 2: CLUST_A, 3: CLUST_A, 4: CLUST_B, 5: CLUST_B, 6: CLUST_B}
-for u, v, w in ATTR:
+for u, v, w in PULL:
     if (u, v) in [(1, 2), (2, 3), (4, 5), (5, 6)]:
         straight_edge(ax, u, v, GREEN, lw=4.5)
     else:
@@ -172,14 +172,14 @@ for i in range(1, 7):
     draw_node(ax, i, group[i], text="white")
 ax.text(1.0, 1.5, "{1,2,3}", ha="center", color=CLUST_A, fontsize=12, fontweight="bold")
 ax.text(4.0, 1.5, "{4,5,6}", ha="center", color=CLUST_B, fontsize=12, fontweight="bold")
-ax.text(2.5, -1.05, "the four strongest edges are attractive within-object\n"
+ax.text(2.5, -1.05, "the four strongest edges are pull within-object\n"
         "edges -> union-find merges them into two clusters",
         ha="center", va="center", fontsize=9.0)
 
-# ---- Panel 5: repulsive mutex + blocked merge -------------------------
+# ---- Panel 5: push mutex + blocked merge -------------------------
 ax = fig.add_subplot(gs[1, 1])
 base_axes(ax, "5.  Repulsive edge -> MUTEX")
-for u, v, w in ATTR:
+for u, v, w in PULL:
     if (u, v) == (3, 4):
         straight_edge(ax, u, v, RED, lw=2.0, ls=(0, (1, 2)), alpha=0.8)
     else:
@@ -188,7 +188,7 @@ arc_edge(ax, 2, 4, RED, 0.88, lw=3.2, rad=0.5)
 # mutex wall between cluster A and B (between nodes 3 and 4 -> x=2.5)
 ax.plot([2.5, 2.5], [-0.7, 1.15], color=RED, lw=3.5, ls=(0, (3, 2)), zorder=5)
 ax.text(2.5, 1.4, "MUTEX", ha="center", color=RED, fontsize=11, fontweight="bold")
-# blocked X on the (3,4) attractive edge
+# blocked X on the (3,4) pull edge
 ax.text(2.5, 0.0, "x", ha="center", va="center", color=RED, fontsize=20,
         fontweight="bold", zorder=6)
 for i in range(1, 7):
@@ -213,8 +213,8 @@ for i in range(1, 7):
 ax.text(1.0, 1.5, "instance 1", ha="center", color=CLUST_A, fontsize=12, fontweight="bold")
 ax.text(4.0, 1.5, "instance 2", ha="center", color=CLUST_B, fontsize=12, fontweight="bold")
 ax.text(2.5, -1.05,
-        "attractive edges set what merges;\n"
-        "repulsive (multi-step) edges set where it must NOT",
+        "pull edges set what merges;\n"
+        "push (multi-step) edges set where it must NOT",
         ha="center", va="center", fontsize=9.0)
 
 out = __import__("os").path.join(__import__("os").path.dirname(__file__),

@@ -144,16 +144,13 @@ data:
   # prefetch_factor=2 (PyTorch's documented default for
   # ``DataLoader``).  Per-rank steady-state in-flight budget:
   #   in_flight_batches/rank = num_workers * prefetch_factor = 8*2 = 16
-  # Each in-flight item carries the 13-channel geometry quartet
-  # (skl + dir + cov + rad) at 80x256x256 float32 ~= 314 MB, so the
-  # geometry pool tops out near 16 * 314 MB ~= 5 GB/rank -- comfortably
-  # under the ~6 GB/rank ceiling we hit when the kimimaro shm leak
-  # (now fixed in ``brainbow/transforms/skeleton.py``) was also
-  # competing for ``/dev/shm``.  Picking ``2`` over ``1`` keeps one
-  # extra batch queued per worker so a momentarily-slow geometry
-  # transform doesn't stall the GPU step; drop to ``1`` if you need to
-  # claw back a few GB/rank and the loader is no longer the
-  # bottleneck.
+  # ``AffinityFGLoss`` builds its affinity / sem targets in-module from
+  # ``label`` (the affinity stack is uint8 and lives on-GPU, not in the
+  # loader), so each in-flight item carries only ``image`` + ``label``
+  # at 80x256x256 -- a light loader footprint.  Picking ``2`` over ``1``
+  # keeps one extra batch queued per worker so a momentarily-slow
+  # transform doesn't stall the GPU step; drop to ``1`` to claw back a
+  # little host RAM if the loader is no longer the bottleneck.
   prefetch_factor: 2
 
   # ---- Sampling & patch geometry ----
@@ -306,7 +303,7 @@ model:
   # Affinity + sem + raw output head (must match
   # brainbow.losses._common.HEAD_CHANNELS = N_AFF + 2):
   in_channels: 1                  # raw EM input -> 1 channel
-  # aff(N_AFF=14 offsets: 3 attractive nn + 11 repulsive long-range)
+  # aff(N_AFF=14 offsets: 3 pull nn + 11 push long-range)
   # + sem(1, sigmoid foreground) + raw(1, linear L1 reconstruction) = 16.
   # aff + sem are sigmoid probabilities (the affinities are agglomerated
   # into instances by the Mutex Watershed at eval time -- see
@@ -393,7 +390,7 @@ callbacks:
     # timeout.  Every rank pays one extra ``model(images[:max_images])`` +
     # ``wan_decoder`` decode at epoch end, so keep ``max_images`` modest.
     enabled: true
-    max_images: 4
+    max_images: 8
 
 
 # ---------------------------------------------------------------------
@@ -479,14 +476,14 @@ training:
   # ``brainbow/inference/mutex_watershed.py``).  It is non-differentiable
   # and runs on CPU per crop, so it is used at eval / inference only.
   #
-  # ``offsets`` and ``n_attractive`` default to the loss's (so the head,
+  # ``offsets`` and ``n_pull`` default to the loss's (so the head,
   # target, and agglomerator share one edge convention) -- leave them
   # unset unless you also override ``AFFINITY_OFFSETS`` in
   # ``brainbow/losses/_common.py``.
   #
   # Knobs:
-  #   strides      -- per-axis subsampling of the *repulsive* (long-range)
-  #                   edges only; attractive nn edges are always dense.
+  #   strides      -- per-axis subsampling of the *push* (long-range)
+  #                   edges only; pull nn edges are always dense.
   #                   Coarser strides => far fewer edges => much faster /
   #                   lighter MWS.  Default ``[1, 4, 4]`` keeps Z dense
   #                   (anisotropy) and takes every 4th in-plane.  This is
@@ -496,10 +493,10 @@ training:
   #                   are reset to background (despeckle).
   # -------------------------------------------------------------------
   mutex_watershed:
-    # Finer in-plane repulsive sampling (was [1,4,4]) so more long-range
+    # Finer in-plane push sampling (was [1,4,4]) so more long-range
     # mutex edges are available to actually cut true boundaries -- the
     # direct lever against the under-segmentation / merge collapse.
-    strides: [1, 2, 2]             # [Z, Y, X]; dense Z, denser in-plane repulsive
+    strides: [1, 2, 2]             # [Z, Y, X]; dense Z, denser in-plane push
     size_filter: 50
 
 
@@ -543,15 +540,15 @@ optimizer:
 #   raw: ch  N_AFF + 1      -> linear  L1 reconstruction of the input EM
 #
 # The first ``N_ATTRACTIVE`` (3) offsets are the nearest-neighbour
-# attractive edges (z, y, x); the rest are long-range repulsive edges.
+# pull edges (z, y, x); the rest are long-range push edges.
 # At eval the affinities are agglomerated into instances by the Mutex
 # Watershed (see ``training.mutex_watershed`` above).
 #
 # weight_aff / weight_sem / weight_raw are each a scalar or a
 # ``{weight, **sub_kwargs}`` mapping.  ``weight: 0`` disables the field.
 # Sub-knobs:
-#   - aff: ``lambda_{bce,dice,focal}`` + ``gamma``, ``attractive_weight`` /
-#     ``repulsive_weight`` (per-offset class weighting), and
+#   - aff: ``lambda_{bce,dice,focal}`` + ``gamma``, ``pull_weight`` /
+#     ``push_weight`` (per-offset class weighting), and
 #     ``mask_to_foreground`` (drop edges with a background endpoint).
 #   - sem: ``lambda_{bce,dice,focal}`` + ``gamma`` (DiceBCEFocalLoss).
 #   - raw: ``loss`` (``l1`` / ``mse`` / ``smooth_l1``).
@@ -561,16 +558,16 @@ loss:
   background: -1
 
   # Affinity head.  Within the fg-fg validity mask, same-instance
-  # (positive) affinities dominate for the short-range attractive
-  # offsets, while the long-range repulsive offsets carry the rare but
+  # (positive) affinities dominate for the short-range pull
+  # offsets, while the long-range push offsets carry the rare but
   # critical "must separate" signal -- so a focal term can be added
   # (``lambda_focal``) to redirect gradient onto the hard boundary
-  # edges.  ``attractive_weight`` / ``repulsive_weight`` rebalance the
+  # edges.  ``pull_weight`` / ``push_weight`` rebalance the
   # nn vs long-range offset groups if one dominates the loss.
   # Tuned to fight the merge-collapse failure (MWS under-segmenting as
   # the head predicts high affinity even across boundaries): a focal term
   # (lambda_focal) refocuses gradient on the rare low-affinity boundary
-  # edges, and repulsive_weight > attractive_weight emphasises the
+  # edges, and push_weight > pull_weight emphasises the
   # long-range "must separate" edges that drive the mutex constraints.
   weight_aff:
     weight: 1.0
@@ -578,8 +575,8 @@ loss:
     lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 2.0
-    attractive_weight: 1.0
-    repulsive_weight: 3.0
+    pull_weight: 1.0
+    push_weight: 5.0
     mask_to_foreground: true
   # Foreground (semantic) head: ``data.min_foreground: 0.80`` => ~80-95%
   # positive per crop, so foreground dominates.  Shrink ``lambda_bce``
@@ -588,9 +585,9 @@ loss:
   # gradient onto the rare boundary / ECS voxels).  Dice stays flat.
   weight_sem:
     weight: 1.0
-    lambda_bce: 0.5
+    lambda_bce: 1.0
     lambda_dice: 1.0
-    lambda_focal: 1.5
+    lambda_focal: 1.0
     gamma: 2.0
   # Raw reconstruction head: linear L1 regression of the (normalised)
   # input EM intensity -- an auxiliary self-supervised signal that

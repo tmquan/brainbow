@@ -1,5 +1,15 @@
 # Brainbow — File Structure
 
+> **Migration note (affinity + Mutex Watershed head).** The 32-channel
+> `CombinedLoss` unified head and the embedding clusterers
+> (mean-shift / HDBSCAN / spatial_cc) have been replaced by a 16-channel
+> **affinity + sem + raw** head (`brainbow/losses/affinity.py::AffinityFGLoss`,
+> layout in `brainbow/losses/_common.py`) with instances from the
+> **Mutex Watershed** (`brainbow/inference/mutex_watershed.py`). The file
+> `brainbow/losses/combined.py` is gone; `clusterer.py`, `utils/clustering.py`,
+> `manifold.py`, and `callbacks/tensorboard/geometry.py` are legacy / no
+> longer wired in. See [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md).
+
 What lives where.  For the *why* behind the layout (design patterns,
 conventions, adding-new-X checklists), see
 [`ORGANIZATION.md`](./ORGANIZATION.md).

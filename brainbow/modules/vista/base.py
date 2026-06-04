@@ -23,7 +23,7 @@ class BaseVistaModule(BaseCircuitModule):
     * :attr:`_SPATIAL_DIMS` -- 2 or 3
     * :attr:`_model_cls`    -- model wrapper class
     * :attr:`_loss_cls`     -- loss class (typically
-      :class:`brainbow.losses.CombinedLoss`)
+      :class:`brainbow.losses.AffinityFGLoss`)
     """
 
     def _build_model(self, model_config: Dict[str, Any]) -> torch.nn.Module:

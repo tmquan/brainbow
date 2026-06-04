@@ -2,16 +2,13 @@
 
 Contains the small, dependency-light helpers used by the per-head
 loggers: central-slice extraction, per-image min-max normalisation,
-HSV colour LUT, integer-label → pastel-RGB mapping, and manifold
-projection of instance embeddings.
+HSV colour LUT, and integer-label → pastel-RGB mapping.
 """
 
 from typing import Optional
 
 import torch
 from einops import rearrange, reduce
-
-from brainbow.utils.manifold import project_batch
 
 
 def _to_2d(t: torch.Tensor) -> torch.Tensor:
@@ -104,45 +101,10 @@ def _label_to_rgb(labels: torch.Tensor) -> torch.Tensor:
     return rearrange(rgb, "(b h w) c -> b c h w", b=B, h=H, w=W)
 
 
-def _project_embedding(
-    emb: torch.Tensor,
-    n_components: int = 3,
-    algorithm: str = "pca",
-    backend: str = "auto",
-) -> torch.Tensor:
-    """Project ``[B, E, H, W]`` embeddings → ``[B, 3, H, W]`` via per-image
-    manifold reduction.
-
-    The top ``n_components`` axes are used as RGB channels.  Each image in
-    the batch is reduced independently so colours are locally meaningful
-    (nearby pixels with similar embeddings receive similar colours).
-
-    Args:
-        emb: 4-D tensor of embeddings (after central-slice extraction for
-            volumetric models).
-        n_components: Number of output channels (typically 3 for RGB).
-        algorithm: ``"pca"`` | ``"svd"`` | ``"umap"``.
-        backend:   ``"auto"`` | ``"cuml"`` | ``"torch"`` | ``"umap-learn"``.
-
-    Uses cuML GPU estimators when the input lives on CUDA and RAPIDS is
-    installed; otherwise falls back to ``torch.linalg.svd`` (pca / svd)
-    or ``umap-learn`` (umap).  Ill-conditioned cases degrade to the
-    leading feature channels rather than crashing training.
-    """
-    _, _, H, W = emb.shape
-    flat = rearrange(emb, "b e h w -> b e (h w)").float()         # [B, E, N]
-    proj = project_batch(
-        flat, n_components=n_components, algorithm=algorithm, backend=backend,
-    )
-    proj = rearrange(proj, "b c (h w) -> b c h w", h=H, w=W)
-    return _normalise(proj)
-
-
 __all__ = [
     "_hsv_to_rgb",
     "_label_to_rgb",
     "_normalise",
-    "_project_embedding",
     "_to_2d",
 ]
 

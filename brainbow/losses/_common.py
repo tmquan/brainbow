@@ -13,15 +13,15 @@ The sigmoid is applied once by the wrapper via
 (:data:`SIGMOID_SLICE`); the trailing ``raw`` channel is left linear.
 
 The affinities are predicted for a fixed list of 3-D voxel offsets
-:data:`AFFINITY_OFFSETS` ``(dz, dy, dx)``.  The first :data:`N_ATTRACTIVE`
-offsets are the nearest-neighbour **attractive** edges (z, y, x); the
-remainder are long-range **repulsive** edges.  This is the edge set the
+:data:`AFFINITY_OFFSETS` ``(dz, dy, dx)``.  The first :data:`N_PULL`
+offsets are the nearest-neighbour **pull** (attractive) edges (z, y, x);
+the remainder are long-range **push** (repulsive) edges.  This is the edge set the
 Mutex Watershed (Wolf et al. 2018, *The Mutex Watershed*, CVPR) consumes
 at evaluation / inference time to agglomerate voxels into instances
 (see :mod:`brainbow.inference.mutex_watershed`).
 
 The default offset set is anisotropy-aware for EM: the long-range
-repulsive edges reach much further in-plane (Y, X) than across sections
+push edges reach much further in-plane (Y, X) than across sections
 (Z), matching the typical 1:5 axial:lateral resolution of connectomics
 volumes.
 
@@ -33,14 +33,14 @@ For a voxel ``v`` and offset ``o``, the affinity target is::
               = 0  otherwise
 
 i.e. a **high** affinity means "merge" (same object).  This is the
-``+`` (attractive) convention; the Mutex Watershed treats short-range
-offsets as attractive and the long-range offsets as repulsive (a high
+``+`` (pull) convention; the Mutex Watershed treats short-range
+offsets as pull and the long-range offsets as push (a high
 long-range affinity still means "same object", a low one is evidence of
 a mutual-exclusion / boundary).
 
 Public helpers
 --------------
-* :data:`AFFINITY_OFFSETS`, :data:`N_ATTRACTIVE`, :data:`N_AFF`,
+* :data:`AFFINITY_OFFSETS`, :data:`N_PULL`, :data:`N_AFF`,
   :data:`AFF_SLICE`, :data:`FG_SLICE`, :data:`HEAD_CHANNELS`,
   :data:`HEAD_LAYOUT` -- channel-layout constants.
 * :func:`slice_head` -- split a head tensor into ``{"aff", "fg"}``.
@@ -64,32 +64,30 @@ from __future__ import annotations
 
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 
 
 # ---------------------------------------------------------------------------
 # Channel layout (single source of truth)
 # ---------------------------------------------------------------------------
 
-# 3-D voxel offsets ``(dz, dy, dx)``.  The first ``N_ATTRACTIVE`` are the
-# nearest-neighbour attractive edges; the rest are long-range repulsive
-# edges.  Anisotropy-aware: the in-plane (Y, X) reach is much longer than
-# the across-section (Z) reach, matching typical EM resolution (~1:5).
+# 3-D voxel offsets ``(dz, dy, dx)``.  The first ``N_PULL`` are the
+# nearest-neighbour pull (attractive) edges; the rest are long-range push
+# (repulsive) edges.  Anisotropy-aware: the in-plane (Y, X) reach is much
+# longer than the across-section (Z) reach, matching EM resolution (~1:5).
 AFFINITY_OFFSETS: Tuple[Tuple[int, int, int], ...] = (
-    # --- attractive nearest neighbours (z, y, x) ---
+    # --- pull (attractive) nearest neighbours (z, y, x) ---
     (-1, 0, 0), (0, -1, 0), (0, 0, -1),
-    # --- repulsive long-range, in-plane ---
+    # --- push (repulsive) long-range, in-plane ---
     (0, -3, 0), (0, 0, -3),
     (0, -9, 0), (0, 0, -9),
     (0, -27, 0), (0, 0, -27),
     (0, -9, -9), (0, 9, -9),
-    # --- repulsive long-range, across sections (short, anisotropic) ---
+    # --- push (repulsive) long-range, across sections (short, anisotropic) ---
     (-2, 0, 0), (-3, 0, 0), (-4, 0, 0),
 )
-N_ATTRACTIVE: int = 3
+N_PULL: int = 3
 N_AFF: int = len(AFFINITY_OFFSETS)                                     # 14
 
 # Slice indices: ``[start, end)`` per field.  Affinities first, then the
@@ -115,10 +113,10 @@ HEAD_LAYOUT: Dict[str, slice] = {
     "raw": RAW_SLICE,
 }
 
-# Offset names for TensorBoard panels / logging (``a`` = attractive nn,
-# ``r`` = repulsive long-range), e.g. ``01_a_z``, ``04_r_y3``.
+# Offset names for TensorBoard panels / logging (``pull`` = attractive nn,
+# ``push`` = repulsive long-range), e.g. ``01_pull_z1``, ``04_push_y3``.
 def _offset_name(idx: int, offset: Tuple[int, int, int]) -> str:
-    kind = "a" if idx < N_ATTRACTIVE else "r"
+    kind = "pull" if idx < N_PULL else "push"
     dz, dy, dx = offset
     axis = "z" if dz else ("y" if dy else "x")
     mag = abs(dz or dy or dx)
@@ -238,27 +236,6 @@ def shift_replicate(
     return torch.cat([body, tail_pad], dim=axis)
 
 
-def shift_replicate_np(x: np.ndarray, axis: int, shift: int) -> np.ndarray:
-    """NumPy counterpart of :func:`shift_replicate` (for CPU target builds)."""
-    N = x.shape[axis]
-    k = abs(shift)
-    if k == 0:
-        return x
-    if k >= N:
-        raise ValueError(
-            f"shift_replicate_np: |shift|={k} >= axis-{axis} size {N}."
-        )
-    if shift > 0:
-        head = np.take(x, [0], axis=axis)
-        head_pad = np.repeat(head, k, axis=axis)
-        body = np.take(x, np.arange(0, N - k), axis=axis)
-        return np.concatenate([head_pad, body], axis=axis)
-    body = np.take(x, np.arange(k, N), axis=axis)
-    tail = np.take(x, [N - 1], axis=axis)
-    tail_pad = np.repeat(tail, k, axis=axis)
-    return np.concatenate([body, tail_pad], axis=axis)
-
-
 def shift_nd(
     x: torch.Tensor,
     offset: Sequence[int],
@@ -320,18 +297,20 @@ def affinity_target_from_offsets(
             masking.
 
     Returns:
-        ``[B, len(offsets), D, H, W]`` float (0/1) tensor.
+        ``[B, len(offsets), D, H, W]`` ``uint8`` (0/1) tensor.  ``uint8``
+        (not ``float32``) keeps this dense ``N_AFF``-channel target cheap
+        -- ~4x smaller -- since it is cached for the whole step; the loss
+        casts the slices it needs to float on the fly.
     """
-    per_offset = [
-        (labels == shift_nd(labels, offset)).to(torch.float32)
-        for offset in offsets
-    ]
-    out = rearrange(torch.stack(per_offset, dim=0), "c b d h w -> b c d h w")
+    n = len(offsets)
+    out = labels.new_zeros((labels.shape[0], n, *labels.shape[1:]),
+                           dtype=torch.uint8)
+    # Write each offset in place (no 14-element ``torch.stack`` peak).
+    for c, offset in enumerate(offsets):
+        out[:, c] = (labels == shift_nd(labels, offset)).to(torch.uint8)
     if background is not None:
-        mask = rearrange(
-            (labels != background).to(torch.float32), "b ... -> b 1 ...",
-        )
-        out = out * mask
+        fg = (labels != background).unsqueeze(1).to(torch.uint8)
+        out *= fg
     return out
 
 
@@ -353,11 +332,15 @@ def affinity_validity_mask(
         offsets: Iterable of ``(dz, dy, dx)`` offsets.
 
     Returns:
-        ``[B, len(offsets), D, H, W]`` float (0/1) mask.
+        ``[B, len(offsets), D, H, W]`` ``uint8`` (0/1) mask (cheap to
+        cache; the loss casts to float on the fly).
     """
-    fg_f = fg.to(torch.float32)
-    per_offset = [fg_f * shift_nd(fg_f, offset) for offset in offsets]
-    return rearrange(torch.stack(per_offset, dim=0), "c b d h w -> b c d h w")
+    fg_b = fg.to(torch.bool)
+    n = len(offsets)
+    out = fg_b.new_zeros((fg_b.shape[0], n, *fg_b.shape[1:]), dtype=torch.uint8)
+    for c, offset in enumerate(offsets):
+        out[:, c] = (fg_b & shift_nd(fg_b, offset)).to(torch.uint8)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -427,14 +410,14 @@ def stable_bce_on_probs(
 
 __all__ = [
     # Channel layout
-    "AFFINITY_OFFSETS", "N_ATTRACTIVE", "N_AFF",
+    "AFFINITY_OFFSETS", "N_PULL", "N_AFF",
     "AFF_SLICE", "SEM_SLICE", "RAW_SLICE", "SIGMOID_SLICE",
     "HEAD_CHANNELS", "HEAD_LAYOUT",
     "AFF_NAMES", "AFF_CHANNELS",
     # Helpers
     "slice_head",
     "apply_head_activations",
-    "shift_replicate", "shift_replicate_np", "shift_nd",
+    "shift_replicate", "shift_nd",
     "affinity_target_from_offsets", "affinity_validity_mask",
     "canonical_regression_name", "regression_loss_fn",
     "stable_bce_on_probs",

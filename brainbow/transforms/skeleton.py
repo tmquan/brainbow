@@ -536,9 +536,8 @@ def compute_skeleton_geometry(
             skel_per_uid = {}
             use_kimimaro = False
 
-    # Upper-tri (i, j) pairs in the canonical order used by
-    # :func:`brainbow.losses.upper_tri_to_matrix`: ``(0, 0), (0, 1),
-    # (0, 2), (1, 1), (1, 2), (2, 2)`` for 3-D, i.e.
+    # Upper-tri (i, j) pairs in the canonical row-major order
+    # ``(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)`` for 3-D, i.e.
     # ``(Czz, Czy, Czx, Cyy, Cyx, Cxx)``.  Stored as 2 × n_tri int
     # arrays so the cov accumulator can do all upper-tri products in
     # one ``offsets[i_idx] * offsets[j_idx]`` call.

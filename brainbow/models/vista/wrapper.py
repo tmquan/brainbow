@@ -84,8 +84,8 @@ class Vista3DWrapper(nn.Module):
         # ``ClassMappingClassify.image_post_mapping`` (2× residual
         # UnetrBasicBlock with instance norm) and replaces the class
         # embedding mask-attention with a per-voxel 1×1 projection so
-        # we can emit the 32-channel dense field consumed by
-        # ``CombinedLoss``.  Refinement runs at ``feature_size`` — the
+        # we can emit the HEAD_CHANNELS dense field consumed by
+        # ``AffinityFGLoss``.  Refinement runs at ``feature_size`` — the
         # same width the SegResNetDS2 encoder emits — matching the
         # reference VISTA3D network exactly.
         self.head = VistaTaskHead3D(

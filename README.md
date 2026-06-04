@@ -23,52 +23,46 @@ flowchart LR
     dm --> tr
     mod --> tr
     tr --> step["training_step"]
-    step --> wrap["Backbone wrapper<br/>VAE -> DiT -> unified head"]
-    wrap -->|"[B, 30, ...]"| loss["CombinedLoss"]
+    step --> wrap["Backbone wrapper<br/>VAE -> DiT -> affinity+sem+raw head"]
+    wrap -->|"[B, 16, ...]"| loss["AffinityFGLoss"]
     loss --> log["TensorBoard<br/>scalars + image panels"]
+    wrap -.->|"eval"| mws["Mutex Watershed<br/>(instances)"]
 ```
 
 Three end-to-end backbones live under `brainbow/models/`:
 
+- **`CosmosPredict3DWrapper`** — Cosmos-Predict 2.5 (base DiT + Wan VAE,
+  no ControlNet); the shipped default backbone for `snemi3d`.
 - **`CosmosTransfer3DWrapper`** — Cosmos-Transfer 2.5 (base DiT +
-  ControlNet residual branch + Wan VAE); one unified 32-channel head.
-- **`CosmosPredict3DWrapper`** — Cosmos-Predict 2.5 (base DiT + Wan
-  VAE, no ControlNet); same unified head, shares all scaffolding with
-  Transfer via `brainbow/models/cosmos_2_5_common/`.
-- **`Vista3DWrapper`** — SegResNetDS2; the same unified 32-channel head
-  for fast local iteration.
+  ControlNet residual branch + Wan VAE); shares all scaffolding with
+  Predict via `brainbow/models/cosmos_2_5_common/`.
+- **`Cosmos3Nano3DWrapper`** — Cosmos 3 (Nano) 16B omni transformer.
+- **`Vista3DWrapper`** — SegResNetDS2 for fast local iteration.
 
-For the channel layout and the math behind the loss, see
-[`doc/ARCHITECT.md`](doc/ARCHITECT.md).
+All emit the same affinity + sem + raw head.  For the channel layout,
+the loss, and the Mutex Watershed eval, see
+[`doc/MUTEXWATERSHED.md`](doc/MUTEXWATERSHED.md).
 
 ## What it does
 
-For every connected-component label `> 0` in a volumetric segmentation,
-`brainbow` trains one **32-channel per-voxel head**:
+Every backbone trains one **affinity + sem + raw per-voxel head**
+(`HEAD_CHANNELS = N_AFF + 2 = 16`):
 
 | channels | field | meaning |
 |---:|---|---|
-| 0 | `raw` | raw image reconstruction |
-| 1 | `sem` | foreground probability (sigmoid) |
-| 2 | `skl` | binary skeleton mask (sigmoid) |
-| 3-5 | `dir` | unit vector to the nearest same-instance skeleton voxel |
-| 6-11 | `cov` | upper-triangle Voronoi-cell covariance at the nearest skeleton vertex |
-| 12 | `rad` | distance to the nearest same-instance skeleton voxel (per-instance normalised by default) |
-| 13-15 | `avg` | normalised `(z, y, x)` instance centroid |
-| 16-31 | `emb` | 16-D discriminative embedding |
+| 0 .. N_AFF-1 (14) | `aff` | per-offset affinity `P(label[v] == label[v+offset])` (sigmoid) |
+| N_AFF (1) | `sem` | foreground / boundary probability (sigmoid) |
+| N_AFF+1 (1) | `raw` | input-EM reconstruction (linear, L1) |
 
-The loss also derives **12-direction, second-order face affinity** from
-both `avg` and `emb` and supervises those soft affinities against a
-label-derived binary target:
-
-```
-aff_field[c] = exp(-tau * sum_i |field[i] - shift_replicate(field[i], dir_c)|)
-```
-
-Voxels in the same instance share their predicted centroid so the
-kernel evaluates to ≈ 1; voxels across an instance boundary disagree
-on it and the kernel decays.  The 12 directions are
-`±1` and `±2` along each of Z, Y, and X.
+The affinity offsets (`brainbow.losses.AFFINITY_OFFSETS`) are 3 **pull**
+(attractive) nearest-neighbours plus 11 **push** (repulsive) long-range
+offsets (anisotropy-aware for EM).  `AffinityFGLoss` supervises the
+affinities (masked BCE + soft-Dice + focal) directly against the binary
+label-derived target; at evaluation / inference the predicted
+affinities are agglomerated into instances by the **parameter-free
+Mutex Watershed** (`brainbow.inference.mutex_watershed`, GPU or CPU).
+See [`doc/MUTEXWATERSHED.md`](doc/MUTEXWATERSHED.md) for the full design,
+the algorithm, and a worked example.
 
 ## Layout
 
@@ -93,8 +87,6 @@ brainbow/
 
 ```bash
 pip install -e ".[cosmos,dev]"
-# optional: RAPIDS GPU clustering
-pip install -e ".[gpu-cu13]" --extra-index-url https://pypi.nvidia.com
 ```
 
 ## Train
@@ -109,8 +101,8 @@ python scripts/train.py --config-name combine
 # DDP, custom batch size:
 python scripts/train.py --config-name combine data.batch_size=4 training.devices=4
 
-# Example: disable avg-affinity supervision.
-python scripts/train.py --config-name combine loss.weight_aff_avg.weight=0.0
+# Example: train affinities only (drop the sem + raw aux heads).
+python scripts/train.py --config-name combine loss.weight_sem.weight=0.0 loss.weight_raw.weight=0.0
 ```
 
 ### GPU memory: avoiding slow OOM drift on long runs
@@ -148,14 +140,15 @@ Watch the trajectory in TensorBoard under the `cuda_memory/*` tags
 ## Loss
 
 ```python
-from brainbow.losses import CombinedLoss, HEAD_CHANNELS, slice_head
+from brainbow.losses import AffinityFGLoss, HEAD_CHANNELS, slice_head
 
-loss_fn = CombinedLoss()
-# head:      [B, 30, D, H, W]
+loss_fn = AffinityFGLoss()
+# head:      [B, 16, D, H, W]   (HEAD_CHANNELS)
 # labels:    [B, D, H, W]
 # raw_image: [B, 1, D, H, W]
 out = loss_fn(head, {"labels": labels, "raw_image": raw_image})
-fields = slice_head(head)  # raw / sem / dir / cov / avg / emb views
+# out -> {"loss", "loss/aff", "loss/sem", "loss/raw"}
+fields = slice_head(head)  # {"aff", "sem", "raw"} views
 ```
 
 ## Tests
@@ -170,7 +163,8 @@ pytest tests/ -q
 | -------------------------------------------------------------- | ------------------------------------------------------------- |
 | Skim the codebase before doing anything                        | [`doc/STRUCTURE.md`](doc/STRUCTURE.md)                        |
 | Understand what one training batch actually does               | [`doc/WALKTHROUGH.md`](doc/WALKTHROUGH.md)                    |
-| Know the unified head's math + channel layout                  | [`doc/ARCHITECT.md`](doc/ARCHITECT.md)                        |
+| Know the head's channel layout, loss + Mutex Watershed         | [`doc/MUTEXWATERSHED.md`](doc/MUTEXWATERSHED.md)              |
+| Know the backbone parameter budgets                            | [`doc/ARCHITECT.md`](doc/ARCHITECT.md)                        |
 | Add a new dataset / loss / backbone / transform                | [`doc/CONTRIBUTING.md`](doc/CONTRIBUTING.md)                  |
 | Debug a silent failure (UMAP→PCA, head dropping, freeze, ...)  | [`doc/GOTCHAS.md`](doc/GOTCHAS.md)                            |
 | Tour all docs at once                                          | [`doc/INDEX.md`](doc/INDEX.md)                                |

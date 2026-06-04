@@ -1,22 +1,18 @@
 """
-Composite Dice + BCE + Focal loss for the (sem, skl, aff_*) heads.
+Composite Dice + BCE + Focal loss on probability inputs.
 
-This is the supervisor for every classification-style head in the
-unified 32-channel layout owned by :mod:`brainbow.losses._common`:
+Used by :class:`brainbow.losses.AffinityFGLoss` to supervise the
+foreground (``sem``) head, which receives a sigmoid in
+:func:`~brainbow.losses.apply_head_activations` before the loss is
+called.
 
-* ``sem`` (ch 1, post-sigmoid) and ``skl`` (ch 2, post-sigmoid)
-  receive a sigmoid in :func:`~brainbow.losses.apply_head_activations`
-  before the loss is called.
-* ``aff_emb`` and ``aff_avg`` receive their 12-channel face-affinity
-  scores from :func:`~brainbow.losses.soft_aff_from_field`, whose
-  kernel ``exp(-tau * sum |diff|)`` already lives in ``(0, 1]``.
-
-All four arrive at the loss as **probabilities**, which is why this
-module composes Dice (the imbalance-robust term) with a numerically-
-stable BCE-on-probs and a focal-loss-on-probs rather than calling
-MONAI's :class:`monai.losses.DiceCELoss` / :class:`monai.losses.FocalLoss`
-directly -- those use ``BCEWithLogitsLoss`` / softmax-on-logits paths
-internally and would double-activate a probability input.
+The input arrives as a **probability** (already in ``(0, 1)``), which is
+why this module composes Dice (the imbalance-robust term) with a
+numerically-stable BCE-on-probs and a focal-loss-on-probs rather than
+calling MONAI's :class:`monai.losses.DiceCELoss` /
+:class:`monai.losses.FocalLoss` directly -- those use
+``BCEWithLogitsLoss`` / softmax-on-logits paths internally and would
+double-activate a probability input.
 
 The composite total is::
 

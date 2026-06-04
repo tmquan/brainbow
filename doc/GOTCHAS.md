@@ -1,5 +1,18 @@
 # Brainbow — Gotchas and Silent Failure Modes
 
+> **Migration note (affinity + Mutex Watershed head).** Many entries
+> below predate the head change and reference the **32-channel
+> `CombinedLoss`** head (`HEAD_CHANNELS = 32`, fields
+> raw/sem/skl/dir/cov/rad/avg/emb, `weight_emb`/`weight_aff_emb`,
+> `soft_aff_from_field`, `DIRECTIONS`) or the embedding **clusterers**.
+> The current head is 16-channel **affinity + sem + raw**
+> (`HEAD_CHANNELS = 16`, `AffinityFGLoss`, weights `weight_aff` /
+> `weight_sem` / `weight_raw`), and instances come from the **Mutex
+> Watershed**. Entries about freeze schedules, Hydra, the lazy dataset,
+> `torch.compile`, kimimaro shm, and combine-AC4 are still valid; entries
+> about the old head / loss / clusterers are stale — see
+> [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md).
+
 > Audience: anyone debugging an unexpected result, looking for a
 > "this can't be right" moment, or onboarding a new contributor.
 
