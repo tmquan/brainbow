@@ -112,7 +112,7 @@ data:
   data_root: data/SNEMI3D
 
   # ---- Loader & batching ----
-  batch_size: 4
+  batch_size: 8
   # Validation/test batch size.  The eval path runs a full-resolution
   # decode + the SpatialCC clusterer + contingency-matrix metrics on top
   # of the 16B forward, so its per-batch peak FAR exceeds the train step
@@ -400,7 +400,7 @@ callbacks:
 # Training
 # ---------------------------------------------------------------------
 training:
-  max_epochs: 101
+  max_epochs: 301
   accelerator: auto
   devices: auto
   # FSDP FULL_SHARD so the 15.2B omni DiT shards weights/grads/optimizer
@@ -427,7 +427,7 @@ training:
   precision: bf16-mixed
   gradient_clip_val: 1.0
   accumulate_grad_batches: 1
-  limit_val_batches: 100
+  limit_val_batches: 50
   num_sanity_val_steps: 2
   log_every_n_steps: 100
   check_val_every_n_epoch: 20     # validate every 20 epochs (default 1)
@@ -496,7 +496,10 @@ training:
   #                   are reset to background (despeckle).
   # -------------------------------------------------------------------
   mutex_watershed:
-    strides: [1, 4, 4]             # [Z, Y, X]; dense Z, sparse in-plane repulsive
+    # Finer in-plane repulsive sampling (was [1,4,4]) so more long-range
+    # mutex edges are available to actually cut true boundaries -- the
+    # direct lever against the under-segmentation / merge collapse.
+    strides: [1, 2, 2]             # [Z, Y, X]; dense Z, denser in-plane repulsive
     size_filter: 50
 
 
@@ -564,14 +567,19 @@ loss:
   # (``lambda_focal``) to redirect gradient onto the hard boundary
   # edges.  ``attractive_weight`` / ``repulsive_weight`` rebalance the
   # nn vs long-range offset groups if one dominates the loss.
+  # Tuned to fight the merge-collapse failure (MWS under-segmenting as
+  # the head predicts high affinity even across boundaries): a focal term
+  # (lambda_focal) refocuses gradient on the rare low-affinity boundary
+  # edges, and repulsive_weight > attractive_weight emphasises the
+  # long-range "must separate" edges that drive the mutex constraints.
   weight_aff:
     weight: 1.0
     lambda_bce: 1.0
     lambda_dice: 1.0
-    lambda_focal: 0.0
+    lambda_focal: 1.0
     gamma: 2.0
     attractive_weight: 1.0
-    repulsive_weight: 1.0
+    repulsive_weight: 3.0
     mask_to_foreground: true
   # Foreground (semantic) head: ``data.min_foreground: 0.80`` => ~80-95%
   # positive per crop, so foreground dominates.  Shrink ``lambda_bce``

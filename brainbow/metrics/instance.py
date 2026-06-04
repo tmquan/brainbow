@@ -161,9 +161,11 @@ def compute_per_point_voi(
 ) -> VOIResult:
     """Variation of Information for a single sample.
 
-    VOI = H(true|pred) + H(pred|true)
-      - H(true|pred) = *split* error  (over-segmentation)
-      - H(pred|true) = *merge* error  (under-segmentation)
+    VOI = H(pred|true) + H(true|pred)  (standard Meila convention)
+      - H(pred|true) = *split* error  (over-segmentation: one GT object
+        cut into several predicted segments)
+      - H(true|pred) = *merge* error  (under-segmentation: one predicted
+        segment covering several GT objects)
 
     Args:
         pred_labels: Predicted instance labels [H, W] or [D, H, W].
@@ -182,17 +184,19 @@ def compute_per_point_voi(
 
     nz = cont > 0
 
-    # H(true|pred) -- split error
+    # H(true|pred) -- MERGE error (under-segmentation): a predicted segment
+    # spanning several GT objects leaves the GT label uncertain given pred.
     pred_counts_broadcast = np.broadcast_to(pred_counts[np.newaxis, :], cont.shape)
     h_true_given_pred = -np.sum((cont[nz] / n) * np.log2(cont[nz] / pred_counts_broadcast[nz]))
 
-    # H(pred|true) -- merge error
+    # H(pred|true) -- SPLIT error (over-segmentation): a GT object cut into
+    # several predicted segments leaves the pred label uncertain given GT.
     true_counts_broadcast = np.broadcast_to(true_counts[:, np.newaxis], cont.shape)
     h_pred_given_true = -np.sum((cont[nz] / n) * np.log2(cont[nz] / true_counts_broadcast[nz]))
 
     return VOIResult(
-        split=float(h_true_given_pred),
-        merge=float(h_pred_given_true),
+        split=float(h_pred_given_true),
+        merge=float(h_true_given_pred),
         total=float(h_true_given_pred + h_pred_given_true),
     )
 
