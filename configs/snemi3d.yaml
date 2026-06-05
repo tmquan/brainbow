@@ -115,7 +115,7 @@ data:
   # NOTE: cut from 4 to 2 because ``model.input_supersample: 2`` quadruples
   # the in-plane latent voxels (~4x DiT tokens + VAE work).  Raise back
   # toward 4-8 if you set ``input_supersample: 1``.
-  batch_size: 4
+  batch_size: 8
   # Validation/test batch size.  The eval path runs a full-resolution
   # decode + the Mutex Watershed + contingency-matrix metrics on top of
   # the forward, so its per-batch peak exceeds the train step.  Under DDP
@@ -125,7 +125,7 @@ data:
   # (A per-batch OOM is also caught and skipped -- see
   # ``BaseCircuitModule._eval_step_and_accumulate``.)  Pinned to 1 under
   # ``input_supersample: 2``.
-  val_batch_size: 4
+  val_batch_size: 8
   num_workers: 8
   # persistent_workers=true.  A ``/dev/shm`` blow-up can occur if a
   # transform forks pathos subprocesses inside DataLoader workers
@@ -442,13 +442,13 @@ training:
   precision: bf16-mixed
   gradient_clip_val: 1.0
   accumulate_grad_batches: 1
-  limit_val_batches: 100
-  # Pre-training sanity validation.  At init the affinity head is
-  # near-random, so the Mutex Watershed is in its slowest regime (many
-  # fragments / long mutex chains); the GPU-assisted agglomeration (GPU
-  # edge build + sort, CPU sequential core) keeps that to ~seconds/crop,
-  # so 2 sanity steps are fine.  Set to 0 to skip entirely.
-  num_sanity_val_steps: 2
+  limit_val_batches: 50
+  # Pre-training sanity validation.  Disabled (0): a sanity pass on the
+  # near-random init head gives no useful signal, and it would run the
+  # agglomeration on garbage affinities.  The GPU path (mws_cp) handles
+  # that in ~0.2s, but the CPU fallback (mws_np) does not -- so 0 keeps
+  # startup safe regardless of whether cupy is available on the node.
+  num_sanity_val_steps: 0
   log_every_n_steps: 100
   check_val_every_n_epoch: 20     # validate every 20 epochs (default 1)
   benchmark: true
@@ -496,8 +496,9 @@ training:
   # -------------------------------------------------------------------
   # The affinity head's per-offset predictions are turned into discrete
   # instance IDs by the parameter-free Mutex Watershed (Wolf et al. 2018;
-  # ``brainbow/inference/mutex_watershed.py``).  It is non-differentiable
-  # and runs on CPU per crop, so it is used at eval / inference only.
+  # ``brainbow/inference/mutex_watershed.py``).  Non-differentiable, eval /
+  # inference only.  ``backend`` selects the GPU cupy Boruvka (mws_cp,
+  # default on CUDA) or the exact numpy/numba core (mws_np); see below.
   #
   # ``offsets`` and ``n_pull`` default to the loss's (so the head,
   # target, and agglomerator share one edge convention) -- leave them
@@ -516,11 +517,27 @@ training:
   #                   are reset to background (despeckle).
   # -------------------------------------------------------------------
   mutex_watershed:
-    # Finer in-plane push sampling makes more long-range mutex edges
-    # available to cut true boundaries -- the direct lever against
-    # under-segmentation / merge collapse (coarsen to lower edge count).
-    strides: [1, 2, 2]             # [Z, Y, X]; dense Z, denser in-plane push
+    # Push-edge subsampling [Z, Y, X]: Z dense, every 2nd in-plane push.
+    # The fine [1,2,2] setting keeps more long-range mutex edges to cut
+    # true boundaries (fights under-seg), at the cost of a larger edge
+    # graph (~30M edges/crop) -- fine for the GPU mws_cp path here; if the
+    # CPU fallback (mws_np) is ever used at this stride, set max_push_edges
+    # or coarsen to [1,4,4] to bound the build.
+    strides: [1, 2, 2]             # [Z, Y, X]; dense Z, every 2nd in-plane push
     size_filter: 50
+    # Backend dispatch (MutexWatershed): "auto" runs the GPU cupy Boruvka
+    # (mws_cp) on CUDA inputs -- ~5x faster than the CPU core on full crops
+    # and ~0.2s on cold-start random affinities (the case that hung the CPU
+    # for an hour) -- and falls back to the exact numpy/numba core (mws_np)
+    # on CPU inputs or when cupy is unavailable.  "cpu" forces mws_np.
+    backend: auto
+    # Priority buckets for the GPU Boruvka approximation.  16 gives ARI
+    # ~0.99 vs the exact CPU core at near-CPU speed; higher = closer to
+    # exact but more rounds; far higher (256) is much slower.
+    buckets: 16
+    # Hard cap on push (mutex) edges per crop (both paths): bounds the
+    # mutex bookkeeping / build memory.  null (or 0) = no cap (full edges).
+    max_push_edges: null
 
 
 # ---------------------------------------------------------------------

@@ -152,7 +152,8 @@ loss:
 # Training configuration
 training:
   # Validation-time agglomeration: Mutex Watershed over the predicted
-  # affinities (parameter-free; non-differentiable; CPU per crop).
+  # affinities (parameter-free; non-differentiable; GPU mws_cp by default
+  # on CUDA inputs, exact numpy/numba mws_np fallback).
   # ``offsets`` / ``n_pull`` default to the loss's; leave unset
   # unless you override ``AFFINITY_OFFSETS`` in
   # ``brainbow/losses/_common.py``.  ``strides`` subsamples the
