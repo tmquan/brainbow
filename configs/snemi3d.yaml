@@ -112,7 +112,10 @@ data:
   data_root: data/SNEMI3D
 
   # ---- Loader & batching ----
-  batch_size: 8
+  # NOTE: cut from 4 to 2 because ``model.input_supersample: 2`` quadruples
+  # the in-plane latent voxels (~4x DiT tokens + VAE work).  Raise back
+  # toward 4-8 if you set ``input_supersample: 1``.
+  batch_size: 4
   # Validation/test batch size.  The eval path runs a full-resolution
   # decode + the Mutex Watershed + contingency-matrix metrics on top of
   # the forward, so its per-batch peak exceeds the train step.  Under DDP
@@ -120,7 +123,8 @@ data:
   # and corrupts the survivors' epoch-end reduction.  Keep val modest to
   # stay under the per-GPU ceiling; raise once you've confirmed headroom.
   # (A per-batch OOM is also caught and skipped -- see
-  # ``BaseCircuitModule._eval_step_and_accumulate``.)
+  # ``BaseCircuitModule._eval_step_and_accumulate``.)  Pinned to 1 under
+  # ``input_supersample: 2``.
   val_batch_size: 4
   num_workers: 8
   # persistent_workers=true.  A ``/dev/shm`` blow-up can occur if a
@@ -308,6 +312,23 @@ model:
   head_channels: 16
   feature_size: 64
 
+  # --- Effective latent resolution (membrane sharpness) ---
+  # The pretrained Cosmos VAE has a FIXED 8x in-plane spatial compression,
+  # so a 1-voxel membrane lands inside one latent cell and the decode is
+  # blurry -> soft affinities -> Mutex Watershed under-segmentation.
+  # ``input_supersample`` upsamples the EM in-plane *before* the VAE, so
+  # the latent grid is ``input/8`` of a larger image: at 2 the latent is
+  # H/4, W/4 of the original (vs H/8, W/8 at 1) -- 2x finer per membrane.
+  # Cost: ~factor^2 more DiT tokens + VAE work (Z is left alone, matching
+  # anisotropy), so cut ``data.batch_size`` to fit.  ``1`` disables.
+  input_supersample: 1            # 2 -> latent H/4, W/4 (was H/8, W/8)
+  # Full-resolution input skip into the head: routes the raw EM's sharp
+  # edges *around* the VAE bottleneck and fuses them before the head.
+  # Independent of input_supersample; can be combined.  Disabled here so
+  # the supersample experiment is isolated.
+  highres_skip: true
+  highres_skip_channels: 8
+
   # What to freeze.  Cosmos 3 has no ControlNet residual branch to
   # absorb the trainable load, so leaving the omni transformer
   # permanently frozen would mean only the heads + last VAE-decoder
@@ -387,7 +408,7 @@ callbacks:
     # timeout.  Every rank pays one extra ``model(images[:max_images])`` +
     # ``wan_decoder`` decode at epoch end, so keep ``max_images`` modest.
     enabled: true
-    max_images: 8
+    max_images: 4
 
 
 # ---------------------------------------------------------------------
@@ -421,7 +442,7 @@ training:
   precision: bf16-mixed
   gradient_clip_val: 1.0
   accumulate_grad_batches: 1
-  limit_val_batches: 50
+  limit_val_batches: 100
   # Pre-training sanity validation.  At init the affinity head is
   # near-random, so the Mutex Watershed is in its slowest regime (many
   # fragments / long mutex chains); the GPU-assisted agglomeration (GPU
@@ -576,7 +597,7 @@ loss:
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 2.0
+    gamma: 5.0
     pull_weight: 1.0
     push_weight: 5.0
     mask_to_foreground: true
@@ -590,7 +611,7 @@ loss:
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 2.0
+    gamma: 5.0
   # Raw reconstruction head: linear L1 regression of the (normalised)
   # input EM intensity -- an auxiliary self-supervised signal that
   # stabilises the shared decoder features.

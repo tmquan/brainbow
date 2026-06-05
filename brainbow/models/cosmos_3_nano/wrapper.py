@@ -685,7 +685,9 @@ class Cosmos3Nano3DWrapper(_BaseCosmos25Wrapper):
             head_param = next(self.decoder_adapter.head.parameters(), None)
             if head_param is not None and features.dtype != head_param.dtype:
                 features = features.to(head_param.dtype)
-            return self.decoder_adapter(features, target_size=target_size)
+            return self.decoder_adapter(
+                features, target_size=target_size, image=x,
+            )
 
     def _install_time_embedder_dtype_guard(self) -> None:
         """Cast the fp32 timestep embedding to ``time_embedder``'s dtype.
