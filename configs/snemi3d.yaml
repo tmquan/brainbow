@@ -115,7 +115,7 @@ data:
   # NOTE: cut from 4 to 2 because ``model.input_supersample: 2`` quadruples
   # the in-plane latent voxels (~4x DiT tokens + VAE work).  Raise back
   # toward 4-8 if you set ``input_supersample: 1``.
-  batch_size: 8
+  batch_size: 2
   # Validation/test batch size.  The eval path runs a full-resolution
   # decode + the Mutex Watershed + contingency-matrix metrics on top of
   # the forward, so its per-batch peak exceeds the train step.  Under DDP
@@ -125,7 +125,7 @@ data:
   # (A per-batch OOM is also caught and skipped -- see
   # ``BaseCircuitModule._eval_step_and_accumulate``.)  Pinned to 1 under
   # ``input_supersample: 2``.
-  val_batch_size: 8
+  val_batch_size: 2
   num_workers: 8
   # persistent_workers=true.  A ``/dev/shm`` blow-up can occur if a
   # transform forks pathos subprocesses inside DataLoader workers
@@ -296,8 +296,8 @@ data:
 # that exposes ``Cosmos3OmniTransformer``; Cosmos 3 is BF16-only.
 # ---------------------------------------------------------------------
 model:
-  type: cosmospredict3d
-  variant: "2B"
+  type: cosmos3nano3d
+  variant: "Nano"
   dtype: "bf16"
   pretrained: true                # auto-pulls nvidia/Cosmos-Predict2.5-2B from HF
 
@@ -326,7 +326,7 @@ model:
   # edges *around* the VAE bottleneck and fuses them before the head.
   # Independent of input_supersample; can be combined.  Disabled here so
   # the supersample experiment is isolated.
-  highres_skip: true
+  highres_skip: false
   highres_skip_channels: 8
 
   # What to freeze.  Cosmos 3 has no ControlNet residual branch to
@@ -384,8 +384,8 @@ model:
   # Cosmos-Predict DiT fits comfortably under DDP at this batch size, so
   # activation checkpointing is not needed here.  If you later OOM (e.g.
   # bigger crops / batch), flip back to ``true`` or lower ``data.batch_size``.
-  gradient_checkpointing: false
-  dropout: 0.2
+  gradient_checkpointing: true
+  dropout: 0.0
 
 
 # ---------------------------------------------------------------------
@@ -439,10 +439,10 @@ training:
   # ``bf16-mixed`` is the recommended DDP precision: params stay fp32 with
   # an outer bf16 autocast over the step.  (``bf16-true`` is for the
   # natively-bf16 Cosmos3 backbone under FSDP MixedPrecision.)
-  precision: bf16-mixed
+  precision: bf16-true
   gradient_clip_val: 1.0
   accumulate_grad_batches: 1
-  limit_val_batches: 50
+  limit_val_batches: 200
   # Pre-training sanity validation.  Disabled (0): a sanity pass on the
   # near-random init head gives no useful signal, and it would run the
   # agglomeration on garbage affinities.  The GPU path (mws_cp) handles
@@ -476,7 +476,7 @@ training:
   # records, the Cosmos-2.5 backbones tolerate "reduce-overhead"
   # cudagraphs (their hook-captured tensors are not cudagraph-managed),
   # unlike cosmos3nano3d which MUST stay false/"default".
-  compile: true
+  compile: false
   # compile_fullgraph=true forces a single monolithic Inductor compile
   # of the 2B DiT (no graph breaks), which gives the best steady-state
   # runtime but pays for it with a multi-minute first-step stall.
@@ -489,7 +489,7 @@ training:
   # the first step lands: ``false`` lets Inductor compile
   # incrementally with graph breaks, trading ~10% runtime for a much
   # shorter first-step.
-  compile_fullgraph: true
+  compile_fullgraph: false
 
   # -------------------------------------------------------------------
   # Validation-time agglomeration: Mutex Watershed
