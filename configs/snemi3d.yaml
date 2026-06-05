@@ -415,7 +415,7 @@ callbacks:
 # Training
 # ---------------------------------------------------------------------
 training:
-  max_epochs: 301
+  max_epochs: 101
   accelerator: auto
   devices: auto
   # FSDP FULL_SHARD so the 15.2B omni DiT shards weights/grads/optimizer
