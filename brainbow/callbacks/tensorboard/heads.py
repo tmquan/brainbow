@@ -133,11 +133,20 @@ def _log_predictions(
     )
 
     if wan_decoder_2d is not None:
-        tb.add_images(
-            head.tag("true/wan_decoder"),
-            _normalise(wan_decoder_2d[:n]),
-            global_step=epoch,
-        )
+        wan = _normalise(wan_decoder_2d[:n])
+        # Coerce to 3 channels for ``add_images`` (TensorBoard's make_grid
+        # requires exactly 3).  Backbone VAEs differ: Cosmos-Predict decodes
+        # to 3-channel RGB, but Cosmos-3's residual VAE has a different
+        # output width -- show its first channel as grayscale rather than
+        # crash the run (this is a diagnostic panel only).
+        c = wan.shape[1]
+        if c == 3:
+            pass
+        elif c == 1:
+            wan = repeat(wan, "b 1 h w -> b 3 h w")
+        else:
+            wan = repeat(wan[:, :1], "b 1 h w -> b 3 h w")
+        tb.add_images(head.tag("true/wan_decoder"), wan, global_step=epoch)
 
     # ----- pred panels -----
     sem = _to_2d(fields["sem"]).clamp(0.0, 1.0)

@@ -500,6 +500,11 @@ training:
     # under-segmentation / merge collapse (coarsen to lower edge count).
     strides: [1, 2, 2]             # [Z, Y, X]; dense Z, denser in-plane push
     size_filter: 50
+    # auto -> GPU torch Boruvka (mws_th, native zero-copy); cupy -> mws_cp
+    # (DLPack); cpu -> exact mws_np.  max_push_edges null = full edges.
+    backend: auto
+    buckets: 16
+    max_push_edges: null
 
 
 # ---------------------------------------------------------------------
