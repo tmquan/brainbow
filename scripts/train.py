@@ -336,6 +336,18 @@ def _maybe_compile(module: pl.LightningModule, cfg: DictConfig) -> None:
     if not compile_cfg:
         return
 
+    # torch.compile is incompatible with diffusers gradient checkpointing:
+    # dynamo cannot trace the ``torch.utils.checkpoint.checkpoint`` HOP inside
+    # the backbone's forward and raises ``Attempted to call function marked as
+    # skipped``.  Skip compile in that case rather than crash mid-run.
+    if bool(cfg.get("model", {}).get("gradient_checkpointing", False)):
+        console.log(
+            "torch.compile requested but model.gradient_checkpointing=true; "
+            "skipping compile (the two are incompatible -- dynamo cannot trace "
+            "torch.utils.checkpoint).  Set gradient_checkpointing=false to compile."
+        )
+        return
+
     mode = compile_cfg if isinstance(compile_cfg, str) else "reduce-overhead"
     fullgraph = bool(cfg.get("training", {}).get("compile_fullgraph", False))
     dit = getattr(getattr(module, "model", None), "dit", None)

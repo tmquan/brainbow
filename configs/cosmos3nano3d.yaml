@@ -211,6 +211,9 @@ training:
   enable_model_summary: true
   deterministic: false
   benchmark: true
+  # MUST be false for cosmos3nano3d: torch.compile cannot trace the diffusers
+  # Cosmos-3 transformer's gradient_checkpointing (torch.utils.checkpoint HOP),
+  # and cudagraphs corrupt its forward-hook feature capture.
   compile: false
   compile_fullgraph: false
   fast_dev_run: false
