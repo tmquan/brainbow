@@ -215,7 +215,7 @@ training:
   # Cosmos-3 transformer's gradient_checkpointing (torch.utils.checkpoint HOP),
   # and cudagraphs corrupt its forward-hook feature capture.
   compile: false
-  compile_fullgraph: false
+  compile_fullgraph: true
   fast_dev_run: false
   profiler: null
   resume_from_checkpoint: null
