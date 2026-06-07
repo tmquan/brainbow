@@ -118,7 +118,7 @@ data:
     seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
     root: data/MICRONS
   val_batch_size: 4
-  prefetch_factor: 2
+  prefetch_factor: 4
   patch_size:
   - 80
   - 256
