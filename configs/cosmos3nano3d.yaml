@@ -32,7 +32,7 @@ data:
   dataset: snemi3d
   data_root: data/SNEMI3D
   batch_size: 2
-  num_workers: 8
+  num_workers: 16
   cache_rate: 0.0
   pin_memory: true
   image_size: null
