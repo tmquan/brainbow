@@ -141,7 +141,7 @@ model:
   in_channels: 1
   head_channels: 16
   feature_size: 64
-  dropout: 0.0
+  dropout: 0.2
   pretrained: true
   dtype: bf16
   freeze_vae_encoder: true
