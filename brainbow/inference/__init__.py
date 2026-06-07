@@ -12,8 +12,10 @@ Public surface
   parameter-free agglomeration that turns predicted affinities into
   instance ids (the production eval / inference path; see
   :doc:`MUTEXWATERSHED`).  It dispatches per-input between
-  :func:`~brainbow.inference.mutex_watershed.mws_cp` (GPU, cupy Boruvka,
-  default for CUDA inputs) and
+  :func:`~brainbow.inference.mutex_watershed.mws_th` (GPU torch Boruvka,
+  native zero-copy, default for CUDA inputs),
+  :func:`~brainbow.inference.mutex_watershed.mws_cp` (GPU cupy Boruvka,
+  zero-copy via DLPack) and
   :func:`~brainbow.inference.mutex_watershed.mws_np` (CPU, numpy/numba,
   exact reference + fallback).
 
@@ -27,6 +29,7 @@ from brainbow.inference.mutex_watershed import (
     mutex_watershed,
     mws_cp,
     mws_np,
+    mws_th,
 )
 from brainbow.inference.sliding_window import sliding_window_inference
 
@@ -35,5 +38,6 @@ __all__ = [
     "mutex_watershed",
     "mws_np",
     "mws_cp",
+    "mws_th",
     "sliding_window_inference",
 ]

@@ -28,6 +28,8 @@ Optional overrides
 * :meth:`_get_spatial_dims` -- 3 by default; override for 2-D datasets.
 """
 
+import logging
+import os
 from abc import ABC
 from typing import Dict, List, Optional, Tuple, Type, Union
 
@@ -57,6 +59,70 @@ from brainbow.transforms import (
     RandSpatialCropForegroundd,
     SkeletonGeometryd,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_cpulist(spec: str) -> set:
+    """Parse a Linux ``cpulist`` string (e.g. ``"0-55,112-167"``) to a set."""
+    cpus: set = set()
+    for part in spec.strip().split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-")
+            cpus.update(range(int(a), int(b) + 1))
+        else:
+            cpus.add(int(part))
+    return cpus
+
+
+def bind_local_numa(log: bool = False) -> None:
+    """Pin the calling process to the NUMA node local to its GPU.
+
+    Best-effort, by ``LOCAL_RANK``: on a multi-socket node the GPUs are
+    split across NUMA nodes in contiguous blocks (e.g. 8 GPUs / 2 nodes ->
+    ranks 0-3 on node0, 4-7 on node1).  Binding each rank's process and its
+    DataLoader workers to the local socket stops the higher-numbered ranks
+    from fetching/decoding data across the socket boundary (which starves
+    their GPU and serialises DDP).  Silently no-ops on a single NUMA node,
+    non-Linux, cgroup-restricted, or any error -- never breaks training.
+    """
+    if not hasattr(os, "sched_setaffinity"):
+        return
+    try:
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        node_root = "/sys/devices/system/node"
+        nodes = sorted(
+            int(n[4:]) for n in os.listdir(node_root)
+            if n.startswith("node") and n[4:].isdigit()
+        )
+        if len(nodes) < 2:
+            return
+        n_gpu = int(os.environ.get("LOCAL_WORLD_SIZE") or 0) or (
+            torch.cuda.device_count() or 1
+        )
+        per_node = max(1, n_gpu // len(nodes))
+        node_idx = min(local_rank // per_node, len(nodes) - 1)
+        with open(f"{node_root}/node{nodes[node_idx]}/cpulist") as fh:
+            cpus = _parse_cpulist(fh.read())
+        cpus &= set(os.sched_getaffinity(0))   # respect any cgroup/slurm cap
+        if cpus:
+            os.sched_setaffinity(0, cpus)
+            if log:
+                logger.info(
+                    "NUMA-bound LOCAL_RANK=%d -> node%d (%d CPUs)",
+                    local_rank, nodes[node_idx], len(cpus),
+                )
+    except Exception as exc:  # best-effort; never break training
+        if log:
+            logger.warning("bind_local_numa skipped: %s", exc)
+
+
+def _numa_worker_init(_worker_id: int) -> None:
+    """DataLoader ``worker_init_fn``: bind each worker to its rank's socket."""
+    bind_local_numa(log=False)
 
 
 class CircuitDataModule(pl.LightningDataModule, ABC):
@@ -473,6 +539,10 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
     # ------------------------------------------------------------------
 
     def setup(self, stage: Optional[str] = None) -> None:
+        # Pin this rank's process to the NUMA node local to its GPU (and the
+        # DataLoader workers via ``_numa_worker_init`` below) so cross-socket
+        # data fetch doesn't starve the higher-numbered ranks.
+        bind_local_numa(log=True)
         extra = self._get_dataset_kwargs()
 
         if stage == "fit" or stage is None:
@@ -545,6 +615,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             persistent_workers=self.persistent_workers,
             prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             multiprocessing_context="forkserver" if self.num_workers > 0 else None,
+            worker_init_fn=_numa_worker_init if self.num_workers > 0 else None,
             drop_last=True,
         )
 
@@ -558,6 +629,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             persistent_workers=self.persistent_workers,
             prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             multiprocessing_context="forkserver" if self.num_workers > 0 else None,
+            worker_init_fn=_numa_worker_init if self.num_workers > 0 else None,
         )
 
     def test_dataloader(self) -> torch.utils.data.DataLoader:
@@ -570,6 +642,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             persistent_workers=self.persistent_workers,
             prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             multiprocessing_context="forkserver" if self.num_workers > 0 else None,
+            worker_init_fn=_numa_worker_init if self.num_workers > 0 else None,
         )
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
