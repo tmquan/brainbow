@@ -134,7 +134,8 @@ class BaseCircuitModule(pl.LightningModule):
         self.criterion = self._loss_cls(**loss_config)
 
         # Validation-time agglomeration: Mutex Watershed over the predicted
-        # affinities (parameter-free; non-differentiable; CPU per crop).
+        # affinities (parameter-free; non-differentiable; GPU mws_cp by
+        # default on CUDA, exact numpy/numba mws_np fallback).
         # Offsets / n_pull default to the loss's so the head, target,
         # and agglomerator all share one edge convention.
         mws_config = dict(self.training_config.get("mutex_watershed", {}) or {})

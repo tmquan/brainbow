@@ -125,10 +125,14 @@ class _DecoderAdapter3D(nn.Module):
         dropout: float = 0.0,
         freeze_vae_decoder: bool = False,
         head_channels: int = HEAD_CHANNELS,
+        highres_skip: bool = False,
+        skip_channels: int = 8,
+        image_channels: int = 1,
     ) -> None:
         super().__init__()
         self._has_pretrained = vae_decoder is not None
         self.head_channels = int(head_channels)
+        self.highres_skip = bool(highres_skip)
 
         # Will be populated by ``_replace_conv_out`` when a pretrained
         # decoder is provided; stays ``None`` for the random-init
@@ -153,6 +157,29 @@ class _DecoderAdapter3D(nn.Module):
             )
             self._hidden_ch = feature_size
 
+        # High-resolution input skip.  The decoder features above are
+        # bandwidth-limited by the VAE's spatial_compression (e.g. 8x): they
+        # carry semantics but not the 1-voxel membranes the affinity head
+        # needs.  A thin full-resolution conv stem on the raw input routes
+        # those sharp edges *around* the latent bottleneck and is fused with
+        # the decoded features just before the head, so the head can place
+        # boundaries the latent cannot represent.  Kept thin (few channels)
+        # because it runs at full input resolution.
+        if self.highres_skip:
+            c = int(skip_channels)
+            self.skip_stem = nn.Sequential(
+                nn.Conv3d(int(image_channels), c, kernel_size=3, padding=1),
+                _NORM(c),
+                nn.GELU(),
+                nn.Conv3d(c, c, kernel_size=3, padding=1),
+                _NORM(c),
+                nn.GELU(),
+            )
+            head_in = self._hidden_ch + c
+        else:
+            self.skip_stem = None
+            head_in = self._hidden_ch
+
         # VISTA3D-style unified task head.  It mirrors MONAI's
         # ``ClassMappingClassify.image_post_mapping`` (2× residual
         # UnetrBasicBlock at a shared refinement width with instance
@@ -162,7 +189,7 @@ class _DecoderAdapter3D(nn.Module):
         # independent of the VAE decoder's output width (``_hidden_ch``
         # can be much larger on the 14B variant).
         self.head = VistaTaskHead3D(
-            in_channels=self._hidden_ch,
+            in_channels=head_in,
             out_channels=self.head_channels,
             refine_channels=feature_size,
             dropout=dropout,
@@ -223,9 +250,28 @@ class _DecoderAdapter3D(nn.Module):
             p.requires_grad = True
 
     def forward(
-        self, features: torch.Tensor, target_size: tuple,
+        self,
+        features: torch.Tensor,
+        target_size: tuple,
+        image: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         decoded = self._decode_body(features, target_size)
+        if self.skip_stem is not None:
+            if image is None:
+                raise ValueError(
+                    "_DecoderAdapter3D was built with highres_skip=True but "
+                    "forward() received image=None; the wrapper must pass the "
+                    "raw input volume so the skip stem can run."
+                )
+            if hasattr(image, "as_tensor"):
+                image = image.as_tensor()
+            if tuple(image.shape[-3:]) != tuple(target_size):
+                image = F.interpolate(
+                    image.float(), size=target_size,
+                    mode="trilinear", align_corners=False,
+                )
+            skip = self.skip_stem(image.to(decoded.dtype))
+            decoded = torch.cat([decoded, skip.to(decoded.dtype)], dim=1)
         out = self.head(decoded)
         return apply_head_activations(out)
 

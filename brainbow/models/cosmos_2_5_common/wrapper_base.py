@@ -120,6 +120,9 @@ class _BaseCosmos25Wrapper(nn.Module):
         cache_dir: Optional[str] = None,
         hf_token: Optional[str] = None,
         dropout: float = 0.0,
+        input_supersample: int = 1,
+        highres_skip: bool = False,
+        highres_skip_channels: int = 8,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -145,6 +148,11 @@ class _BaseCosmos25Wrapper(nn.Module):
         self.feature_size = feature_size
         self.spatial_dims = _SPATIAL_DIMS
         self.dropout = dropout
+        # In-plane supersample factor applied to the input *before* the VAE,
+        # so the latent (input/spatial_compression) is finer per membrane.
+        # >1 multiplies VAE + DiT cost (~factor^2 tokens) -- pair with a
+        # batch-size cut.  ``1`` disables (the default).
+        self._input_supersample = int(input_supersample)
 
         self._dtype = {
             "bf16": torch.bfloat16,
@@ -208,10 +216,15 @@ class _BaseCosmos25Wrapper(nn.Module):
             dropout=dropout,
             freeze_vae_decoder=freeze_vae_decoder,
             head_channels=self.head_channels,
+            highres_skip=highres_skip,
+            skip_channels=highres_skip_channels,
+            image_channels=in_channels,
         )
         if self.decoder_adapter.to_latent is not None:
             self.decoder_adapter.to_latent.float()
         self.decoder_adapter.head.float()
+        if self.decoder_adapter.skip_stem is not None:
+            self.decoder_adapter.skip_stem.float()
 
         if self.vae_encoder is not None and freeze_vae_encoder:
             self.vae_encoder.requires_grad_(False)
@@ -854,7 +867,9 @@ class _BaseCosmos25Wrapper(nn.Module):
             Unified head tensor ``[B, 30, D, H, W]``.
         """
         features, target_size = self._encode_and_extract(x)
-        return self.decoder_adapter(features, target_size=target_size)
+        return self.decoder_adapter(
+            features, target_size=target_size, image=x,
+        )
 
     @torch.no_grad()
     def wan_decoder_output(self, x: torch.Tensor) -> Optional[torch.Tensor]:
@@ -899,7 +914,19 @@ class _BaseCosmos25Wrapper(nn.Module):
         crop / interpolate back.
         """
         original_dtype = x.dtype
+        # Capture the ORIGINAL spatial size before any supersample so the
+        # decoder maps the head back to it (targets stay at input res).
         D_in, H_in, W_in = x.shape[-3], x.shape[-2], x.shape[-1]
+
+        # Optional in-plane supersample before the VAE: a finer latent lets
+        # the VAE/DiT resolve membranes the 8x latent would otherwise smear.
+        f = self._input_supersample
+        if f and f != 1:
+            x_src = x.as_tensor() if hasattr(x, "as_tensor") else x
+            x = F.interpolate(
+                x_src.float(), scale_factor=(1.0, float(f), float(f)),
+                mode="trilinear", align_corners=False,
+            ).to(original_dtype)
 
         rgb = _adapt_to_rgb(x)
 

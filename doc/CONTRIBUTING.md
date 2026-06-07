@@ -343,15 +343,18 @@ training:
   mutex_watershed:
     strides: [1, 4, 4]   # per-axis subsample of push edges (Z, Y, X)
     size_filter: 0       # drop components < N voxels -> background
+    backend: auto        # GPU mws_cp on CUDA, else CPU mws_np
+    buckets: 16          # GPU Boruvka priority buckets
+    max_push_edges: null # cap mutex edges; null = full edges
     # offsets / n_pull default to AFFINITY_OFFSETS / N_PULL
 ```
 
 `MutexWatershed` returns `[B, *spatial]` long instance ids
 (`0` = background), the drop-in contract for the eval metric path.  It
-runs on the CPU (numpy edge build + numba core); see
-[`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md) for the algorithm and why
-it's CPU-only.  To change the edge set, edit `AFFINITY_OFFSETS` /
-`N_PULL` in `losses/_common.py` (§2).
+dispatches to the GPU cupy Boruvka (`mws_cp`, default on CUDA, zero-copy
+via DLPack) or the exact numpy/numba `mws_np` (CPU fallback / reference);
+see [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md) §4.  To change the edge
+set, edit `AFFINITY_OFFSETS` / `N_PULL` in `losses/_common.py` (§2).
 
 ---
 

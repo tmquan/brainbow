@@ -112,7 +112,10 @@ data:
   data_root: data/SNEMI3D
 
   # ---- Loader & batching ----
-  batch_size: 8
+  # NOTE: cut from 4 to 2 because ``model.input_supersample: 2`` quadruples
+  # the in-plane latent voxels (~4x DiT tokens + VAE work).  Raise back
+  # toward 4-8 if you set ``input_supersample: 1``.
+  batch_size: 2
   # Validation/test batch size.  The eval path runs a full-resolution
   # decode + the Mutex Watershed + contingency-matrix metrics on top of
   # the forward, so its per-batch peak exceeds the train step.  Under DDP
@@ -120,8 +123,9 @@ data:
   # and corrupts the survivors' epoch-end reduction.  Keep val modest to
   # stay under the per-GPU ceiling; raise once you've confirmed headroom.
   # (A per-batch OOM is also caught and skipped -- see
-  # ``BaseCircuitModule._eval_step_and_accumulate``.)
-  val_batch_size: 4
+  # ``BaseCircuitModule._eval_step_and_accumulate``.)  Pinned to 1 under
+  # ``input_supersample: 2``.
+  val_batch_size: 2
   num_workers: 8
   # persistent_workers=true.  A ``/dev/shm`` blow-up can occur if a
   # transform forks pathos subprocesses inside DataLoader workers
@@ -292,8 +296,8 @@ data:
 # that exposes ``Cosmos3OmniTransformer``; Cosmos 3 is BF16-only.
 # ---------------------------------------------------------------------
 model:
-  type: cosmospredict3d
-  variant: "2B"
+  type: cosmos3nano3d
+  variant: "Nano"
   dtype: "bf16"
   pretrained: true                # auto-pulls nvidia/Cosmos-Predict2.5-2B from HF
 
@@ -307,6 +311,23 @@ model:
   # training.mutex_watershed below); raw is the linear input-recon channel.
   head_channels: 16
   feature_size: 64
+
+  # --- Effective latent resolution (membrane sharpness) ---
+  # The pretrained Cosmos VAE has a FIXED 8x in-plane spatial compression,
+  # so a 1-voxel membrane lands inside one latent cell and the decode is
+  # blurry -> soft affinities -> Mutex Watershed under-segmentation.
+  # ``input_supersample`` upsamples the EM in-plane *before* the VAE, so
+  # the latent grid is ``input/8`` of a larger image: at 2 the latent is
+  # H/4, W/4 of the original (vs H/8, W/8 at 1) -- 2x finer per membrane.
+  # Cost: ~factor^2 more DiT tokens + VAE work (Z is left alone, matching
+  # anisotropy), so cut ``data.batch_size`` to fit.  ``1`` disables.
+  input_supersample: 1            # 2 -> latent H/4, W/4 (was H/8, W/8)
+  # Full-resolution input skip into the head: routes the raw EM's sharp
+  # edges *around* the VAE bottleneck and fuses them before the head.
+  # Independent of input_supersample; can be combined.  Disabled here so
+  # the supersample experiment is isolated.
+  highres_skip: false
+  highres_skip_channels: 8
 
   # What to freeze.  Cosmos 3 has no ControlNet residual branch to
   # absorb the trainable load, so leaving the omni transformer
@@ -363,8 +384,8 @@ model:
   # Cosmos-Predict DiT fits comfortably under DDP at this batch size, so
   # activation checkpointing is not needed here.  If you later OOM (e.g.
   # bigger crops / batch), flip back to ``true`` or lower ``data.batch_size``.
-  gradient_checkpointing: false
-  dropout: 0.2
+  gradient_checkpointing: true
+  dropout: 0.0
 
 
 # ---------------------------------------------------------------------
@@ -387,14 +408,14 @@ callbacks:
     # timeout.  Every rank pays one extra ``model(images[:max_images])`` +
     # ``wan_decoder`` decode at epoch end, so keep ``max_images`` modest.
     enabled: true
-    max_images: 8
+    max_images: 4
 
 
 # ---------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------
 training:
-  max_epochs: 301
+  max_epochs: 101
   accelerator: auto
   devices: auto
   # FSDP FULL_SHARD so the 15.2B omni DiT shards weights/grads/optimizer
@@ -418,16 +439,16 @@ training:
   # ``bf16-mixed`` is the recommended DDP precision: params stay fp32 with
   # an outer bf16 autocast over the step.  (``bf16-true`` is for the
   # natively-bf16 Cosmos3 backbone under FSDP MixedPrecision.)
-  precision: bf16-mixed
+  precision: bf16-true
   gradient_clip_val: 1.0
   accumulate_grad_batches: 1
-  limit_val_batches: 50
-  # Pre-training sanity validation.  At init the affinity head is
-  # near-random, so the Mutex Watershed is in its slowest regime (many
-  # fragments / long mutex chains); the GPU-assisted agglomeration (GPU
-  # edge build + sort, CPU sequential core) keeps that to ~seconds/crop,
-  # so 2 sanity steps are fine.  Set to 0 to skip entirely.
-  num_sanity_val_steps: 2
+  limit_val_batches: 200
+  # Pre-training sanity validation.  Disabled (0): a sanity pass on the
+  # near-random init head gives no useful signal, and it would run the
+  # agglomeration on garbage affinities.  The GPU path (mws_cp) handles
+  # that in ~0.2s, but the CPU fallback (mws_np) does not -- so 0 keeps
+  # startup safe regardless of whether cupy is available on the node.
+  num_sanity_val_steps: 0
   log_every_n_steps: 100
   check_val_every_n_epoch: 20     # validate every 20 epochs (default 1)
   benchmark: true
@@ -455,7 +476,7 @@ training:
   # records, the Cosmos-2.5 backbones tolerate "reduce-overhead"
   # cudagraphs (their hook-captured tensors are not cudagraph-managed),
   # unlike cosmos3nano3d which MUST stay false/"default".
-  compile: true
+  compile: false
   # compile_fullgraph=true forces a single monolithic Inductor compile
   # of the 2B DiT (no graph breaks), which gives the best steady-state
   # runtime but pays for it with a multi-minute first-step stall.
@@ -468,15 +489,16 @@ training:
   # the first step lands: ``false`` lets Inductor compile
   # incrementally with graph breaks, trading ~10% runtime for a much
   # shorter first-step.
-  compile_fullgraph: true
+  compile_fullgraph: false
 
   # -------------------------------------------------------------------
   # Validation-time agglomeration: Mutex Watershed
   # -------------------------------------------------------------------
   # The affinity head's per-offset predictions are turned into discrete
   # instance IDs by the parameter-free Mutex Watershed (Wolf et al. 2018;
-  # ``brainbow/inference/mutex_watershed.py``).  It is non-differentiable
-  # and runs on CPU per crop, so it is used at eval / inference only.
+  # ``brainbow/inference/mutex_watershed.py``).  Non-differentiable, eval /
+  # inference only.  ``backend`` selects the GPU cupy Boruvka (mws_cp,
+  # default on CUDA) or the exact numpy/numba core (mws_np); see below.
   #
   # ``offsets`` and ``n_pull`` default to the loss's (so the head,
   # target, and agglomerator share one edge convention) -- leave them
@@ -495,10 +517,13 @@ training:
   #                   are reset to background (despeckle).
   # -------------------------------------------------------------------
   mutex_watershed:
-    # Finer in-plane push sampling makes more long-range mutex edges
-    # available to cut true boundaries -- the direct lever against
-    # under-segmentation / merge collapse (coarsen to lower edge count).
-    strides: [1, 2, 2]             # [Z, Y, X]; dense Z, denser in-plane push
+    # Push-edge subsampling [Z, Y, X]: Z dense, every 2nd in-plane push.
+    # The fine [1,2,2] setting keeps more long-range mutex edges to cut
+    # true boundaries (fights under-seg), at the cost of a larger edge
+    # graph (~30M edges/crop) -- fine for the GPU mws_cp path here; if the
+    # CPU fallback (mws_np) is ever used at this stride, set max_push_edges
+    # or coarsen to [1,4,4] to bound the build.
+    strides: [1, 2, 2]             # [Z, Y, X]; dense Z, every 2nd in-plane push
     size_filter: 50
     # auto -> GPU torch Boruvka (mws_th, native zero-copy); cupy -> mws_cp
     # (DLPack); cpu -> exact mws_np.  max_push_edges null = full edges.
@@ -581,7 +606,7 @@ loss:
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 2.0
+    gamma: 5.0
     pull_weight: 1.0
     push_weight: 5.0
     mask_to_foreground: true
@@ -595,7 +620,7 @@ loss:
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 2.0
+    gamma: 5.0
   # Raw reconstruction head: linear L1 regression of the (normalised)
   # input EM intensity -- an auxiliary self-supervised signal that
   # stabilises the shared decoder features.
