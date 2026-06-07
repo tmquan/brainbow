@@ -100,7 +100,9 @@ def bind_local_numa(log: bool = False) -> None:
         )
         if len(nodes) < 2:
             return
-        n_gpu = torch.cuda.device_count() or 1
+        n_gpu = int(os.environ.get("LOCAL_WORLD_SIZE") or 0) or (
+            torch.cuda.device_count() or 1
+        )
         per_node = max(1, n_gpu // len(nodes))
         node_idx = min(local_rank // per_node, len(nodes) - 1)
         with open(f"{node_root}/node{nodes[node_idx]}/cpulist") as fh:
