@@ -2,13 +2,14 @@
 Cosmos 3 (Nano) **3D** model wrapper for volumetric connectomics segmentation.
 
 Adapts the Cosmos 3 omni transformer (``Cosmos3OmniTransformer``, 16B
-Mixture-of-Transformers) as a feature extractor for the affinity +
-foreground volumetric segmentation head:
+Mixture-of-Transformers) as a feature extractor for the affinity + sem +
+raw volumetric segmentation head:
 
-``aff(N_AFF offsets) | fg(1)``
+``aff(N_AFF offsets) | sem(1) | raw(1)``
 
 See :mod:`brainbow.losses._common` for the canonical channel layout
-(:data:`AFFINITY_OFFSETS`, :data:`AFF_SLICE`, :data:`FG_SLICE`) and
+(:data:`AFFINITY_OFFSETS`, :data:`AFF_SLICE`, :data:`SEM_SLICE`,
+:data:`RAW_SLICE`) and
 :mod:`brainbow.inference.mutex_watershed` for the eval-time
 agglomeration.
 

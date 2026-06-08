@@ -52,7 +52,7 @@ brainbow/
     ├── models/           # model wrappers (BaseModel + per-arch packages).
     ├── modules/          # Lightning modules (BaseCircuitModule + per-arch).
     ├── preprocessors/    # format converters (base + per-format).
-    ├── transforms/       # deterministic ops (boundaries, EDT, skeleton, ...).
+    ├── transforms/       # deterministic ops (boundaries, EDT, relabel, ...).
     ├── utils/            # io helpers.
     └── visualizer/       # web volume renderer.
 ```
@@ -152,15 +152,18 @@ in depth.
 
 `_common.py` owns the channel layout:
 
-| Field | Slice | Channels | Activation |
-| ----- | ----- | -------- | ---------- |
-| `aff` | `[0, N_AFF)` | `N_AFF` (14) | sigmoid |
-| `sem` | `[N_AFF, N_AFF+1)` | 1 | sigmoid |
-| `raw` | `[N_AFF+1, N_AFF+2)` | 1 | linear |
+| Field | Slice | Channels | Head output |
+| ----- | ----- | -------- | ----------- |
+| `aff` | `[0, N_AFF)` | `N_AFF` (14) | logit |
+| `sem` | `[N_AFF, N_AFF+1)` | 1 | logit |
+| `raw` | `[N_AFF+1, N_AFF+2)` | 1 | linear (target in `[-1, 1]`) |
 
-Activation policy: sigmoid on the contiguous `SIGMOID_SLICE =
-[0, N_AFF+1)` (aff + sem), linear on the trailing `raw` channel.
-Wrappers route their head output through `apply_head_activations` once.
+Activation policy: the head emits **raw logits / linear values** with no
+activation in `forward`.  The loss supervises `aff` / `sem` with
+logit-stable BCE (plus sigmoid for the Dice / focal terms), and every
+other consumer (metrics, Mutex Watershed, TensorBoard) applies `sigmoid`
+at its own boundary.  The `raw` channel is linear and reconstructs the
+normalised EM in `[-1, 1]`.
 
 `_common.py` also owns `AFFINITY_OFFSETS` / `N_PULL` (3 pull
 nearest-neighbour + 11 push long-range offsets), the
@@ -253,7 +256,7 @@ where
 - `stage` ∈ `{"train", "val", "test"}`,
 - `mode`  ∈ `{"automatic", "prompted", ...}` (single-value today,
   structured so `prompted` can slot in later),
-- `head`  ∈ `{"semantic", "instance", "geometry", "boundary"}` or
+- `head`  ∈ `{"aff", "sem", "raw", "ins"}` or
   `None` for mode-level panels,
 - `panel` is the concrete image / scalar name.
 
@@ -293,9 +296,9 @@ the CLI as Hydra overrides.
 Loss-weight blocks are densely commented (see `configs/snemi3d.yaml`
 `loss:` block) so newcomers can learn the loss by reading the config.
 Every head uses the **nested** loss schema (one mapping per head,
-e.g. ``weight_semantic: { weight: 1.0, ... }``) which keeps every
+e.g. ``weight_sem: { weight: 1.0, ... }``) which keeps every
 head-scoped knob next to its weight.  A bare scalar
-(``weight_semantic: 1.0``) is also accepted as shorthand for
+(``weight_sem: 1.0``) is also accepted as shorthand for
 ``{weight: 1.0}`` with no sub-knobs; a nested mapping without
 ``weight:`` defaults to ``weight: 1.0``.  Set ``weight: 0`` to
 disable a head -- the sub-loss module is then not instantiated and

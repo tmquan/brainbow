@@ -8,7 +8,7 @@ dense-prediction wrapper) without importing the full Vista3D backbone.
 Module layout::
 
     heads.py     -- VistaTaskHead3D  (MONAI UnetrBasicBlock head)
-    wrapper.py   -- Vista3DWrapper   (SegResNetDS2 + 3 heads)
+    wrapper.py   -- Vista3DWrapper   (SegResNetDS2 + unified aff/sem/raw head)
     hf_loader.py -- MONAI/VISTA3D-HF pretrained-encoder loader
 """
 

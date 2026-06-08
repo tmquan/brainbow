@@ -41,9 +41,9 @@ logger = logging.getLogger(__name__)
 class CosmosTransfer3DWrapper(_BaseCosmos25Wrapper):
     """Cosmos-Transfer 2.5 adapted for **volumetric** connectomics segmentation.
 
-    A single unified task head produces ``[B, 30, D, H, W]``.  Channel
-    layout is owned by :mod:`brainbow.losses._common`: raw(1), sem(1),
-    dir(3), cov(6), avg(3), emb(16).
+    A single unified task head produces ``[B, HEAD_CHANNELS, D, H, W]``.
+    Channel layout is owned by :mod:`brainbow.losses._common`:
+    ``aff(N_AFF) | sem(1) | raw(1)`` (raw logits / linear values).
 
     Because Cosmos-Transfer 2.5 is natively a video model, the depth
     axis of the EM volume is mapped to the temporal axis of the
@@ -51,7 +51,7 @@ class CosmosTransfer3DWrapper(_BaseCosmos25Wrapper):
 
     Args:
         in_channels: Number of input channels (1 for EM volumes).
-        head_channels: Unified head width (default 32).
+        head_channels: Unified head width (default HEAD_CHANNELS = N_AFF + 2).
         feature_size: Internal feature map channel count after projection.
         variant: ``"2B"`` or ``"14B"`` model variant.
         checkpoint_variant: HuggingFace revision string.
@@ -80,7 +80,7 @@ class CosmosTransfer3DWrapper(_BaseCosmos25Wrapper):
         >>> model = CosmosTransfer3DWrapper(in_channels=1, variant="2B")
         >>> x = torch.randn(1, 1, 32, 64, 64)
         >>> out = model(x)
-        >>> out.shape   # [1, 30, 32, 64, 64]
+        >>> out.shape   # [1, HEAD_CHANNELS, 32, 64, 64]
     """
 
     _variant_configs = _VARIANT_CONFIGS

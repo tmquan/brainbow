@@ -26,17 +26,18 @@ Every backbone (`Cosmos3Nano3DWrapper`, `CosmosPredict3DWrapper`,
 of truth in `brainbow/losses/_common.py`:
 
 ```
-ch  0 .. N_AFF-1 : aff   (N_AFF=14)  sigmoid, per-offset affinity in (0, 1)
-ch  N_AFF        : sem   (1)         sigmoid, foreground / boundary prob
-ch  N_AFF + 1    : raw   (1)         linear,  L1 reconstruction of input EM
+ch  0 .. N_AFF-1 : aff   (N_AFF=14)  logit,  per-offset affinity
+ch  N_AFF        : sem   (1)         logit,  foreground / boundary
+ch  N_AFF + 1    : raw   (1)         linear, L1 reconstruction of input EM
                                      -----------------------------------
                                      HEAD_CHANNELS = N_AFF + 2 = 16
 ```
 
 - `AFF_SLICE = slice(0, 14)`, `SEM_SLICE = slice(14, 15)`, `RAW_SLICE = slice(15, 16)`.
-- `apply_head_activations` sigmoids the contiguous `aff + sem` block
-  (`SIGMOID_SLICE`) and leaves `raw` linear — one call at the end of each
-  wrapper's `forward`.
+- The head emits **raw logits / linear values** (no activation in
+  `forward`): `aff` / `sem` are logits, `raw` is linear. Each consumer
+  applies its own activation — logit-stable BCE in the loss, and `sigmoid`
+  on the `aff` logits here before agglomeration.
 
 ### 1.1 Affinity offsets
 

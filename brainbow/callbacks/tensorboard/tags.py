@@ -15,8 +15,8 @@ class TagContext:
 
     ``head`` is retained only as a lightweight compatibility shim for
     older call sites; the unified-head logger passes ``head=None`` and
-    encodes field names directly in ``panel`` (e.g. ``pred/emb/_pca``,
-    ``pred/avg/aff/01_t1``).
+    encodes field names directly in ``panel`` (e.g. ``pred/sem``,
+    ``pred/aff/01_pull_z1``, ``pred/label/pre``).
     """
 
     stage: str                        # "train" | "val"

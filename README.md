@@ -29,14 +29,15 @@ flowchart LR
     wrap -.->|"eval"| mws["Mutex Watershed<br/>(instances)"]
 ```
 
-Three end-to-end backbones live under `brainbow/models/`:
+Four end-to-end backbones live under `brainbow/models/`:
 
+- **`Cosmos3Nano3DWrapper`** — Cosmos 3 (Nano) 16B omni transformer; the
+  shipped default backbone for the `snemi3d` recipe.
 - **`CosmosPredict3DWrapper`** — Cosmos-Predict 2.5 (base DiT + Wan VAE,
-  no ControlNet); the shipped default backbone for `snemi3d`.
+  no ControlNet); the flattened 2B baseline (`configs/cosmospredict3d.yaml`).
 - **`CosmosTransfer3DWrapper`** — Cosmos-Transfer 2.5 (base DiT +
   ControlNet residual branch + Wan VAE); shares all scaffolding with
   Predict via `brainbow/models/cosmos_2_5_common/`.
-- **`Cosmos3Nano3DWrapper`** — Cosmos 3 (Nano) 16B omni transformer.
 - **`Vista3DWrapper`** — SegResNetDS2 for fast local iteration.
 
 All emit the same affinity + sem + raw head.  For the channel layout,
@@ -50,9 +51,13 @@ Every backbone trains one **affinity + sem + raw per-voxel head**
 
 | channels | field | meaning |
 |---:|---|---|
-| 0 .. N_AFF-1 (14) | `aff` | per-offset affinity `P(label[v] == label[v+offset])` (sigmoid) |
-| N_AFF (1) | `sem` | foreground / boundary probability (sigmoid) |
-| N_AFF+1 (1) | `raw` | input-EM reconstruction (linear, L1) |
+| 0 .. N_AFF-1 (14) | `aff` | per-offset affinity logit for `P(label[v] == label[v+offset])` |
+| N_AFF (1) | `sem` | foreground / boundary logit |
+| N_AFF+1 (1) | `raw` | input-EM reconstruction (linear, L1; target in `[-1, 1]` with `vae_input_pm1`) |
+
+The head emits **raw logits / linear values** (no activation in `forward`);
+`sigmoid` is applied only at the loss, metrics, Mutex Watershed, and
+TensorBoard boundaries.
 
 The affinity offsets (`brainbow.losses.AFFINITY_OFFSETS`) are 3 **pull**
 nearest-neighbours plus 11 **push** long-range offsets (anisotropy-aware
@@ -166,7 +171,7 @@ pytest tests/ -q
 | Know the head's channel layout, loss + Mutex Watershed         | [`doc/MUTEXWATERSHED.md`](doc/MUTEXWATERSHED.md)              |
 | Know the backbone parameter budgets                            | [`doc/ARCHITECT.md`](doc/ARCHITECT.md)                        |
 | Add a new dataset / loss / backbone / transform                | [`doc/CONTRIBUTING.md`](doc/CONTRIBUTING.md)                  |
-| Debug a silent failure (UMAP→PCA, head dropping, freeze, ...)  | [`doc/GOTCHAS.md`](doc/GOTCHAS.md)                            |
+| Debug a silent failure (head dropping, freeze schedule, ...)   | [`doc/GOTCHAS.md`](doc/GOTCHAS.md)                            |
 | Tour all docs at once                                          | [`doc/INDEX.md`](doc/INDEX.md)                                |
 
 ## License

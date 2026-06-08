@@ -245,9 +245,9 @@ class ImageLogger(pl.Callback):
             )
 
         # Autocast-returned tensors may be bf16/fp16.  Cast back to fp32
-        # so every downstream op in this callback (colour LUTs, eigh
-        # decomposition for the cov overlay, TB image encoders) operates
-        # in a single, display-friendly dtype.
+        # so every downstream op in this callback (sigmoid for aff/sem,
+        # colour LUTs, TB image encoders) operates in a single,
+        # display-friendly dtype.
         head_pred = head_pred.float()
         if wan_decoder_pred is not None:
             wan_decoder_pred = wan_decoder_pred.float()
@@ -255,7 +255,7 @@ class ImageLogger(pl.Callback):
         # The forward above is the only collective part (FSDP per-layer
         # all-gathers), and every rank has now run it.  Non-rank-0 ranks
         # have no TensorBoard writer, so they bail here -- the remaining
-        # work (clustering, manifold projection, rendering, ``tb.add_*``)
+        # work (Mutex Watershed agglomeration, panel rendering, ``tb.add_*``)
         # is purely local and only the master needs to do it.
         if tb is None:
             return
@@ -272,8 +272,10 @@ class ImageLogger(pl.Callback):
             offsets = getattr(agglomerator, "offsets", offsets)
             n_pull = getattr(agglomerator, "n_pull", n_pull)
             if self.spatial_dims == 3:
-                aff = head_pred[:, AFF_SLICE].float()
-                sem_fg = head_pred[:, SEM_SLICE][:, 0] > 0.5
+                # Head emits aff / sem as raw logits -> sigmoid before MWS
+                # (probabilities) and before thresholding the fg mask.
+                aff = head_pred[:, AFF_SLICE].sigmoid().float()
+                sem_fg = head_pred[:, SEM_SLICE].sigmoid()[:, 0] > 0.5
                 seg_3d = agglomerator(aff, sem_fg)            # [n, D, H, W] long
                 seg_pred_2d = rearrange(
                     _to_2d(rearrange(seg_3d, "b ... -> b 1 ...")),

@@ -513,12 +513,12 @@ weight_sem:
   gamma: 2.0            # 0 collapses focal back to plain BCE
 ```
 
-**Activation contract.** The composite expects probabilities — `sem`
-arrives post-sigmoid via ``apply_head_activations``.  We use MONAI's
-``DiceLoss(sigmoid=False)`` for the Dice term and roll BCE / Focal on
-probabilities ourselves (sharing ``stable_bce_on_probs`` for the
-fp32-clamped log math), because MONAI's CE / Focal branches assume
-logits.
+**Activation contract.** The composite expects **logits** — the head
+emits raw logits (no activation in `forward`).  The BCE term uses the
+logit-stable ``binary_cross_entropy_with_logits``; the Dice
+(``DiceLoss(sigmoid=False)``) and focal terms run on ``sigmoid(logits)``
+(computed once internally).  Feed it the raw `sem` / `aff` logits, not
+probabilities.
 
 **Ablations.** Set any ``lambda_*`` to ``0`` to disable that term;
 ``gamma: 0`` reduces the focal term exactly to per-voxel BCE.

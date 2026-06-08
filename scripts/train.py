@@ -91,7 +91,7 @@ os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
 os.environ.setdefault("NCCL_ALGO", "Ring")
 os.environ.setdefault("NCCL_PROTO", "Simple")
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Optional
 
 import hydra
 import pytorch_lightning as pl
@@ -171,14 +171,6 @@ def _install_runtime_patches() -> None:
 # ----------------------------------------------------------------------
 
 
-def _field_weight(loss_cfg: Any, field: str, default: float = 0.0) -> float:
-    """Extract ``loss.weight_<field>.weight`` (or scalar shorthand)."""
-    v = loss_cfg.get(f"weight_{field}", default) if hasattr(loss_cfg, "get") else default
-    if isinstance(v, Mapping):
-        return float(v.get("weight", default))
-    return float(v)
-
-
 def _to_vol_list(val):
     """Convert an OmegaConf volume list to a list of plain dicts."""
     if val is None:
@@ -215,11 +207,6 @@ def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
         "find_boundaries": float(data_cfg.get("find_boundaries", 0.0)),
         "pixel_size": tuple(pixel_size) if pixel_size is not None else None,
         "min_foreground": float(data_cfg.get("min_foreground", 0.0)),
-        "compute_geometry": any(
-            _field_weight(cfg.get("loss", {}), f, default=0.0) > 0
-            for f in ("skl", "dir", "cov", "rad")
-        ),
-        "radius_normalize": bool(data_cfg.get("radius_normalize", True)),
         "elastic_prob": float(data_cfg.get("elastic_prob", 0.0)),
         "elastic_sigma_range": tuple(data_cfg.get("elastic_sigma_range", [35, 50])),
         "elastic_magnitude_range": tuple(data_cfg.get("elastic_magnitude_range", [10, 40])),

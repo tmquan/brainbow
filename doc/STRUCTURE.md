@@ -57,9 +57,8 @@ applicable or directly: `python scripts/<name>.py`.
 
 | File                               | Covers                                                     |
 | ---------------------------------- | ---------------------------------------------------------- |
-| `tests/test_losses.py`             | `AffinityFGLoss` (channel layout, sigmoid policy, uint8 affinity target + validity mask, chunked-loss parity, scalar keys, backward) + `DiceBCEFocalLoss`. |
+| `tests/test_losses.py`             | `AffinityFGLoss` (channel layout, raw-logit head, uint8 affinity target + validity mask, chunked-loss parity, scalar keys, backward) + `DiceBCEFocalLoss`. |
 | `tests/test_tensorboard_heads.py`  | `_log_predictions` panel set (true/pred aff, sem, raw, Mutex Watershed `pred/label`). |
-| `tests/test_skeleton_transform.py` | `SkeletonGeometryd` transform end-to-end: skeleton / direction / covariance / radius shapes, kimimaro+skimage backends, reconstruction identity, covariance eigenstructure. |
 | `tests/test_datasets.py`           | `CircuitDataset` abstract contract (resolution, anisotropy, length virtualisation). |
 | `tests/test_datamodules.py`        | `CircuitDataModule` augmentation pipeline (via a synthetic in-memory dataset). |
 | `tests/test_preprocessors.py`      | HDF5 / NRRD / TIFF / NfTy converters.                      |
@@ -86,12 +85,9 @@ and the loss targets.  No learnable state.
 
 | File                       | Purpose                                                                |
 | -------------------------- | ---------------------------------------------------------------------- |
-| `direction.py`             | Per-voxel unit vectors pointing at the instance centroid.              |
-| `covariance.py`            | Per-voxel upper-triangle covariance field for each instance.           |
-| `edt.py`                   | Exact Euclidean distance transform (scipy-backed).                     |
+| `edt.py`                   | GPU/CPU distance-transform + filter/label/centroid utilities (cucim / scipy). |
 | `find_boundaries.py`       | Connectivity-1 inner/outer boundary masks (cucim / skimage / torch).   |
 | `label.py`                 | Relabel / remap / consolidate instance ids.                            |
-| `_region_field.py`         | Private helper for per-voxel per-instance regionprops fields (shared by `direction.py` / `covariance.py`). |
 | `rand_crop_foreground.py`  | Random crop biased toward foreground voxels.                           |
 | `rand_transpose_xy.py`     | Random xy-transpose augmentation.                                      |
 | `resolution_zoom.py`       | Per-axis resolution scaling for multi-resolution training.             |
@@ -119,9 +115,9 @@ and the loss targets.  No learnable state.
 
 | File            | Purpose                                                                        |
 | --------------- | ------------------------------------------------------------------------------ |
-| `_common.py`         | Single source of truth for the head layout: `AFFINITY_OFFSETS` / `N_PULL`, `AFF_SLICE` / `SEM_SLICE` / `RAW_SLICE`, `HEAD_CHANNELS`, the contiguous `SIGMOID_SLICE` over (aff, sem), `apply_head_activations`, the affinity-target / validity-mask builders, slicing helpers, and the fp32-clamped `stable_bce_on_probs`. |
+| `_common.py`         | Single source of truth for the head layout: `AFFINITY_OFFSETS` / `N_PULL`, `AFF_SLICE` / `SEM_SLICE` / `RAW_SLICE`, `HEAD_CHANNELS`, the affinity-target / validity-mask builders, and slicing helpers. The head emits raw logits / linear values (no activation in `forward`). |
 | `affinity.py`        | `AffinityFGLoss` — the head's supervisor: masked + offset-weighted (pull/push) affinity composite (BCE + soft-Dice + focal), a `DiceBCEFocalLoss` foreground (`sem`) term, and an L1 `raw` reconstruction term.  Emits `loss/aff`, `loss/sem`, `loss/raw`. |
-| `dice_bce_focal.py`  | `DiceBCEFocalLoss` — composite probability-input supervisor used by `AffinityFGLoss` for the `sem` head.  Composes MONAI's `DiceLoss(sigmoid=False)` with BCE-on-probs (`stable_bce_on_probs`) and a focal-on-probs path; `lambda_{bce,dice,focal}` + `gamma` parameterise the mix. |
+| `dice_bce_focal.py`  | `DiceBCEFocalLoss` — composite logit-input supervisor used by `AffinityFGLoss` for the `sem` head.  Logit-stable BCE (`binary_cross_entropy_with_logits`) plus MONAI's `DiceLoss(sigmoid=False)` and a focal path, both on `sigmoid(logits)`; `lambda_{bce,dice,focal}` + `gamma` parameterise the mix. |
 
 ### `brainbow/metrics/` — per-head eval metrics
 
@@ -257,7 +253,7 @@ concrete `module.py`.
 
 | Subsystem                               | .py files  |
 | --------------------------------------- | ---------- |
-| `brainbow/transforms/`                  | 10 (incl. `__init__`, `_region_field`)               |
+| `brainbow/transforms/`                  |  7 (incl. `__init__`)                                |
 | `brainbow/models/cosmos_2_5_common/`    |  7 (incl. `__init__`)                                |
 | `brainbow/models/cosmos_transfer_2_5/`  |  3 (`__init__`, `wrapper`, `variants`)               |
 | `brainbow/models/cosmos_predict_2_5/`   |  3 (`__init__`, `wrapper`, `variants`)               |

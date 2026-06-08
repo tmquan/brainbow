@@ -1,26 +1,28 @@
 """
 Affinity + foreground loss for the Mutex Watershed head.
 
-The model emits a single ``[B, HEAD_CHANNELS, D, H, W]`` head whose
-channels (all post-sigmoid probabilities) are the per-offset affinities
-:data:`brainbow.losses._common.AFF_SLICE` and a scalar foreground
-probability :data:`brainbow.losses._common.FG_SLICE`.  This loss
-supervises both:
+The model emits a single ``[B, HEAD_CHANNELS, D, H, W]`` head of raw
+logits / linear values (no activation in the forward pass): the per-offset
+affinities :data:`brainbow.losses._common.AFF_SLICE` and the scalar
+foreground :data:`brainbow.losses._common.SEM_SLICE` are logits; the
+``raw`` channel is linear.  This loss supervises all three:
 
-* **aff** -- per-voxel affinity ``aff[o, v] = P(label[v] == label[v+o])``
-  against the binary target from
+* **aff** -- per-voxel affinity logit ``z[o, v]`` for
+  ``aff[o, v] = P(label[v] == label[v+o])`` against the binary target from
   :func:`~brainbow.losses._common.affinity_target_from_offsets`, with a
-  composite (masked BCE + masked soft-Dice + optional focal).  Edges
-  with a non-foreground endpoint are masked out (see
+  composite (masked logit-stable BCE + masked soft-Dice + optional focal,
+  the latter two on ``sigmoid(z)``).  Edges with a non-foreground endpoint
+  are masked out (see
   :func:`~brainbow.losses._common.affinity_validity_mask`), and the
-  short-range *pull* offsets and long-range *push* offsets
-  carry independent weights.
-* **sem** -- the foreground / boundary (semantic) probability against
+  short-range *pull* offsets and long-range *push* offsets carry
+  independent weights.
+* **sem** -- the foreground / boundary (semantic) logit against
   ``labels > 0``, via the shared
   :class:`~brainbow.losses.dice_bce_focal.DiceBCEFocalLoss` composite.
 * **raw** -- the linear reconstruction channel against the (normalised)
-  input EM intensity, via a plain L1 / MSE regression (an auxiliary
-  self-supervised signal that stabilises the shared decoder features).
+  input EM intensity in ``[-1, 1]``, via a plain L1 / MSE regression (an
+  auxiliary self-supervised signal that stabilises the shared decoder
+  features).
 
 At evaluation / inference the predicted affinities are agglomerated into
 instances by the Mutex Watershed (Wolf et al. 2018); see
@@ -38,8 +40,8 @@ the field weight) or a mapping ``{weight: ..., **sub_kwargs}``::
       lambda_dice: 1.0
       lambda_focal: 0.0
       gamma: 2.0
-      pull_weight: 1.0     # multiplier on the nn (pull) offsets
-      push_weight: 1.0      # multiplier on the long-range offsets
+      pull_weight: 1.0     # multiplier on the pull (nearest-neighbour) offsets
+      push_weight: 1.0      # multiplier on the push (long-range) offsets
       mask_to_foreground: true   # drop edges with a background endpoint
     weight_sem:
       weight: 1.0
@@ -65,6 +67,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 
 from brainbow.losses._common import (
@@ -78,7 +81,6 @@ from brainbow.losses._common import (
     affinity_validity_mask,
     canonical_regression_name,
     regression_loss_fn,
-    stable_bce_on_probs,
 )
 from brainbow.losses.dice_bce_focal import DiceBCEFocalLoss
 
@@ -88,7 +90,7 @@ HeadConfig = Union[float, int, Mapping[str, Any]]
 def _split_field(cfg: HeadConfig) -> Tuple[float, Dict[str, Any]]:
     """Split ``weight_<field>`` into ``(weight, sub_kwargs)``.
 
-    Scalar shorthand: ``weight_fg: 1.0`` == ``weight_fg: {weight: 1.0}``.
+    Scalar shorthand: ``weight_sem: 1.0`` == ``weight_sem: {weight: 1.0}``.
     A nested mapping without ``weight:`` defaults to ``weight: 1.0``.
     """
     if isinstance(cfg, Mapping):
@@ -167,7 +169,7 @@ class AffinityFGLoss(nn.Module):
                 stacklevel=2,
             )
 
-        # ----- sem (composite Dice + BCE + Focal on the fg probability) -----
+        # ----- sem (composite Dice + BCE + Focal on the foreground logit) -----
         self.weight_sem, sem_kw = _split_field(weight_sem)
         self._sem_loss = DiceBCEFocalLoss(
             lambda_dice=float(sem_kw.pop("lambda_dice", 1.0)),
@@ -240,16 +242,18 @@ class AffinityFGLoss(nn.Module):
 
     def _loss_aff(
         self,
-        probs: torch.Tensor,
+        logits: torch.Tensor,
         target: torch.Tensor,
         mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Masked, offset-weighted composite on the affinity head.
 
-        ``probs`` is ``[B, N_AFF, D, H, W]`` (already sigmoided); ``target``
+        ``logits`` is ``[B, N_AFF, D, H, W]`` (raw, pre-sigmoid); ``target``
         / ``mask`` are ``[B, N_AFF, D, H, W]`` ``uint8`` (or ``mask=None``
         for all-valid).  Channels are weighted by :attr:`_offset_weights`
-        (pull vs push).
+        (pull vs push).  The BCE term uses the logit-stable
+        ``binary_cross_entropy_with_logits``; the focal / Dice terms use
+        ``sigmoid(logits)``.
 
         Computed by **chunking over the offset axis** so the peak fp32
         intermediate is ``[B, chunk, D, H, W]`` rather than several
@@ -259,11 +263,11 @@ class AffinityFGLoss(nn.Module):
         chunks, so the result is numerically identical to the unchunked
         form (sums are linear; Dice is a global ratio).
         """
-        n = probs.shape[1]
-        ch_w = self._offset_weights.to(probs.device, torch.float32)
+        n = logits.shape[1]
+        ch_w = self._offset_weights.to(logits.device, torch.float32)
         chunk = max(1, int(self.aff_chunk_size))
 
-        zero = probs.new_zeros((), dtype=torch.float32)
+        zero = logits.new_zeros((), dtype=torch.float32)
         bce_sum = zero.clone()
         focal_sum = zero.clone()
         wmask_sum = zero.clone()
@@ -271,19 +275,23 @@ class AffinityFGLoss(nn.Module):
         dice_pm = zero.clone()
         dice_tm = zero.clone()
 
+        need_probs = self.aff_lambda_focal > 0 or self.aff_lambda_dice > 0
         for c0 in range(0, n, chunk):
             c1 = min(c0 + chunk, n)
-            p = probs[:, c0:c1].float()
+            z = logits[:, c0:c1].float()
             t = target[:, c0:c1].float()
+            p = z.sigmoid() if need_probs else None
             cw = ch_w[c0:c1].view(1, -1, 1, 1, 1)
             if mask is None:
-                wm_full = torch.ones_like(p) * cw
+                wm_full = torch.ones_like(z) * cw
             else:
                 wm_full = mask[:, c0:c1].float() * cw
             wmask_sum = wmask_sum + wm_full.sum()
 
             if self.aff_lambda_bce > 0:
-                bce = stable_bce_on_probs(p, t, eps=self.eps)
+                bce = F.binary_cross_entropy_with_logits(
+                    z, t, reduction="none",
+                )
                 bce_sum = bce_sum + (bce * wm_full).sum()
 
             if self.aff_lambda_focal > 0:
@@ -312,14 +320,19 @@ class AffinityFGLoss(nn.Module):
         return total
 
     def _loss_sem(
-        self, probs: torch.Tensor, labels: torch.Tensor,
+        self, logits: torch.Tensor, labels: torch.Tensor,
     ) -> torch.Tensor:
-        """Composite Dice + BCE + Focal on the binary foreground head."""
+        """Composite Dice + BCE + Focal on the binary foreground head.
+
+        ``logits`` are the raw (pre-sigmoid) ``sem`` head outputs;
+        :class:`DiceBCEFocalLoss` applies the logit-stable BCE and
+        sigmoids internally for its Dice / focal terms.
+        """
         target = rearrange((labels > 0).float(), "b ... -> b 1 ...")
         valid = rearrange(
             (labels != self.ignore_index).float(), "b ... -> b 1 ...",
         )
-        return self._sem_loss(probs, target * valid)
+        return self._sem_loss(logits, target * valid)
 
     def _loss_raw(
         self, pred: torch.Tensor, raw_image: torch.Tensor,
@@ -363,13 +376,14 @@ class AffinityFGLoss(nn.Module):
         """Run the affinity + foreground sub-losses and aggregate.
 
         Args:
-            head: ``[B, HEAD_CHANNELS, D, H, W]`` post-sigmoid head.
+            head: ``[B, HEAD_CHANNELS, D, H, W]`` raw-logit head (aff / sem
+                are logits; raw is linear).
             targets: Dict with ``labels`` ``[B, D, H, W]`` integer ids and
                 (optionally) a ``_cached_targets`` dict from
                 :meth:`build_targets`.
 
         Returns:
-            ``{"loss", "loss/aff", "loss/fg"}`` (per-field entries only for
+            ``{"loss", "loss/aff", "loss/sem", "loss/raw"}`` (per-field entries only for
             active fields).
         """
         if head.shape[1] != HEAD_CHANNELS:

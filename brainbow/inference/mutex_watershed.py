@@ -210,8 +210,8 @@ def _build_edges(
     """Build flat edge arrays ``(u, v, weight, is_mutex)`` + #mutex edges.
 
     ``u`` / ``v`` are flat voxel indices into the ``[D, H, W]`` grid.
-    Attractive edges use ``weight = affinity``; push edges use
-    ``weight = 1 - affinity`` and are flagged as mutex.  Repulsive edges
+    Pull edges use ``weight = affinity``; push edges use
+    ``weight = 1 - affinity`` and are flagged as mutex.  Push edges
     are subsampled by ``strides`` (per-axis) to bound the edge count.
     """
     D, H, W = affinities.shape[1], affinities.shape[2], affinities.shape[3]

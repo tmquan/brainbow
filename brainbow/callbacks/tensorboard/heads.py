@@ -4,9 +4,11 @@ Emits the ``true/*`` ground-truth panels and the ``pred/*`` prediction
 panels that mirror the loss scalar paths.  The head layout is owned by
 :mod:`brainbow.losses._common`:
 
-    aff: per-offset affinity probabilities (a curated subset is shown)
-    sem: foreground / boundary probability
-    raw: linear reconstruction of the input EM intensity
+    aff: per-offset affinity logits (sigmoided for display; a curated
+         subset is shown)
+    sem: foreground / boundary logit (sigmoided for display)
+    raw: linear reconstruction of the input EM intensity (target in
+         [-1, 1]; rescaled to [0, 1] for display)
 
 The instance segmentation (``pred/label``) is the Mutex Watershed
 agglomeration of the predicted affinities, computed by the caller (see
@@ -149,15 +151,21 @@ def _log_predictions(
         tb.add_images(head.tag("true/wan_decoder"), wan, global_step=epoch)
 
     # ----- pred panels -----
-    sem = _to_2d(fields["sem"]).clamp(0.0, 1.0)
+    # The head emits raw logits / linear values: sigmoid the aff / sem
+    # channels for display, and rescale the linear raw channel from its
+    # [-1, 1] target range back to [0, 1].
+    sem = _to_2d(fields["sem"].sigmoid()).clamp(0.0, 1.0)
     sem_rgb = repeat(sem, "b 1 h w -> b 3 h w")
     tb.add_images(head.tag("pred/sem"), sem_rgb, global_step=epoch)
 
-    raw = repeat(_to_2d(fields["raw"]).clamp(0.0, 1.0), "b 1 h w -> b 3 h w")
+    raw = repeat(
+        ((_to_2d(fields["raw"]) + 1.0) / 2.0).clamp(0.0, 1.0),
+        "b 1 h w -> b 3 h w",
+    )
     tb.add_images(head.tag("pred/raw"), raw, global_step=epoch)
 
     _add_aff_panels(
-        tb, head, fields["aff"], indices,
+        tb, head, fields["aff"].sigmoid(), indices,
         mask_2d=sem, epoch=epoch, tag_prefix="pred/aff",
     )
 

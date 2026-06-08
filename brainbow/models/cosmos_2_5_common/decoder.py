@@ -2,10 +2,11 @@
 
 The decoder hosts one unified task head that emits the canonical
 ``[B, HEAD_CHANNELS, D, H, W]`` affinity + sem + raw tensor consumed by
-``brainbow.losses.AffinityFGLoss``.  Activation policy is applied exactly
-once here via :func:`brainbow.losses.apply_head_activations`: sigmoid on
-the contiguous affinity + sem run (:data:`brainbow.losses.SIGMOID_SLICE`),
-linear on the trailing raw-reconstruction channel.
+``brainbow.losses.AffinityFGLoss``.  The head applies no activation: it
+emits raw logits for the affinity + sem channels and a linear value for
+the raw-reconstruction channel.  Each consumer applies its own activation
+(logit-stable BCE in the loss; sigmoid for metrics / Mutex Watershed /
+TensorBoard).
 """
 
 import logging
@@ -22,7 +23,7 @@ from brainbow.models.cosmos_2_5_common.layers import (
     _PointwiseLinear,
 )
 from brainbow.models.vista import VistaTaskHead3D
-from brainbow.losses import HEAD_CHANNELS, apply_head_activations
+from brainbow.losses import HEAD_CHANNELS
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ class _ProgressiveUpsampler3D(nn.Module):
 
 
 class _DecoderAdapter3D(nn.Module):
-    """Reuses pretrained VAE decoder for multi-head volumetric segmentation.
+    """Reuses pretrained VAE decoder for the unified-head volumetric segmentation.
 
     Replaces the decoder's final output convolution with the unified
     affinity + sem + raw task head while preserving all pretrained upsampling
@@ -272,8 +273,9 @@ class _DecoderAdapter3D(nn.Module):
                 )
             skip = self.skip_stem(image.to(decoded.dtype))
             decoded = torch.cat([decoded, skip.to(decoded.dtype)], dim=1)
-        out = self.head(decoded)
-        return apply_head_activations(out)
+        # Raw logits / linear values -- no activation here (see module
+        # docstring).  Consumers sigmoid the aff / sem channels themselves.
+        return self.head(decoded)
 
     def _decode_body(
         self, features: torch.Tensor, target_size: tuple,

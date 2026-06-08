@@ -5,8 +5,9 @@ with spatially-coloured (brainbow-style) instance segmentation targets.
 Provides:
 - MONAI-compatible dataset classes with a standardised interface
 - Preprocessors for common data formats (TIFF, HDF5, NRRD, NIfTI)
-- Cosmos-Transfer3D model wrapper (DiT + VAE backbone) for volumetric
-  segmentation, together with a Vista3D reference implementation
+- Cosmos model wrappers (DiT + VAE backbone) for volumetric
+  segmentation -- Cosmos-Predict 2.5 (2B) and Cosmos3-Nano (16B) are the
+  default backbones, with Cosmos-Transfer 2.5 and a Vista3D reference
 - An affinity + foreground head supervised by ``AffinityFGLoss`` and
   agglomerated into instances at eval/inference by the Mutex Watershed
   (``brainbow.inference.mutex_watershed``).
@@ -46,6 +47,7 @@ from brainbow.losses import AffinityFGLoss, HEAD_CHANNELS, HEAD_LAYOUT, slice_he
 from brainbow.models import (
     BaseModel,
     Cosmos3Nano3DWrapper,
+    CosmosPredict3DWrapper,
     CosmosTransfer3DWrapper,
     Vista3DWrapper,
 )
@@ -54,6 +56,7 @@ from brainbow.modules import (
     BaseCosmosModule,
     BaseVistaModule,
     Cosmos3Nano3DModule,
+    CosmosPredict3DModule,
     CosmosTransfer3DModule,
     Vista3DModule,
 )
@@ -82,12 +85,14 @@ __all__ = [
     # Models (backbone wrappers)
     "BaseModel",
     "Cosmos3Nano3DWrapper",
+    "CosmosPredict3DWrapper",
     "CosmosTransfer3DWrapper",
     "Vista3DWrapper",
     # Modules (Lightning)
     "BaseCircuitModule",
     "BaseCosmosModule",
     "Cosmos3Nano3DModule",
+    "CosmosPredict3DModule",
     "BaseVistaModule",
     "CosmosTransfer3DModule",
     "Vista3DModule",

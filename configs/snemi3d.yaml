@@ -127,15 +127,10 @@ data:
   # ``input_supersample: 2``.
   val_batch_size: 2
   num_workers: 8
-  # persistent_workers=true.  A ``/dev/shm`` blow-up can occur if a
-  # transform forks pathos subprocesses inside DataLoader workers
-  # (orphaned named-shm segments on worker SIGKILL).  The leak is closed at the
-  # transform layer by ``parallel=1`` in
-  # ``brainbow/transforms/skeleton.py::_skeletonize_all_kimimaro``,
-  # which short-circuits kimimaro's parallel code path entirely.  With
-  # that fix in place, persistent workers are the cheaper choice:
-  # disabling them re-spawns the forkserver pool every epoch and
-  # re-pays the kimimaro-import / MONAI-setup cost on every restart.
+  # persistent_workers=true keeps the DataLoader worker pool alive across
+  # epochs: disabling it re-spawns the forkserver pool every epoch and
+  # re-pays the MONAI transform-setup cost on every restart.  Set false
+  # only if host RAM is tight (each rank holds num_workers processes).
   persistent_workers: true
   pin_memory: true
   # cache_rate=0: LazyVolDataset bypasses MONAI's CacheDataset path
@@ -328,6 +323,12 @@ model:
   # the supersample experiment is isolated.
   highres_skip: false
   highres_skip_channels: 8
+  # Scale the VAE-encode input [0,1]->[-1,1] to match AutoencoderKLWan's
+  # pretrained range (it normalizes [0,1]->[-1,1] before encode()).  Feeding
+  # [0,1] washes out the reconstruction (see true/wan_decoder panel).  Shifts
+  # the latent distribution -> fresh-run setting (old [0,1] checkpoints will
+  # not resume cleanly with it on).
+  vae_input_pm1: true
 
   # What to freeze.  Cosmos 3 has no ControlNet residual branch to
   # absorb the trainable load, so leaving the omni transformer
@@ -481,8 +482,7 @@ training:
   # of the 2B DiT (no graph breaks), which gives the best steady-state
   # runtime but pays for it with a multi-minute first-step stall.
   # Under DDP that stall is synchronous across ranks, and combined
-  # with the cold-train-loader first batch (kimimaro + per-instance
-  # EDT, see ``brainbow/transforms/skeleton.py``) it can overshoot
+  # with the cold-train-loader first batch it can overshoot
   # ``TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC`` -- which is why we already
   # bump that env var to 1800s in ``scripts/train.py``.  Flip to
   # ``false`` (the safer default) if the watchdog still fires before

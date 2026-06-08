@@ -123,6 +123,7 @@ class _BaseCosmos25Wrapper(nn.Module):
         input_supersample: int = 1,
         highres_skip: bool = False,
         highres_skip_channels: int = 8,
+        vae_input_pm1: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -153,6 +154,11 @@ class _BaseCosmos25Wrapper(nn.Module):
         # >1 multiplies VAE + DiT cost (~factor^2 tokens) -- pair with a
         # batch-size cut.  ``1`` disables (the default).
         self._input_supersample = int(input_supersample)
+        # The dataset emits the EM in [0, 1], but the pretrained
+        # AutoencoderKLWan (like diffusers image/video VAEs) is trained on
+        # [-1, 1] inputs.  When True, scale the VAE-encode input [0,1]->[-1,1]
+        # so it matches the VAE's pretrained distribution.
+        self._vae_input_pm1 = bool(vae_input_pm1)
 
         self._dtype = {
             "bf16": torch.bfloat16,
@@ -858,13 +864,14 @@ class _BaseCosmos25Wrapper(nn.Module):
     # ------------------------------------------------------------------
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Full forward pass: encode -> DiT features -> unified 30-ch head.
+        """Full forward pass: encode -> DiT features -> unified head.
 
         Args:
             x: Input volume ``[B, C, D, H, W]``.
 
         Returns:
-            Unified head tensor ``[B, 30, D, H, W]``.
+            Unified head tensor ``[B, HEAD_CHANNELS, D, H, W]`` of raw
+            logits / linear values (``aff`` / ``sem`` logits, ``raw`` linear).
         """
         features, target_size = self._encode_and_extract(x)
         return self.decoder_adapter(
@@ -930,6 +937,16 @@ class _BaseCosmos25Wrapper(nn.Module):
 
         rgb = _adapt_to_rgb(x)
 
+        # Match the pretrained Wan VAE's input range.  The dataset emits the
+        # EM in [0, 1]; AutoencoderKLWan is trained on [-1, 1] (its pipeline
+        # normalizes [0,1]->[-1,1] before encode()).  Feeding [0,1] puts
+        # everything in the upper half of the VAE's range -> washed-out
+        # reconstruction.  The `raw` recon target tracks this same range: the
+        # Lightning module scales targets["raw_image"] to [-1, 1] when
+        # ``vae_input_pm1`` is set (see modules/base.py).
+        if self._vae_input_pm1:
+            rgb = rgb * 2.0 - 1.0
+
         s = self.cfg.spatial_compression
         t = self.cfg.temporal_compression
         pad_d = (t - D_in % t) % t
@@ -961,6 +978,16 @@ class _BaseCosmos25Wrapper(nn.Module):
         self._freeze_dit_backbone = False
         logger.info("DiT backbone unfrozen (%s trainable params).",
                      f"{self.get_num_parameters(True):,}")
+
+    @property
+    def vae_input_pm1(self) -> bool:
+        """Whether the VAE-encode input is scaled ``[0,1] -> [-1,1]``.
+
+        Consumers (e.g. the Lightning module building the ``raw`` recon
+        target) read this so the raw target range tracks the encode-input
+        range: when ``True`` the EM target is taken in ``[-1, 1]``.
+        """
+        return self._vae_input_pm1
 
     @property
     def dit_thaw_epoch(self) -> Optional[int]:

@@ -40,10 +40,10 @@ training:
   # ``compile_fullgraph: false`` overrides the snemi3d.yaml default of
   # ``true``.  Combine has 11 train volumes (neurons cylinder + 10
   # MICrONS minnie65 crops) versus snemi3d's 3, so the cold first
-  # batch on every rank pays a heavier kimimaro + per-instance EDT
-  # bill (the lazy reader has more volumes to probe; MICrONS crops
-  # are 4096x4096x800 with denser instance counts).  Combined with
-  # the synchronous DDP first-step compile stall, ``true`` here can
+  # batch on every rank pays a heavier lazy-reader probe bill (more
+  # volumes to open; MICrONS crops are 4096x4096x800 with denser
+  # instance counts).  Combined with the synchronous DDP first-step
+  # compile stall, ``true`` here can
   # overshoot ``TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC`` even with the
   # 1800 s bump in ``scripts/train.py``.  ``false`` lets Inductor
   # break the graph at problem ops, trading ~10 percent steady-state

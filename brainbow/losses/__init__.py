@@ -12,10 +12,11 @@ The public loss surface is intentionally small:
   exposed here so external consumers can instantiate it directly with
   the same numerics.
 * :mod:`brainbow.losses._common` owns the canonical channel layout
-  (:data:`AFFINITY_OFFSETS`, :data:`AFF_SLICE`, :data:`FG_SLICE`),
-  :func:`apply_head_activations`, the affinity-target / validity-mask
-  builders, field-slicing helpers, and shared numerical utilities
-  (including :func:`stable_bce_on_probs`).
+  (:data:`AFFINITY_OFFSETS`, :data:`AFF_SLICE`, :data:`SEM_SLICE`,
+  :data:`RAW_SLICE`), the
+  affinity-target / validity-mask builders, field-slicing helpers, and
+  shared numerical utilities.  The head emits raw logits (no activation
+  in the forward pass).
 """
 
 from brainbow.losses.affinity import AffinityFGLoss
@@ -31,10 +32,8 @@ from brainbow.losses._common import (
     N_PULL,
     RAW_SLICE,
     SEM_SLICE,
-    SIGMOID_SLICE,
     affinity_target_from_offsets,
     affinity_validity_mask,
-    apply_head_activations,
     shift_nd,
     shift_replicate,
     slice_head,
@@ -50,13 +49,11 @@ __all__ = [
     "AFF_SLICE",
     "SEM_SLICE",
     "RAW_SLICE",
-    "SIGMOID_SLICE",
     "N_AFF",
     "N_PULL",
     "AFF_CHANNELS",
     "AFF_NAMES",
     "slice_head",
-    "apply_head_activations",
     "affinity_target_from_offsets",
     "affinity_validity_mask",
     "shift_nd",

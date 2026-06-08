@@ -89,7 +89,7 @@ instance for exact numbers.
 | `feature_projector` output   | **64**   | 1 / (4, 8, 8)           |
 | `to_latent` back to VAE      | **16**   | 1 / (4, 8, 8)           |
 | Decoder output (trilinear up)| **64**   | 1                       |
-| `head`                       | `head_channels = HEAD_CHANNELS = 16` = aff(N_AFF=14) + sem(1) + raw(1). Sigmoid on the contiguous aff+sem block (`SIGMOID_SLICE = [0, N_AFF+1)`); the trailing raw channel is linear. |
+| `head`                       | `head_channels = HEAD_CHANNELS = 16` = aff(N_AFF=14) + sem(1) + raw(1). Raw logits / linear values, no activation in `forward`: aff + sem are logits (logit-stable BCE in the loss; sigmoid at metrics / MWS / TensorBoard), raw is linear (target in `[-1, 1]`). |
 
 ### 1.3 The DiT variant (2B)
 

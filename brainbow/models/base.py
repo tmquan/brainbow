@@ -39,9 +39,9 @@ class BaseModel(nn.Module, ABC):
     Required overrides
     ------------------
     * :meth:`forward(x)` -- return the ``[B, HEAD_CHANNELS, *spatial]``
-      head tensor.  Activations are applied via
-      :func:`brainbow.losses.apply_head_activations` (sigmoid on the
-      ``aff + sem`` block, linear ``raw``) before the tensor is returned.
+      head tensor of raw logits / linear values.  No activation is applied
+      in ``forward``: the ``aff + sem`` channels are logits and ``raw`` is
+      linear; each consumer applies its own activation.
     * :meth:`get_output_channels()` -- the integer ``HEAD_CHANNELS``.
       Used by sliding-window inference and the image logger to allocate
       output buffers without a real forward pass.
@@ -71,10 +71,9 @@ class BaseModel(nn.Module, ABC):
             x: Input tensor ``[B, C, *spatial]``.
 
         Returns:
-            The ``[B, HEAD_CHANNELS, *spatial]`` head tensor, with
-            activations already applied (sigmoid on the ``aff + sem``
-            block via :func:`brainbow.losses.apply_head_activations`,
-            linear ``raw``).
+            The ``[B, HEAD_CHANNELS, *spatial]`` head tensor of raw
+            logits / linear values (no activation applied: the
+            ``aff + sem`` channels are logits, ``raw`` is linear).
         """
         raise NotImplementedError
 

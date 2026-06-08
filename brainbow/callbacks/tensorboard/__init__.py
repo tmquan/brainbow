@@ -38,8 +38,8 @@ Module layout::
 End-to-end flow (rank-0 only, once per ``every_n_epochs``)::
 
         ┌────────────────────────┐
-        │ DataLoader batch       │  images, labels, optional
-        │ (PL Trainer)           │  direction / covariance fields
+        │ DataLoader batch       │  images, labels
+        │ (PL Trainer)           │
         └──────────┬─────────────┘
                    ▼
         ┌────────────────────────┐   cache first batch of the epoch on

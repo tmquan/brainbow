@@ -14,12 +14,10 @@ from brainbow.losses import (
     N_PULL,
     RAW_SLICE,
     SEM_SLICE,
-    SIGMOID_SLICE,
     AffinityFGLoss,
     DiceBCEFocalLoss,
     affinity_target_from_offsets,
     affinity_validity_mask,
-    apply_head_activations,
     slice_head,
     stable_bce_on_probs,
 )
@@ -28,10 +26,9 @@ from brainbow.losses import (
 def _sample_batch(requires_grad: bool = True):
     """A small head + targets batch.
 
-    The head is built from raw logits passed through
-    :func:`apply_head_activations` (sigmoid on the aff + sem block, linear
-    raw) so the loss sees the same activation contract the wrappers apply,
-    and gradients flow back to ``raw_head``.
+    The head emits raw logits / linear values directly (no activation in
+    the forward pass), so the same tensor is both the differentiable head
+    and the loss input; gradients flow back to it.
     """
     torch.manual_seed(7)
     # H/W >= 28 and D >= 5 so the longest affinity offset (in-plane 27,
@@ -39,7 +36,7 @@ def _sample_batch(requires_grad: bool = True):
     # ``|offset| < axis``).
     B, D, H, W = 2, 6, 32, 32
     raw_head = torch.randn(B, HEAD_CHANNELS, D, H, W, requires_grad=requires_grad)
-    head = apply_head_activations(raw_head)
+    head = raw_head
 
     labels = torch.zeros(B, D, H, W, dtype=torch.long)
     labels[:, :, :16, :16] = 1
@@ -60,8 +57,6 @@ def test_channel_layout() -> None:
     assert AFF_SLICE == slice(0, N_AFF)
     assert SEM_SLICE == slice(N_AFF, N_AFF + 1)
     assert RAW_SLICE == slice(N_AFF + 1, N_AFF + 2)
-    # aff + sem are the contiguous sigmoid block; raw stays linear.
-    assert SIGMOID_SLICE == slice(0, N_AFF + 1)
     assert HEAD_LAYOUT["aff"] == AFF_SLICE
     assert HEAD_LAYOUT["sem"] == SEM_SLICE
     assert HEAD_LAYOUT["raw"] == RAW_SLICE
@@ -77,18 +72,26 @@ def test_slice_head_returns_expected_shapes() -> None:
     }
 
 
-def test_apply_head_activations_sigmoids_aff_sem_only() -> None:
-    """``[SIGMOID_SLICE]`` (aff + sem) is sigmoided; raw is linear."""
-    torch.manual_seed(0)
-    raw = torch.randn(1, HEAD_CHANNELS, 2, 4, 4) * 5.0
-    out = apply_head_activations(raw)
+def test_head_is_raw_logits_unbounded() -> None:
+    """The head emits raw logits / linear values (no activation applied).
 
-    sig = out[:, SIGMOID_SLICE]
-    assert sig.min().item() >= 0.0 and sig.max().item() <= 1.0
-    assert torch.allclose(sig, raw[:, SIGMOID_SLICE].sigmoid())
-    # The raw channel is an unmodified linear pass-through.
-    assert torch.equal(out[:, RAW_SLICE], raw[:, RAW_SLICE])
-    assert torch.any(out[:, RAW_SLICE] < 0.0)
+    The loss must accept unbounded inputs and remain finite, since the
+    head no longer sigmoids the aff + sem block in its forward pass.
+    """
+    torch.manual_seed(0)
+    raw = (torch.randn(1, HEAD_CHANNELS, 6, 32, 32) * 5.0).requires_grad_(True)
+    # Unbounded on every channel -- nothing is clamped to [0, 1].
+    assert raw[:, AFF_SLICE].min().item() < 0.0
+    assert raw[:, SEM_SLICE].max().item() > 1.0
+
+    labels = torch.zeros(1, 6, 32, 32, dtype=torch.long)
+    labels[:, :, :16] = 1
+    targets = {"labels": labels, "raw_image": torch.rand(1, 1, 6, 32, 32) * 2 - 1}
+    loss_fn = AffinityFGLoss(weight_aff={"weight": 1.0, "lambda_focal": 1.0})
+    out = loss_fn(raw, targets)
+    assert torch.isfinite(out["loss"])
+    out["loss"].backward()
+    assert torch.isfinite(raw.grad).all()
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +104,7 @@ def test_affinity_target_from_offsets() -> None:
     assert aff.shape[1] == N_AFF == AFF_CHANNELS == 14
     assert aff.dtype == torch.uint8
     assert torch.all((aff == 0) | (aff == 1))
-    # Names: pull (attractive) nn first, then push (repulsive).
+    # Names: pull (nearest-neighbour) first, then push (long-range).
     assert len(AFF_NAMES) == N_AFF
     assert AFF_NAMES[0].split("_")[1] == "pull"
     assert AFF_NAMES[N_PULL].split("_")[1] == "push"
@@ -174,50 +177,49 @@ def test_missing_raw_image_raises_when_raw_enabled() -> None:
 
 
 # ---------------------------------------------------------------------------
-# DiceBCEFocalLoss (composite Dice + BCE + Focal on probabilities)
+# DiceBCEFocalLoss (composite Dice + BCE + Focal on logits)
 # ---------------------------------------------------------------------------
 
-def _sample_probs_target():
+def _sample_logits_target():
     torch.manual_seed(11)
     B, C, D, H, W = 2, 1, 4, 8, 8
-    logits = torch.randn(B, C, D, H, W) * 2.0
-    probs = logits.sigmoid().requires_grad_(True)
+    logits = (torch.randn(B, C, D, H, W) * 2.0).requires_grad_(True)
     target = (torch.rand(B, C, D, H, W) > 0.6).float()
-    return probs, target
+    return logits, target
 
 
 def test_dice_bce_focal_forward_finite() -> None:
-    probs, target = _sample_probs_target()
+    logits, target = _sample_logits_target()
     loss = DiceBCEFocalLoss(
         lambda_dice=1.0, lambda_bce=1.0, lambda_focal=1.0, gamma=2.0,
-    )(probs, target)
+    )(logits, target)
     assert loss.ndim == 0
     assert torch.isfinite(loss)
     assert float(loss) >= 0.0
 
 
 def test_dice_bce_focal_backward_routes_gradient() -> None:
-    probs, target = _sample_probs_target()
-    loss = DiceBCEFocalLoss()(probs, target)
+    logits, target = _sample_logits_target()
+    loss = DiceBCEFocalLoss()(logits, target)
     loss.backward()
-    assert probs.grad is not None
-    assert torch.isfinite(probs.grad).all()
-    assert probs.grad.abs().sum() > 0
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
+    assert logits.grad.abs().sum() > 0
 
 
 def test_dice_bce_focal_lambdas_are_linear() -> None:
-    probs, target = _sample_probs_target()
-    dice = DiceBCEFocalLoss(lambda_dice=1.0, lambda_bce=0.0, lambda_focal=0.0)(probs, target)
-    bce = DiceBCEFocalLoss(lambda_dice=0.0, lambda_bce=1.0, lambda_focal=0.0)(probs, target)
-    focal = DiceBCEFocalLoss(lambda_dice=0.0, lambda_bce=0.0, lambda_focal=1.0, gamma=2.0)(probs, target)
-    full = DiceBCEFocalLoss(lambda_dice=1.0, lambda_bce=1.0, lambda_focal=1.0, gamma=2.0)(probs, target)
+    logits, target = _sample_logits_target()
+    dice = DiceBCEFocalLoss(lambda_dice=1.0, lambda_bce=0.0, lambda_focal=0.0)(logits, target)
+    bce = DiceBCEFocalLoss(lambda_dice=0.0, lambda_bce=1.0, lambda_focal=0.0)(logits, target)
+    focal = DiceBCEFocalLoss(lambda_dice=0.0, lambda_bce=0.0, lambda_focal=1.0, gamma=2.0)(logits, target)
+    full = DiceBCEFocalLoss(lambda_dice=1.0, lambda_bce=1.0, lambda_focal=1.0, gamma=2.0)(logits, target)
     assert torch.allclose(full, dice + bce + focal, atol=1e-5)
 
 
 def test_dice_bce_focal_gamma_zero_collapses_focal_to_bce() -> None:
-    probs, target = _sample_probs_target()
-    bce = DiceBCEFocalLoss(lambda_dice=0.0, lambda_bce=1.0, lambda_focal=0.0)(probs, target)
-    focal_g0 = DiceBCEFocalLoss(lambda_dice=0.0, lambda_bce=0.0, lambda_focal=1.0, gamma=0.0)(probs, target)
+    logits, target = _sample_logits_target()
+    bce = DiceBCEFocalLoss(lambda_dice=0.0, lambda_bce=1.0, lambda_focal=0.0)(logits, target)
+    focal_g0 = DiceBCEFocalLoss(lambda_dice=0.0, lambda_bce=0.0, lambda_focal=1.0, gamma=0.0)(logits, target)
     assert torch.allclose(bce, focal_g0, atol=1e-5)
 
 

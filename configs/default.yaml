@@ -55,13 +55,6 @@ data:
   slice_mode: true
   num_samples: null
   find_boundaries: 0.0
-  # Normalisation mode for the per-instance distance-to-skeleton field
-  # (``label_radius``).  ``true`` (default) divides each instance's
-  # radii by its own max so the target lives in [0, 1] per-instance;
-  # ``false`` leaves the value in voxel units.  Only consumed when the
-  # geometry pipeline is active (``compute_geometry=true``) and the
-  # ``weight_rad`` head is non-zero.
-  radius_normalize: true
   elastic_prob: 0.0            # probability of 3-D elastic deformation (0 = off)
   elastic_sigma_range: [35, 50]       # Gaussian smoothing σ — high = sparse, smooth warp
   elastic_magnitude_range: [10, 40]   # displacement magnitude range (kept low for gentle warps)

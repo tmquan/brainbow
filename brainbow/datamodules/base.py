@@ -5,8 +5,8 @@ Why this file exists
 --------------------
 Every dataset in brainbow shares the same MONAI augmentation pipeline,
 the same train/val/test DataLoader plumbing, and the same hooks for
-loss-target precomputation (instance relabel after crop, direction /
-covariance fields, find-boundaries).  Keeping all of that in one place
+loss-target precomputation (instance relabel after crop,
+find-boundaries).  Keeping all of that in one place
 means a new dataset is a 30-50 line subclass that only declares
 ``dataset_class``.
 
@@ -22,9 +22,8 @@ Optional overrides
 ------------------
 * :meth:`_get_dataset_kwargs` -- add per-dataset kwargs to the
   ``__init__`` of :attr:`dataset_class`.
-* :meth:`_instance_transforms`, :meth:`_semantic_transforms`,
-  :meth:`_geometry_transforms` -- inject extra label-target transforms
-  before the volume is handed to the loss.
+* :meth:`_instance_transforms`, :meth:`_semantic_transforms` -- inject
+  extra label-target transforms before the volume is handed to the loss.
 * :meth:`_get_spatial_dims` -- 3 by default; override for 2-D datasets.
 """
 
@@ -57,7 +56,6 @@ from brainbow.transforms import (
     RandTransposeXYd,
     RandResolutionZoomd,
     RandSpatialCropForegroundd,
-    SkeletonGeometryd,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,10 +128,9 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
     Base PyTorch Lightning DataModule for connectomics datasets.
 
     Subclasses set ``dataset_class``, override ``_get_dataset_kwargs``,
-    and optionally override the three label-target hooks
-    (``_instance_transforms``, ``_semantic_transforms``,
-    ``_geometry_transforms``) or ``_get_spatial_dims`` for the
-    appropriate dimensionality.
+    and optionally override the label-target hooks
+    (``_instance_transforms``, ``_semantic_transforms``) or
+    ``_get_spatial_dims`` for the appropriate dimensionality.
 
     Pipeline order (train)::
 
@@ -141,7 +138,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         → [Pad + Crop(safe_size)] → [ResolutionZoom] → [CenterCrop(patch_size)]
         → spatial augmentations (flip/rot90/elastic)
         → instance_transforms (CC-relabel) → intensity augmentations
-        → geometry_transforms → EnsureType
+        → EnsureType
 
     When resolution zoom can downsample (zoom < 1), an enlarged *safe*
     crop is taken first so the zoom's center-crop/pad never introduces
@@ -187,8 +184,6 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         test_volumes: Optional[List[Dict[str, str]]] = None,
         persistent_workers: bool = True,
         prefetch_factor: int = 6,
-        compute_geometry: bool = True,
-        radius_normalize: bool = True,
         find_boundaries: float = 0.0,
         min_foreground: float = 0.0,
         pixel_size: Optional[Tuple[float, ...]] = None,
@@ -219,8 +214,6 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         self.test_volumes = test_volumes if test_volumes is not None else train_volumes
         self.persistent_workers = persistent_workers and num_workers > 0
         self.prefetch_factor = int(prefetch_factor)
-        self.compute_geometry = compute_geometry
-        self.radius_normalize = bool(radius_normalize)
         self.find_boundaries = float(find_boundaries)
         self.min_foreground = float(min_foreground)
         self.pixel_size = tuple(pixel_size) if pixel_size is not None else None
@@ -384,41 +377,13 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         """
         return [Labeld(keys=["label"], spatial_dims=spatial_dims)]
 
-    def _geometry_transforms(self, spatial_dims: int) -> list:
-        """Skeleton-relative geometry targets (``skl`` / ``dir`` / ``cov``
-        / ``rad``) emitted by a single :class:`SkeletonGeometryd` pass.
-
-        Runs after spatial augmentations so targets are consistent with
-        the augmented label layout.  Skipped when
-        ``compute_geometry=False``.  All four fields share one
-        per-instance EDT call: see :func:`compute_skeleton_geometry` in
-        :mod:`brainbow.transforms.skeleton` for the algorithm.
-        """
-        if not self.compute_geometry:
-            return []
-        return [
-            SkeletonGeometryd(
-                keys=["label"],
-                spatial_dims=spatial_dims,
-                radius_normalize=self.radius_normalize,
-            ),
-        ]
-
     # ------------------------------------------------------------------
     # Pipeline assembly
     # ------------------------------------------------------------------
 
     def _output_keys(self) -> list:
         """All keys that must pass through ``EnsureTyped``."""
-        keys = ["image", "label"]
-        if self.compute_geometry:
-            keys.extend([
-                "label_skl",
-                "label_radius",
-                "label_direction",
-                "label_covariance",
-            ])
-        return keys
+        return ["image", "label"]
 
     def get_train_transforms(self) -> Compose:
         io_keys = ["image", "label"]
@@ -492,7 +457,6 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             *self._original_transforms(sd),
             *self._instance_transforms(sd),
             *self._semantic_transforms(sd),
-            *self._geometry_transforms(sd),
             EnsureTyped(keys=self._output_keys()),
         ])
 
@@ -529,7 +493,6 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             *self._original_transforms(sd),
             *self._semantic_transforms(sd),
             *self._instance_transforms(sd),
-            *self._geometry_transforms(sd),
             EnsureTyped(keys=self._output_keys()),
         ])
         return Compose(transforms)

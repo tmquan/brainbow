@@ -30,7 +30,7 @@ Public surface
 * :class:`CosmosTransfer3DModule` -- concrete Lightning class for the
   Cosmos-Transfer 2.5 backbone (base DiT + ControlNet).
 * :class:`Vista3DModule` -- concrete Lightning class for the Vista
-  backbone (3 heads, no boundary head).
+  backbone (unified aff/sem/raw head).
 
 Extending this module
 ---------------------

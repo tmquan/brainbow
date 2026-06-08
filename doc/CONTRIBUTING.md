@@ -162,8 +162,10 @@ brainbow/losses/affinity.py           # loss weights, target build, scalar keys
 
 ### 2.1 Add a new field
 
-1. Add `<FIELD>_SLICE` (and any constants) to `losses/_common.py`, and
-   extend `SIGMOID_SLICE` if the new field is probabilistic.
+1. Add `<FIELD>_SLICE` (and any constants) to `losses/_common.py`.  The
+   head emits raw logits / linear values (no activation in `forward`); a
+   probabilistic field is supervised with logit-stable BCE in the loss
+   and sigmoided at each consumer (metrics / MWS / TensorBoard).
 2. Bump `HEAD_CHANNELS` and `model.head_channels` in the configs.
 3. Update `slice_head()` tests in `tests/test_losses.py`.
 4. In `AffinityFGLoss.__init__`, add `weight_<field>` parsing; add a
@@ -225,10 +227,10 @@ brainbow/modules/<arch>/module.py         # concrete Lightning class
 * Inherit from `torch.nn.Module` (or `BaseModel` if you want the type
   guarantees).
 * `forward(x: Tensor) -> Tensor` returning the
-  `[B, HEAD_CHANNELS, *spatial]` tensor.  Route the head output through
-  `brainbow.losses.apply_head_activations` so sigmoid lands on the
-  contiguous `SIGMOID_SLICE` (aff + sem) and the trailing `raw` channel
-  stays linear.
+  `[B, HEAD_CHANNELS, *spatial]` tensor of **raw logits / linear values**
+  (no activation in `forward`): `aff` / `sem` are logits and `raw` is
+  linear.  Each consumer applies its own activation (logit-stable BCE in
+  the loss; sigmoid for metrics / MWS / TensorBoard).
 * If your backbone has frozen modules under DDP, follow Cosmos's
   approach: `requires_grad_(False)` + `.eval()` + `.detach()` on the
   output of the frozen subgraph (see `cosmos_transfer_2_5/wrapper.py`).

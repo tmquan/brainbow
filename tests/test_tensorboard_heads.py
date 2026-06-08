@@ -15,7 +15,7 @@ import torch
 
 from brainbow.callbacks.tensorboard.heads import _log_predictions, aff_panel_indices
 from brainbow.callbacks.tensorboard.tags import TagContext
-from brainbow.losses import AFF_NAMES, HEAD_CHANNELS, N_AFF, N_PULL, SIGMOID_SLICE
+from brainbow.losses import AFF_NAMES, HEAD_CHANNELS, N_AFF, N_PULL
 
 
 class _RecordingTB:
@@ -36,10 +36,10 @@ _D, _H, _W = 6, 32, 32
 
 
 def _make_head_pred(B: int = 2, D: int = _D, H: int = _H, W: int = _W) -> torch.Tensor:
+    """Raw-logit head (no activation): the panels sigmoid aff / sem and
+    rescale the linear raw channel for display themselves."""
     torch.manual_seed(0)
-    head = torch.randn(B, HEAD_CHANNELS, D, H, W) * 0.5
-    head[:, SIGMOID_SLICE] = head[:, SIGMOID_SLICE].sigmoid()
-    return head
+    return torch.randn(B, HEAD_CHANNELS, D, H, W) * 2.0
 
 
 def _make_labels(B: int = 2, D: int = _D, H: int = _H, W: int = _W) -> torch.Tensor:

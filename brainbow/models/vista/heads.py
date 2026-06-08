@@ -25,8 +25,8 @@ the depth and no residual connection, which noticeably under-fits on
 dense-prediction tasks like connectomics.  ``VistaTaskHead3D`` below is
 the drop-in replacement that mirrors the real VISTA3D head and simply
 swaps the class-embedding mask-attention output for a plain 1×1 conv,
-since our per-voxel tasks (semantic logits, instance embeddings, geometry
-regressions) don't need the learned class embedding table.
+since our per-voxel tasks (the affinity + sem + raw logit head) don't
+need the learned class embedding table.
 """
 
 from __future__ import annotations

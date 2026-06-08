@@ -28,8 +28,7 @@ dependencies = [
     "numpy>=1.24.0",
     "scipy>=1.11.0",
     "scikit-learn>=1.3.0",
-    "scikit-image>=0.21.0",  # CPU fallback for transforms.label / find_boundaries / covariance / skeleton
-    "kimimaro>=4.0,<5",      # 3-D TEASAR skeletonization (transforms.skeleton)
+    "scikit-image>=0.21.0",  # CPU fallback for transforms.label / find_boundaries
     "tqdm>=4.65.0",          # sliding-window progress bar (lazily imported)
     "wandb>=0.15.0",
     "tensorboard>=2.14.0",
@@ -57,17 +56,16 @@ cosmos = [
     "safetensors>=0.8.0rc0",
     "accelerate>=1.13.0",
 ]
-# NVIDIA RAPIDS wheels for GPU clustering (cuML HDBSCAN / MeanShift)
-# and GPU transforms (cupy-backed EDT / gaussian / connected components).
+# cupy wheels for the GPU Mutex Watershed (``mws_cp``) + DLPack interop
+# and cupy/cucim-backed transforms (EDT / gaussian / connected
+# components; optional, scipy/skimage CPU fallback).
 # Must be installed via NVIDIA's index, e.g.:
 #   pip install -e ".[gpu-cu13]" --extra-index-url https://pypi.nvidia.com
 gpu-cu13 = [
     "cupy-cuda13x>=14.0",
-    "cuml-cu13>=25.10",
 ]
 gpu-cu12 = [
     "cupy-cuda12x>=13.0",
-    "cuml-cu12>=25.10",
 ]
 # Download helpers in ``scripts/download_*.py``.
 scripts = [

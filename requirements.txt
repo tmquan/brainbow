@@ -32,16 +32,13 @@ torchmetrics==1.0.3
 monai==1.5.2
 einops==0.8.2
 
-# GPU acceleration (RAPIDS / CUDA 13 wheels on NVIDIA's index).
+# GPU acceleration (CUDA 13 wheels on NVIDIA's index).
 # Enables:
-#   - cuML HDBSCAN / MeanShift in brainbow.inference.clusterer  (val + inference)
-#   - cuML PCA / TruncatedSVD / UMAP in brainbow.utils.manifold  (TB viz)
-#   - cupy-backed EDT / Gaussian / connected components in brainbow.transforms
-#   - pylibcugraph-backed sparse connected_components used by the
-#     spatial_cc clusterer via cupyx.scipy.sparse.csgraph (neither
-#     cuml nor cucim ships a sparse CC; pylibcugraph is the backend
-#     cupyx dispatches to).
-#   - DLPack zero-copy torch <-> cupy <-> cuml interop
+#   - cupy-backed Mutex Watershed agglomeration (``mws_cp``) plus DLPack
+#     zero-copy torch <-> cupy interop in
+#     ``brainbow.inference.mutex_watershed``.
+#   - cupy / cucim-backed EDT / Gaussian / connected components in
+#     ``brainbow.transforms`` (optional; scipy / skimage CPU fallback).
 # For CUDA 12 builds replace cu13 -> cu12 and cuda13x -> cuda12x.
 #
 # NOTE: install with `pip`, not `uv pip`.  cupy-cuda13x==14.0.1 pins
@@ -50,8 +47,6 @@ einops==0.8.2
 # `--prerelease=allow --index-strategy unsafe-best-match`.
 --extra-index-url https://pypi.nvidia.com
 cupy-cuda13x==14.0.1
-cuml-cu13==26.4.0
-pylibcugraph-cu13==26.4.0
 
 # Configuration
 hydra-core==1.3.2
@@ -70,12 +65,6 @@ numpy==2.3.5
 scipy==1.17.0
 scikit-learn==1.8.0
 scikit-image==0.26.0
-
-# 3-D TEASAR skeletonization (brainbow.transforms.skeleton).  CPU-only;
-# runs inside DataLoader workers.  Falls back to
-# skimage.morphology.skeletonize on a per-instance basis when the
-# kimimaro import fails (e.g. wheel unavailable for the platform).
-kimimaro==5.4.0
 
 # Experiment tracking
 wandb==0.25.0

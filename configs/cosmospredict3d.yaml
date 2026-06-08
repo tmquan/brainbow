@@ -33,7 +33,6 @@ data:
   slice_mode: false
   num_samples: 16000
   find_boundaries: 1.0
-  radius_normalize: true
   elastic_prob: 0.0
   elastic_sigma_range:
   - 35
@@ -139,9 +138,15 @@ model:
   pretrained: true
   dtype: bf16
   freeze_vae_encoder: true
-  freeze_dit_backbone: false
+  freeze_dit_backbone: 2
   freeze_vae_decoder: true
   gradient_checkpointing: false
+  # Scale the VAE-encode input [0,1]->[-1,1] to match AutoencoderKLWan's
+  # pretrained range (it normalizes [0,1]->[-1,1] before encode()).  Feeding
+  # [0,1] washes out the reconstruction (see true/wan_decoder panel).  This
+  # shifts the latent distribution, so it is a fresh-run setting: a checkpoint
+  # trained with the old [0,1] input will not resume cleanly with it on.
+  vae_input_pm1: true
 
 optimizer:
   lr: 0.0002
@@ -162,7 +167,7 @@ loss:
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 1.0
+    gamma: 3.0
     pull_weight: 1.0
     push_weight: 1.0
     mask_to_foreground: true
@@ -171,7 +176,7 @@ loss:
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 1.0
+    gamma: 3.0
   weight_raw:
     weight: 1.0
     loss: l1

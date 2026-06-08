@@ -1,8 +1,9 @@
 """
 Base Lightning module shared by every Brainbow training recipe.
 
-All modules in :mod:`brainbow.modules` (``Vista3DModule``,
-``CosmosTransfer3DModule``) run the same training / evaluation loop:
+All modules in :mod:`brainbow.modules` (``CosmosPredict3DModule``,
+``Cosmos3Nano3DModule``, ``CosmosTransfer3DModule``, ``Vista3DModule``)
+run the same training / evaluation loop:
 
 * forward the volume through the wrapper (``self.model``)
 * apply :class:`brainbow.losses.AffinityFGLoss`
@@ -20,11 +21,10 @@ All scalars live under ``{stage}/{mode}/...`` where ``stage`` is
 ``train`` | ``val`` | ``test`` and ``mode`` is ``"automatic"`` (the only
 supported mode today — structured so ``"prompted"`` can slot in later)::
 
-    {stage}/{mode}/loss                         # global total
-    {stage}/{mode}/{head}/loss                  # per-head total
-    {stage}/{mode}/{head}/loss/{component}      # per-head loss breakdown
-    {stage}/{mode}/{head}/metric/{name}         # per-head eval metric
-    {stage}/{mode}/eff_w/{head}                 # learned task weight
+    {stage}/{mode}/loss                         # global weighted total
+    {stage}/{mode}/loss/{aff,sem,raw}           # per-field loss term
+    {stage}/{mode}/sem/metric/{name}            # foreground (sem) metrics
+    {stage}/{mode}/ins/metric/{name}            # instance (MWS) metrics
 
 This matches the image tags emitted by
 :class:`brainbow.callbacks.tensorboard.ImageLogger` so images and
@@ -34,11 +34,10 @@ scalars for a given head collapse into the same TensorBoard group.
 import logging
 import warnings
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 import pytorch_lightning as pl
 from einops import rearrange, reduce
 
@@ -170,7 +169,7 @@ class BaseCircuitModule(pl.LightningModule):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, x: torch.Tensor, **kw: Any) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, **kw: Any) -> torch.Tensor:
         return self.model(x, **kw)
 
     # ------------------------------------------------------------------
@@ -211,7 +210,14 @@ class BaseCircuitModule(pl.LightningModule):
         targets: Dict[str, Any] = {"labels": labels}
         needs_raw = getattr(self.criterion, "weight_raw", 0.0) > 0
         if "image" in batch and needs_raw:
-            targets["raw_image"] = batch["image"]
+            raw_image = batch["image"]
+            # The raw recon head reconstructs the VAE-encode input.  When
+            # the model scales that input [0,1] -> [-1,1] (vae_input_pm1),
+            # the raw target must live in the same range so the head fits
+            # the pretrained VAE's distribution; otherwise keep it in [0,1].
+            if getattr(self.model, "vae_input_pm1", False):
+                raw_image = raw_image * 2.0 - 1.0
+            targets["raw_image"] = raw_image
         targets["_cached_targets"] = self.criterion.build_targets(
             targets["labels"], targets,
         )
@@ -234,8 +240,8 @@ class BaseCircuitModule(pl.LightningModule):
         images = self._expand_image_channel(batch["image"])
 
         # ``_prepare_targets`` is @no_grad and builds ``_cached_targets``
-        # so avg / aff / geometry target precompute ops don't pay
-        # autograd-tape overhead on every step.
+        # so the affinity target precompute ops don't pay autograd-tape
+        # overhead on every step.
         targets = self._prepare_targets(batch)
 
         head = self.model(images)
@@ -358,7 +364,8 @@ class BaseCircuitModule(pl.LightningModule):
         prefix: str,
         bs: float,
     ) -> None:
-        sem_probs = head_pred[:, SEM_SLICE]
+        # Head emits sem as a raw logit -> sigmoid before thresholding.
+        sem_probs = head_pred[:, SEM_SLICE].sigmoid()
         sem_pred = (sem_probs[:, 0] > 0.5).long()
         sem_gt = (targets["labels"] > 0).long()
         metric = f"{prefix}/sem/metric"
@@ -387,8 +394,11 @@ class BaseCircuitModule(pl.LightningModule):
         if not fg_mask.any():
             return
         # Mutex Watershed over the predicted affinities, restricted to the
-        # GT foreground (isolates agglomeration quality from the fg head).
-        ins_pred = self.agglomerator(head_pred[:, AFF_SLICE].float(), fg_mask)
+        # GT foreground (isolates agglomeration quality from the sem head).
+        # Head emits aff as raw logits -> sigmoid to probabilities for MWS.
+        ins_pred = self.agglomerator(
+            head_pred[:, AFF_SLICE].sigmoid().float(), fg_mask,
+        )
         ins_gt = targets["labels"]
         metric = f"{prefix}/ins/metric"
         self._accum(f"{metric}/ari", compute_per_batch_ari(ins_pred, ins_gt), bs)
@@ -403,7 +413,7 @@ class BaseCircuitModule(pl.LightningModule):
     def _reduce_and_log_accum(self, stage: str) -> None:
         # The accumulator was pre-seeded with a canonical, rank-independent
         # key set in ``_seed_eval_accum`` (criterion loss keys + fixed
-        # sem/emb metric keys), and no other keys are ever inserted, so
+        # sem / ins metric keys), and no other keys are ever inserted, so
         # ``sorted(self._eval_accum)`` is identical on every rank.  We can
         # therefore reduce in deterministic order WITHOUT a cross-rank
         # ``all_gather_object`` to union keys -- that object collective was

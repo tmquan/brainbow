@@ -9,9 +9,6 @@ needs, but a few connectomics-specific operations are not in MONAI:
 
 * Crop hygiene (re-label connected components after a random crop).
 * Boundary-map construction at load time.
-* Skeleton-relative geometry loss targets (``skl`` + ``dir`` + ``cov``
-  + ``rad``, all derived from a single per-instance EDT pass on the
-  skeleton voxels).
 * Foreground-biased crop sampling for sparse instance volumes.
 * Resolution-zoom augmentation that harmonises pixel sizes across
   datasets in a multi-dataset run.
@@ -25,12 +22,6 @@ pipelines as the standard MONAI ones.
 Public surface
 --------------
 * :class:`Labeld`                       -- CC-relabel after random crop.
-* :class:`SkeletonGeometryd`            -- per-instance skeleton mask
-                                           plus skeleton-relative
-                                           direction, covariance, and
-                                           distance-to-skeleton fields
-                                           (``Skeletond`` is the
-                                           back-compat alias).
 * :class:`FindBoundariesd`              -- zero out instance boundaries.
 * :class:`RandSpatialCropForegroundd`   -- foreground-biased crop.
 * :class:`RandTransposeXYd`             -- random Y<->X transpose.
@@ -52,7 +43,6 @@ from brainbow.transforms.find_boundaries import FindBoundariesd
 from brainbow.transforms.rand_crop_foreground import RandSpatialCropForegroundd
 from brainbow.transforms.rand_transpose_xy import RandTransposeXYd
 from brainbow.transforms.resolution_zoom import RandResolutionZoomd
-from brainbow.transforms.skeleton import Skeletond, SkeletonGeometryd
 
 __all__ = [
     "Labeld",
@@ -60,6 +50,4 @@ __all__ = [
     "RandSpatialCropForegroundd",
     "RandTransposeXYd",
     "RandResolutionZoomd",
-    "SkeletonGeometryd",
-    "Skeletond",
 ]

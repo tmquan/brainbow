@@ -216,11 +216,11 @@ Every wrapper returns one tensor, not a dict of heads:
 
 Channel layout is owned by `brainbow.losses._common`:
 
-| Field | Slice | Channels | Activation | Supervision |
-| ----- | ----- | -------- | ---------- | ----------- |
-| aff | `[0, N_AFF)` | `N_AFF` (14) | sigmoid | masked BCE + soft-Dice + focal vs `affinity_target_from_offsets` |
-| sem | `[N_AFF, N_AFF+1)` | 1 | sigmoid | Dice + BCE + Focal (`DiceBCEFocalLoss`) vs `labels > 0` |
-| raw | `[N_AFF+1, N_AFF+2)` | 1 | linear | L1 reconstruction of the input EM |
+| Field | Slice | Channels | Head output | Supervision |
+| ----- | ----- | -------- | ----------- | ----------- |
+| aff | `[0, N_AFF)` | `N_AFF` (14) | logit | masked logit-stable BCE + soft-Dice + focal vs `affinity_target_from_offsets` |
+| sem | `[N_AFF, N_AFF+1)` | 1 | logit | Dice + BCE + Focal (`DiceBCEFocalLoss`) vs `labels > 0` |
+| raw | `[N_AFF+1, N_AFF+2)` | 1 | linear | L1 reconstruction of the input EM (target in `[-1, 1]`) |
 
 ### 5.2 What `AffinityFGLoss` returns
 

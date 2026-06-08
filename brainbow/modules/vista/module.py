@@ -8,8 +8,8 @@ from brainbow.modules.vista.base import BaseVistaModule
 class Vista3DModule(BaseVistaModule):
     """Vista3D volumetric segmentation module.
 
-    Three output heads: ``semantic`` ``[B, C, D, H, W]``,
-    ``instance`` ``[B, E, D, H, W]``, ``geometry`` ``[B, G, D, H, W]``.
+    Emits the single ``[B, HEAD_CHANNELS, D, H, W]`` affinity + sem + raw
+    head (raw logits / linear values) supervised by ``AffinityFGLoss``.
     """
 
     _SPATIAL_DIMS = 3

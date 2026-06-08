@@ -1,16 +1,19 @@
 """
 Shared helpers + canonical constants for the affinity + foreground head.
 
-The model emits a single ``[B, HEAD_CHANNELS, *spatial]`` tensor::
+The model emits a single ``[B, HEAD_CHANNELS, *spatial]`` tensor of
+**raw logits / linear values** (no activation in the forward pass)::
 
-    ch  0 .. N_AFF-1 : aff   (N_AFF)  sigmoid, per-offset affinity in (0, 1)
-    ch  N_AFF        : sem   (1)       sigmoid, foreground / boundary prob
-    ch  N_AFF + 1    : raw   (1)       linear,  L1 reconstruction of the
-                                        (normalised) input EM intensity
+    ch  0 .. N_AFF-1 : aff   (N_AFF)  logit, per-offset affinity
+    ch  N_AFF        : sem   (1)       logit, foreground / boundary
+    ch  N_AFF + 1    : raw   (1)       linear, L1 reconstruction of the
+                                        (normalised) input EM intensity in
+                                        ``[-1, 1]``
 
-The sigmoid is applied once by the wrapper via
-:func:`apply_head_activations` to the contiguous ``aff + sem`` block
-(:data:`SIGMOID_SLICE`); the trailing ``raw`` channel is left linear.
+The head applies no activation: the loss consumes the ``aff`` / ``sem``
+logits directly (logit-stable BCE + sigmoid for the Dice / focal terms),
+and every other consumer (metrics, Mutex Watershed, TensorBoard) applies
+``sigmoid`` at its own boundary.  The trailing ``raw`` channel is linear.
 
 The affinities are predicted for a fixed list of 3-D voxel offsets
 :data:`AFFINITY_OFFSETS` ``(dz, dy, dx)``.  The first :data:`N_PULL`
@@ -41,10 +44,9 @@ a mutual-exclusion / boundary).
 Public helpers
 --------------
 * :data:`AFFINITY_OFFSETS`, :data:`N_PULL`, :data:`N_AFF`,
-  :data:`AFF_SLICE`, :data:`FG_SLICE`, :data:`HEAD_CHANNELS`,
-  :data:`HEAD_LAYOUT` -- channel-layout constants.
-* :func:`slice_head` -- split a head tensor into ``{"aff", "fg"}``.
-* :func:`apply_head_activations` -- sigmoid the whole head once.
+  :data:`AFF_SLICE`, :data:`SEM_SLICE`, :data:`RAW_SLICE`,
+  :data:`HEAD_CHANNELS`, :data:`HEAD_LAYOUT` -- channel-layout constants.
+* :func:`slice_head` -- split a head tensor into ``{"aff", "sem", "raw"}``.
 * :func:`shift_replicate` -- shift a tensor along an axis by ``+/- k``
   voxels with replicate (edge-pad) semantics.
 * :func:`shift_nd` -- replicate-shift so that ``out[v] == x[v + offset]``
@@ -91,18 +93,15 @@ N_PULL: int = 3
 N_AFF: int = len(AFFINITY_OFFSETS)                                     # 14
 
 # Slice indices: ``[start, end)`` per field.  Affinities first, then the
-# scalar foreground (semantic) probability, then the linear
-# raw-reconstruction channel last.  The two sigmoid fields (aff, sem) are
-# contiguous at the front so :data:`SIGMOID_SLICE` is a single slice.
+# scalar foreground (semantic) logit, then the linear raw-reconstruction
+# channel last.  The head emits raw logits / linear values; each consumer
+# applies its own activation (logit BCE in the loss, sigmoid for metrics /
+# MWS / TensorBoard, linear for the ``raw`` channel).
 AFF_SLICE: slice = slice(0, N_AFF)                                     # [0, N_AFF)
 SEM_SLICE: slice = slice(N_AFF, N_AFF + 1)                            # [N_AFF, N_AFF+1)
 RAW_SLICE: slice = slice(SEM_SLICE.stop, SEM_SLICE.stop + 1)          # [N_AFF+1, N_AFF+2)
 
 HEAD_CHANNELS: int = RAW_SLICE.stop                                    # N_AFF + 2
-
-# Sigmoid is applied to the contiguous (aff, sem) block; the trailing
-# ``raw`` regression channel is left linear.
-SIGMOID_SLICE: slice = slice(0, SEM_SLICE.stop)                       # [0, N_AFF+1)
 
 # Map from field name to slice.  Every consumer (loss, wrapper, TB
 # callback, sliding-window inference) reaches into this dict instead of
@@ -159,34 +158,6 @@ def slice_head(
         name: head.narrow(channel_dim, sl.start, sl.stop - sl.start)
         for name, sl in HEAD_LAYOUT.items()
     }
-
-
-# ---------------------------------------------------------------------------
-# Activation policy: sigmoid on every channel (all are probabilities)
-# ---------------------------------------------------------------------------
-
-def apply_head_activations(out: torch.Tensor) -> torch.Tensor:
-    """Apply the head's activation policy to a raw head tensor.
-
-    Sigmoid the contiguous (aff, fg) block (:data:`SIGMOID_SLICE`) so the
-    loss / agglomerator receive ``(0, 1)`` probabilities; leave the
-    trailing ``raw`` channel linear for the L1 reconstruction.  Wrappers
-    call this exactly once at the end of their forward pass.
-
-    Args:
-        out: ``[B, HEAD_CHANNELS, *spatial]`` head logits.
-
-    Returns:
-        Tensor of the same shape, with :data:`SIGMOID_SLICE` passed
-        through ``sigmoid`` and the rest left linear.
-    """
-    return torch.cat(
-        [
-            out[:, SIGMOID_SLICE].sigmoid(),
-            out[:, SIGMOID_SLICE.stop:],
-        ],
-        dim=1,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -388,10 +359,11 @@ def stable_bce_on_probs(
 ) -> torch.Tensor:
     """Per-voxel binary cross-entropy on **probabilities** (not logits).
 
-    The model wrapper applies a single sigmoid before the loss sees the
-    head, so BCE here consumes ``[0, 1]`` probabilities directly.  The
-    log math runs in fp32 with explicit clamping so ``log(p)`` and
-    ``log(1 - p)`` stay finite under ``bf16-mixed`` autocast.
+    Retained as a utility for callers that already hold ``[0, 1]``
+    probabilities (the head itself now emits logits -- prefer
+    :func:`torch.nn.functional.binary_cross_entropy_with_logits` on the
+    raw head).  The log math runs in fp32 with explicit clamping so
+    ``log(p)`` and ``log(1 - p)`` stay finite under ``bf16-mixed`` autocast.
 
     Args:
         probs:  ``[B, C, *spatial]`` already-activated predictions in
@@ -411,12 +383,11 @@ def stable_bce_on_probs(
 __all__ = [
     # Channel layout
     "AFFINITY_OFFSETS", "N_PULL", "N_AFF",
-    "AFF_SLICE", "SEM_SLICE", "RAW_SLICE", "SIGMOID_SLICE",
+    "AFF_SLICE", "SEM_SLICE", "RAW_SLICE",
     "HEAD_CHANNELS", "HEAD_LAYOUT",
     "AFF_NAMES", "AFF_CHANNELS",
     # Helpers
     "slice_head",
-    "apply_head_activations",
     "shift_replicate", "shift_nd",
     "affinity_target_from_offsets", "affinity_validity_mask",
     "canonical_regression_name", "regression_loss_fn",

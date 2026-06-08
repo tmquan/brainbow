@@ -1,7 +1,7 @@
 """Low-level image utilities for TensorBoard visualisation.
 
-Contains the small, dependency-light helpers used by the per-head
-loggers: central-slice extraction, per-image min-max normalisation,
+Contains the small, dependency-light helpers used by the unified-head
+panel logger: central-slice extraction, per-image min-max normalisation,
 HSV colour LUT, and integer-label → pastel-RGB mapping.
 """
 
@@ -33,11 +33,10 @@ def _normalise(t: torch.Tensor) -> torch.Tensor:
         panel visually comparable across samples with different
         intensity distributions, but it also means that
         ``true/image`` can look brighter / more contrasted than the
-        boundary ``pred/raw`` panel, which is shown via
-        ``clamp(0, 1)`` on the already-normalised reconstruction.
-        Keep that in mind when comparing reconstruction quality
-        visually; the loss scalars (``boundary/loss/raw``) are
-        computed on the unstretched signal.
+        ``pred/raw`` panel, which is shown via a ``[-1, 1] -> [0, 1]``
+        rescale of the linear reconstruction.  Keep that in mind when
+        comparing reconstruction quality visually; the loss scalar
+        (``loss/raw``) is computed on the unstretched signal.
     """
     flat = rearrange(t, "b ... -> b (...)")                        # [B, N]
     lo = reduce(flat, "b n -> b 1", "min")

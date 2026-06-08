@@ -1,24 +1,20 @@
 """
-Composite Dice + BCE + Focal loss on probability inputs.
+Composite Dice + BCE + Focal loss on **logit** inputs.
 
 Used by :class:`brainbow.losses.AffinityFGLoss` to supervise the
-foreground (``sem``) head, which receives a sigmoid in
-:func:`~brainbow.losses.apply_head_activations` before the loss is
-called.
+foreground (``sem``) head.  The head emits raw logits (no activation in
+``forward``), so this loss takes the logits directly:
 
-The input arrives as a **probability** (already in ``(0, 1)``), which is
-why this module composes Dice (the imbalance-robust term) with a
-numerically-stable BCE-on-probs and a focal-loss-on-probs rather than
-calling MONAI's :class:`monai.losses.DiceCELoss` /
-:class:`monai.losses.FocalLoss` directly -- those use
-``BCEWithLogitsLoss`` / softmax-on-logits paths internally and would
-double-activate a probability input.
+* the BCE term uses :func:`torch.nn.functional.binary_cross_entropy_with_logits`
+  (the log-sum-exp-stable logit form);
+* the Dice and focal terms operate on ``sigmoid(logits)`` (computed once
+  internally), since both are naturally defined on probabilities.
 
 The composite total is::
 
-    L = lambda_dice  * Dice(p, t)
-      + lambda_bce   * BCE(p, t)
-      + lambda_focal * Focal(p, t; gamma)
+    L = lambda_dice  * Dice(sigmoid(z), t)
+      + lambda_bce   * BCEWithLogits(z, t)
+      + lambda_focal * Focal(sigmoid(z), t; gamma)
 
 where each lambda defaults to ``1.0`` so the composite has all three
 terms active out of the box.  Set any lambda to ``0`` to disable that
@@ -30,13 +26,12 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from monai.losses import DiceLoss
-
-from brainbow.losses._common import stable_bce_on_probs
 
 
 class DiceBCEFocalLoss(nn.Module):
-    """Probability-input composite of Dice + BCE + Focal.
+    """Logit-input composite of Dice + BCE + Focal.
 
     Args:
         lambda_dice: Scalar multiplier on the Dice term.
@@ -54,16 +49,15 @@ class DiceBCEFocalLoss(nn.Module):
             (forwarded to :class:`DiceLoss`).  Defaults to ``1e-5`` to
             match the aff Dice that this loss replaces.
         smooth_dr: Denominator smoothing in MONAI's Dice formula.
-        eps: Clamp used by the BCE / Focal log math for fp32 stability
-            under bf16-mixed autocast (forwarded to
-            :func:`stable_bce_on_probs`).
+        eps: Clamp used by the focal log math for fp32 stability under
+            bf16-mixed autocast.
         batch: Whether MONAI's Dice reduces per-batch (``True``) or
-            per-sample (``False``).  ``True`` matches the previous
-            ``_sem_dice`` / ``_skl_dice`` / ``_aff_dice`` config.
+            per-sample (``False``).  ``True`` is the setting used by
+            ``AffinityFGLoss`` for the ``sem`` head.
 
     Shapes:
-        Both ``probs`` and ``target`` are ``[B, C, *spatial]``;
-        ``probs`` is expected to be already in ``[0, 1]``.
+        Both ``logits`` and ``target`` are ``[B, C, *spatial]``;
+        ``logits`` are raw (pre-sigmoid) head outputs.
     """
 
     def __init__(
@@ -128,17 +122,28 @@ class DiceBCEFocalLoss(nn.Module):
 
     def forward(
         self,
-        probs: torch.Tensor,
+        logits: torch.Tensor,
         target: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute ``lambda_bce * BCE + lambda_dice * Dice + lambda_focal * Focal``."""
-        total = self._zero_like(probs)
+        """Compute ``lambda_bce * BCE + lambda_dice * Dice + lambda_focal * Focal``.
+
+        ``logits`` are raw (pre-sigmoid) head outputs.  The BCE term uses
+        the logit-stable ``binary_cross_entropy_with_logits``; the Dice
+        and focal terms use ``sigmoid(logits)`` (computed once).
+        """
+        total = self._zero_like(logits)
+
+        # Sigmoid once for the probability-defined terms (Dice / focal).
+        need_probs = self.lambda_dice > 0 or self.lambda_focal > 0
+        probs = logits.sigmoid() if need_probs else None
 
         if self.lambda_dice > 0:
             total = total + self.lambda_dice * self._dice(probs, target)
 
         if self.lambda_bce > 0:
-            per_voxel = stable_bce_on_probs(probs, target, eps=self.eps)
+            per_voxel = F.binary_cross_entropy_with_logits(
+                logits.float(), target.float(), reduction="none",
+            )
             total = total + self.lambda_bce * per_voxel.mean()
 
         if self.lambda_focal > 0:

@@ -12,7 +12,7 @@ from brainbow.models.vista.hf_loader import (
     DEFAULT_VISTA3D_REVISION,
     load_pretrained_vista3d_encoder,
 )
-from brainbow.losses import HEAD_CHANNELS, apply_head_activations
+from brainbow.losses import HEAD_CHANNELS
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ class Vista3DWrapper(nn.Module):
 
     Args:
         in_channels: Number of input channels (default: 1 for EM).
-        head_channels: Unified dense head width (default 32).
+        head_channels: Unified dense head width (default HEAD_CHANNELS = N_AFF + 2).
         feature_size: Base feature dimension from backbone (default: 64).
             Set to 48 to load the pretrained MONAI VISTA3D encoder
             cleanly (upstream uses ``init_filters=48``).
@@ -45,7 +45,7 @@ class Vista3DWrapper(nn.Module):
         >>> model = Vista3DWrapper(in_channels=1)
         >>> x = torch.randn(1, 1, 64, 64, 64)
         >>> out = model(x)
-        >>> out.shape   # [1, 32, 64, 64, 64]
+        >>> out.shape   # [1, HEAD_CHANNELS, 64, 64, 64]
     """
 
     def __init__(
@@ -177,14 +177,14 @@ class Vista3DWrapper(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return the unified ``[B, 32, D, H, W]`` head tensor.
+        """Return the unified ``[B, HEAD_CHANNELS, D, H, W]`` head tensor.
 
-        Activation policy: sigmoid on the semantic and skeleton channels
-        (the contiguous run :data:`brainbow.losses.SIGMOID_SLICE`);
-        raw / dir / cov / rad / avg / emb stay linear.
+        No activation is applied: the head emits raw logits for the
+        affinity + sem channels and a linear value for the raw channel.
+        Each consumer applies its own activation (logit BCE in the loss;
+        sigmoid for metrics / Mutex Watershed / TensorBoard).
         """
         feat = self.backbone(x)
         if isinstance(feat, (tuple, list)):
             feat = feat[0]
-        out = self.head(feat)
-        return apply_head_activations(out)
+        return self.head(feat)
