@@ -10,12 +10,12 @@ head: their data flow and parameter budgets.
 The wrappers live under `brainbow/models/`:
 
 1. `CosmosPredict3DWrapper` — EM → Wan VAE → Cosmos-Predict 2.5 base DiT
-   (no ControlNet) → head.  The shipped `snemi3d.yaml` default
-   (`model.type: cosmospredict3d`, variant `2B`, DDP).  Shares all
+   (no ControlNet) → head.  The flattened 2B baseline recipe
+   (`configs/cosmospredict3d.yaml`, variant `2B`, DDP).  Shares all
    scaffolding with Transfer via `brainbow/models/cosmos_2_5_common/`;
    for its budget take §1 and drop the ControlNet row.
 2. [`CosmosTransfer3DWrapper`](#1-cosmostransfer3dwrapper) — Cosmos-Transfer 2.5: the same data flow **plus** a ControlNet residual branch (§1).
-3. `Cosmos3Nano3DWrapper` — Cosmos 3 (Nano) 16B omni transformer + Wan2.2 VAE; trained under FSDP (`brainbow/models/cosmos_3_nano/`).
+3. `Cosmos3Nano3DWrapper` — Cosmos 3 (Nano) 16B omni transformer + Wan2.2 VAE; trained under FSDP (`brainbow/models/cosmos_3_nano/`).  The shipped `snemi3d.yaml` / `default.yaml` default (`model.type: cosmos3nano3d`, variant `Nano`).
 4. [`Vista3DWrapper`](#2-vista3dwrapper) — EM → SegResNetDS2 → head (fast local iteration).
 
 Channel counts mirror `configs/default.yaml`. Parameter counts are
@@ -318,11 +318,11 @@ local iteration and debugging.
 
 | Use case                                               | Recommended wrapper |
 |--------------------------------------------------------|---------------------|
-| Shipped default (2B affinity model, DDP)               | Cosmos-Predict      |
-| Largest capacity (16B omni, FSDP)                      | Cosmos 3 (Nano)     |
+| Shipped default (16B omni, FSDP)                       | Cosmos 3 (Nano)     |
+| 2B affinity baseline, DDP                              | Cosmos-Predict      |
 | ControlNet conditioning on top of the base DiT         | Cosmos-Transfer     |
 | Fast local dev / debugging on a single GPU             | Vista               |
 
 The `configs/default.yaml` and `configs/snemi3d.yaml` files default to
-`model.type: cosmospredict3d`; switch to `vista3d` in the config to train the
-Vista wrapper instead.
+`model.type: cosmos3nano3d`; override to `cosmospredict3d` (or use the
+flattened `cosmospredict3d.yaml`) or `vista3d` to train a different wrapper.

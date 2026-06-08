@@ -1,6 +1,6 @@
 # Brainbow Documentation Index
 
-Pick the doc that matches *your* current question.  All six live in
+Pick the doc that matches *your* current question.  All seven live in
 `doc/`.
 
 | When you're asking ...                                           | Read                                                          |
@@ -18,7 +18,7 @@ Pick the doc that matches *your* current question.  All six live in
 1. **Top-level [`README.md`](../README.md)** — what the project is, install, train.
 2. **[`STRUCTURE.md`](./STRUCTURE.md)** — folder map (5 minutes).
 3. **[`WALKTHROUGH.md`](./WALKTHROUGH.md)** — the end-to-end "follow one batch" narrative with file:line citations.
-4. **[`ARCHITECT.md`](./ARCHITECT.md)** — channel layouts and head math.
+4. **[`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md)** — head channel layout, loss, and Mutex Watershed eval; **[`ARCHITECT.md`](./ARCHITECT.md)** — backbone parameter budgets and data flow.
 5. **[`ORGANIZATION.md`](./ORGANIZATION.md)** — design philosophy.
 6. **[`GOTCHAS.md`](./GOTCHAS.md)** — keep this one open while you're debugging.
 7. **[`CONTRIBUTING.md`](./CONTRIBUTING.md)** — when you want to add something.

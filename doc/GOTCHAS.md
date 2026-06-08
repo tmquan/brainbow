@@ -101,7 +101,7 @@ supervision is dropped.
 Parsing happens in
 [`brainbow/models/cosmos_2_5_common/wrapper_base.py::_resolve_freeze_dit_backbone`](../brainbow/models/cosmos_2_5_common/wrapper_base.py);
 the thaw is wired up in
-[`brainbow/modules/cosmos_2_5_common/base.py::BaseCosmosModule.on_train_epoch_start`](../brainbow/brainbow/modules/cosmos_2_5_common/base.py).
+[`brainbow/modules/cosmos_2_5_common/base.py::BaseCosmosModule.on_train_epoch_start`](../brainbow/modules/cosmos_2_5_common/base.py).
 The optimizer keeps the DiT param group up front (zero-grad no-op
 steps while frozen), so the thaw flips `requires_grad` without
 rebuilding the optimizer or resetting the LR scheduler.

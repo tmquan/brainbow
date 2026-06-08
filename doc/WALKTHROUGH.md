@@ -270,10 +270,13 @@ Each takes effect only when the corresponding submodule is unfrozen
 
 The Cosmos backbone exposes four independent freeze knobs:
 `freeze_vae_encoder`, `freeze_dit_backbone`, `freeze_controlnet`,
-`freeze_vae_decoder`.  They are **bools**, applied **once at
-construction** by
-[brainbow/models/cosmos_transfer_2_5/wrapper.py](../brainbow/models/cosmos_transfer_2_5/wrapper.py)
-when the wrapper is built; there is no per-epoch thaw schedule.
+`freeze_vae_decoder`.  Most are **bools** applied **once at construction**
+by
+[brainbow/models/cosmos_2_5_common/wrapper_base.py](../brainbow/models/cosmos_2_5_common/wrapper_base.py).
+`freeze_dit_backbone` additionally accepts a non-negative **int `N`**: the
+DiT is frozen for epochs `0..N-1` and thawed at the start of epoch `N`
+(parsed by `_resolve_freeze_dit_backbone`; the thaw fires in
+`BaseCosmosModule.on_train_epoch_start`).  See ARCHITECT §1.6 and GOTCHAS.
 
 Cosmos-Transfer2.5 is a **base DiT + ControlNet** stack: the upstream
 `nvidia/Cosmos-Transfer2.5-2B` repo holds the full base transformer on
@@ -291,10 +294,11 @@ by `_try_load_diffusers` / `_try_load_controlnet`; the ControlNet's
   group with `lr = optimizer.dit_backbone_lr` /
   `optimizer.controlnet_lr` (each defaulting to `lr` if unset).
 
-Defaults in `configs/snemi3d.yaml` (`cosmospredict3d`, 2B, no
+Defaults in `configs/snemi3d.yaml` (`cosmos3nano3d`, 16B Nano, no
 ControlNet): VAE encoder frozen, **base DiT trainable**
 (`freeze_dit_backbone: false`, full fine-tune under DDP), VAE decoder
-frozen except the fine-tuning shim.  See
+frozen except the fine-tuning shim.  (The flattened `cosmospredict3d.yaml`
+2B baseline uses an integer warm-up, `freeze_dit_backbone: 2`.)  See
 [`ARCHITECT.md` §1.6](./ARCHITECT.md#16-freeze-flags--what-actually-moves)
 for parameter-budget consequences.
 

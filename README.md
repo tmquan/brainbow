@@ -16,9 +16,9 @@ Cosmos-Transfer2.5 video-diffusion backbone (DiT + VAE).
 
 ```mermaid
 flowchart LR
-    cli["python scripts/train.py<br/>--config-name combine"] --> hydra["Hydra compose<br/>(default + snemi3d + combine)"]
+    cli["python scripts/train.py<br/>--config-name snemi3d"] --> hydra["Hydra compose<br/>(default + snemi3d)"]
     hydra --> dm["LightningDataModule<br/>(LazyVolDataset + MONAI transforms)"]
-    hydra --> mod["LightningModule<br/>(CosmosTransfer3D / CosmosPredict3D / Vista3D)"]
+    hydra --> mod["LightningModule<br/>(Cosmos3Nano3D / CosmosPredict3D / CosmosTransfer3D / Vista3D)"]
     hydra --> tr["Trainer<br/>(DDP, callbacks, logger)"]
     dm --> tr
     mod --> tr
@@ -80,8 +80,8 @@ brainbow/
 ├── brainbow/            importable package (losses, models, modules,
 │                        datasets, datamodules, transforms, inference,
 │                        preprocessors, metrics, visualizer, callbacks)
-├── doc/                 STRUCTURE / ORGANIZATION / ARCHITECT / WALKTHROUGH
-│                        / GOTCHAS / CONTRIBUTING / INDEX
+├── doc/                 STRUCTURE / ORGANIZATION / MUTEXWATERSHED / ARCHITECT
+│                        / WALKTHROUGH / GOTCHAS / CONTRIBUTING / INDEX
 ├── scripts/             train.py entry point + dataset downloaders
 ├── tests/               pytest suite
 ├── pyproject.toml

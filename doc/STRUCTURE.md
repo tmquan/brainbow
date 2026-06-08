@@ -34,8 +34,10 @@ chain is `default → <dataset> → <project>`.
 | File                  | Purpose                                                                     |
 | --------------------- | --------------------------------------------------------------------------- |
 | `default.yaml`        | Every knob with a sensible default.  Base for every experiment.             |
-| `snemi3d.yaml`        | SNEMI3D dataset overrides + shared **model/loss** hyperparameters.          |
+| `snemi3d.yaml`        | SNEMI3D dataset overrides + shared **model/loss** hyperparameters (`cosmos3nano3d`). |
 | `combine.yaml`        | Multi-dataset training (SNEMI3D + neurons + MICrONS).                       |
+| `cosmospredict3d.yaml`| Flattened standalone Cosmos-Predict 2.5 (2B) baseline recipe.               |
+| `cosmos3nano3d.yaml`  | Flattened standalone Cosmos3-Nano (16B) recipe.                             |
 
 ---
 
@@ -129,7 +131,8 @@ and the loss targets.  No learnable state.
 ### `brainbow/models/` — backbone wrappers
 
 `models/base.py::BaseModel` is the abstract contract (forward →
-dict with `logits`, `get_output_channels()`).
+`[B, HEAD_CHANNELS, *spatial]` raw-logit head tensor,
+`get_output_channels()`).
 
 #### `models/cosmos_2_5_common/` — shared scaffolding for the Cosmos 2.5 family
 
@@ -259,10 +262,10 @@ concrete `module.py`.
 | `brainbow/models/cosmos_predict_2_5/`   |  3 (`__init__`, `wrapper`, `variants`)               |
 | `brainbow/models/vista/`                |  4 (incl. `__init__`)                                |
 | `brainbow/callbacks/tensorboard/`       |  6 (incl. `__init__`)                                |
-| `brainbow/losses/`                      |  3 (`__init__`, `_common`, `combined`)               |
+| `brainbow/losses/`                      |  4 (`__init__`, `_common`, `affinity`, `dice_bce_focal`) |
 | `brainbow/datamodules/` + `datasets/`   |  5 + 7 (datasets incl. `lazy.py`, `_patches.py`)     |
 | `brainbow/preprocessors/`               |  6 (incl. `__init__`, `base`)                        |
-| `brainbow/modules/`                     |  2 (top-level) + per-arch packages (`cosmos_2_5_common`, `cosmos_transfer_2_5`, `cosmos_predict_2_5`, `vista`) |
+| `brainbow/modules/`                     |  2 (top-level) + per-arch packages (`cosmos_2_5_common`, `cosmos_transfer_2_5`, `cosmos_predict_2_5`, `cosmos_3_nano`, `vista`) |
 | `brainbow/metrics/`                     |  3                                                   |
 | `brainbow/inference/`                   |  3                                                   |
 | `brainbow/utils/`                       |  4 (incl. `__init__`)                                |

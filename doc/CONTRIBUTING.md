@@ -269,6 +269,7 @@ module_classes = {
     "vista3d": Vista3DModule,
     "cosmostransfer3d": CosmosTransfer3DModule,
     "cosmospredict3d": CosmosPredict3DModule,
+    "cosmos3nano3d": Cosmos3Nano3DModule,
     "myarch": MyArchModule,                    # <-- new
 }
 ```
@@ -336,7 +337,7 @@ Re-export from `brainbow/callbacks/__init__.py` and add an `if cfg.callbacks.myc
 ## 6. Tune the Mutex Watershed agglomeration
 
 Instances come from the parameter-free Mutex Watershed
-(`brainbow/inference/mutex_watershed.py`), not a learned clusterer, so
+(`brainbow/inference/mutex_watershed.py`), not a learned post-processor, so
 there's no algorithm to register — you tune it through
 `training.mutex_watershed` in the config:
 
@@ -345,18 +346,19 @@ training:
   mutex_watershed:
     strides: [1, 4, 4]   # per-axis subsample of push edges (Z, Y, X)
     size_filter: 0       # drop components < N voxels -> background
-    backend: auto        # GPU mws_cp on CUDA, else CPU mws_np
+    backend: auto        # GPU mws_th (torch) on CUDA, else CPU mws_np
     buckets: 16          # GPU Boruvka priority buckets
     max_push_edges: null # cap mutex edges; null = full edges
     # offsets / n_pull default to AFFINITY_OFFSETS / N_PULL
 ```
 
 `MutexWatershed` returns `[B, *spatial]` long instance ids
-(`0` = background), the drop-in contract for the eval metric path.  It
-dispatches to the GPU cupy Boruvka (`mws_cp`, default on CUDA, zero-copy
-via DLPack) or the exact numpy/numba `mws_np` (CPU fallback / reference);
-see [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md) §4.  To change the edge
-set, edit `AFFINITY_OFFSETS` / `N_PULL` in `losses/_common.py` (§2).
+(`0` = background), the drop-in contract for the eval metric path.  On CUDA
+`auto` dispatches to the native-torch Boruvka (`mws_th`, zero-copy);
+`backend: cupy` selects `mws_cp` (DLPack); CPU inputs use the exact
+numpy/numba `mws_np`; see [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md) §4.  To
+change the edge set, edit `AFFINITY_OFFSETS` / `N_PULL` in
+`losses/_common.py` (§2).
 
 ---
 
@@ -384,10 +386,10 @@ set, edit `AFFINITY_OFFSETS` / `N_PULL` in `losses/_common.py` (§2).
 | DataModules          | `tests/test_datamodules.py`        |
 | Preprocessors        | `tests/test_preprocessors.py`      |
 | Losses               | `tests/test_losses.py`             |
+| TensorBoard panels   | `tests/test_tensorboard_heads.py`  |
 | Utils (io)           | `tests/test_utils.py`              |
 | Sliding window       | `tests/test_sliding_window.py`     |
-| Mutex Watershed      | `tests/test_mutex_watershed.py`    |
-| Modules / Trainer    | `tests/test_modules.py`            |
+| Patches              | `tests/test_patches.py`            |
 
 If the test needs CUDA, gate it on `pytest.importorskip("torch.cuda")`
 or `@pytest.mark.skipif(not torch.cuda.is_available(), reason=...)`.
