@@ -124,7 +124,7 @@ data:
     seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
     root: data/MICRONS
   val_batch_size: 2
-  prefetch_factor: 32
+  prefetch_factor: 20
   patch_size:
   - 80
   - 256
@@ -168,16 +168,16 @@ loss:
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 2.0
+    gamma: 1.0
     pull_weight: 1.0
-    push_weight: 5.0
+    push_weight: 1.0
     mask_to_foreground: true
   weight_sem:
     weight: 1.0
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 2.0
+    gamma: 1.0
   weight_raw:
     weight: 1.0
     loss: l1
@@ -186,12 +186,12 @@ training:
   mutex_watershed:
     strides:
     - 1
-    - 2
-    - 2
+    - 4
+    - 4
     size_filter: 50
     # Agglomeration backend: auto -> GPU torch Boruvka (mws_th, native
     # zero-copy) on CUDA; cupy -> mws_cp (DLPack); cpu -> exact mws_np.
-    backend: auto
+    backend: cpu
     buckets: 16
     # null (or 0) = no cap, full edges.
     max_push_edges: null
