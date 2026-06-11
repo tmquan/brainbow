@@ -144,7 +144,7 @@ model:
   pretrained: true
   dtype: bf16
   freeze_vae_encoder: true
-  freeze_dit_backbone: 5
+  freeze_dit_backbone: false 
   freeze_vae_decoder: true
   gradient_checkpointing: true
   # Scale the VAE-encode input [0,1]->[-1,1] to match AutoencoderKLWan's
@@ -191,8 +191,8 @@ training:
   mutex_watershed:
     strides:
     - 1
-    - 4
-    - 4
+    - 1
+    - 1
     size_filter: 50
     # Agglomeration backend: auto -> GPU torch Boruvka (mws_th, native
     # zero-copy) on CUDA; cupy -> mws_cp (DLPack); cpu -> exact mws_np.
