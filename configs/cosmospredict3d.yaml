@@ -32,7 +32,7 @@ data:
   image_size: null
   slice_mode: false
   num_samples: 16000
-  find_boundaries: 1.0
+  find_boundaries: 0.0
   elastic_prob: 0.0
   elastic_sigma_range:
   - 35
@@ -153,11 +153,11 @@ optimizer:
   weight_decay: 0.0001
   scheduler:
     type: cosine_warmup
-    T_max: 101
+    T_max: 201
     eta_min: 1.0e-06
     warmup_epochs: 2
-  dit_backbone_lr: 2.0e-05
-  controlnet_lr: 2.0e-05
+  dit_backbone_lr: 1.0e-05
+  controlnet_lr: 1.0e-05
 
 loss:
   ignore_index: -100
@@ -190,11 +190,11 @@ training:
     size_filter: 50
     # Agglomeration backend: auto -> GPU torch Boruvka (mws_th, native
     # zero-copy) on CUDA; cupy -> mws_cp (DLPack); cpu -> exact mws_np.
-    backend: cpu
+    backend: auto
     buckets: 16
     # null (or 0) = no cap, full edges.
     max_push_edges: null
-  max_epochs: 301
+  max_epochs: 401
   accelerator: auto
   devices: auto
   strategy: ddp
