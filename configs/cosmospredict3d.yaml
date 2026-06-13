@@ -25,7 +25,7 @@ ckpt_path_only_prefixes: null
 data:
   dataset: snemi3d
   data_root: data/SNEMI3D
-  batch_size: 8
+  batch_size: 4
   num_workers: 8
   cache_rate: 0.0
   pin_memory: true
@@ -138,7 +138,7 @@ model:
   pretrained: true
   dtype: bf16
   freeze_vae_encoder: true
-  freeze_dit_backbone: 2
+  freeze_dit_backbone: 10
   freeze_vae_decoder: true
   gradient_checkpointing: false
   # Scale the VAE-encode input [0,1]->[-1,1] to match AutoencoderKLWan's
@@ -153,7 +153,7 @@ optimizer:
   weight_decay: 0.0001
   scheduler:
     type: cosine_warmup
-    T_max: 201
+    T_max: 101
     eta_min: 1.0e-06
     warmup_epochs: 2
   dit_backbone_lr: 1.0e-05
@@ -194,7 +194,7 @@ training:
     buckets: 16
     # null (or 0) = no cap, full edges.
     max_push_edges: null
-  max_epochs: 401
+  max_epochs: 301
   accelerator: auto
   devices: auto
   strategy: ddp
@@ -202,7 +202,7 @@ training:
   gradient_clip_val: 1.0
   accumulate_grad_batches: 1
   val_check_interval: 1.0
-  limit_val_batches: 50
+  limit_val_batches: 100
   check_val_every_n_epoch: 20
   num_sanity_val_steps: 2
   log_every_n_steps: 100
@@ -210,7 +210,7 @@ training:
   enable_model_summary: true
   deterministic: false
   benchmark: true
-  compile: true
+  compile: false
   compile_fullgraph: false
   fast_dev_run: false
   profiler: null
