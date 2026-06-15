@@ -173,10 +173,24 @@ loss:
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 3.0
+    gamma: 2.0
     pull_weight: 1.0
-    push_weight: 1.0
+    # Emphasize the long-range push edges -- they are the only separation
+    # mechanism the Mutex Watershed has, and the channel where the head was
+    # collapsing to "merge" (see val voi_merge dominance).
+    push_weight: 3.0
     mask_to_foreground: true
+    # Rebalance the positive ("merge") vs negative ("separate") affinity
+    # classes per offset; the target is positive-dominated, which biased the
+    # head to high affinities everywhere -> MWS under-segmentation.  This
+    # matters even more for Nano: its 16x VAE latent blurs membranes, so the
+    # head over-merges more than the 8x 2B baseline.
+    class_balance: auto
+    class_balance_clip: 10.0
+    # Add the complementary split-class soft-Dice so boundaries get direct
+    # region supervision (not just the merge class).
+    dice_two_sided: true
+    focal_alpha: null
   weight_sem:
     weight: 1.0
     lambda_bce: 1.0

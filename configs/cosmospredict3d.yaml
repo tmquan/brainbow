@@ -116,7 +116,7 @@ data:
   - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume
     seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
     root: data/MICRONS
-  val_batch_size: 8
+  val_batch_size: 4
   prefetch_factor: 8
   patch_size:
   - 80
@@ -138,7 +138,7 @@ model:
   pretrained: true
   dtype: bf16
   freeze_vae_encoder: true
-  freeze_dit_backbone: 10
+  freeze_dit_backbone: 5
   freeze_vae_decoder: true
   gradient_checkpointing: false
   # Scale the VAE-encode input [0,1]->[-1,1] to match AutoencoderKLWan's
@@ -155,7 +155,7 @@ optimizer:
     type: cosine_warmup
     T_max: 101
     eta_min: 1.0e-06
-    warmup_epochs: 2
+    warmup_epochs: 5
   dit_backbone_lr: 1.0e-05
   controlnet_lr: 1.0e-05
 
@@ -206,7 +206,7 @@ training:
     buckets: 16
     # null (or 0) = no cap, full edges.
     max_push_edges: null
-  max_epochs: 301
+  max_epochs: 501
   accelerator: auto
   devices: auto
   strategy: ddp
