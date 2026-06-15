@@ -43,6 +43,10 @@ the field weight) or a mapping ``{weight: ..., **sub_kwargs}``::
       pull_weight: 1.0     # multiplier on the pull (nearest-neighbour) offsets
       push_weight: 1.0      # multiplier on the push (long-range) offsets
       mask_to_foreground: true   # drop edges with a background endpoint
+      class_balance: null   # null | "auto" (per-offset inverse-freq) | <float>
+      class_balance_clip: 10.0   # clamp on the "auto" per-offset weights
+      dice_two_sided: false # also score the complementary "separate" Dice
+      focal_alpha: null     # null | float in (0,1) up-weighting the "separate" class
     weight_sem:
       weight: 1.0
       lambda_bce: 1.0
@@ -99,13 +103,44 @@ def _split_field(cfg: HeadConfig) -> Tuple[float, Dict[str, Any]]:
     return float(cfg), {}
 
 
+def _parse_class_balance(
+    value: Union[None, str, float, int],
+) -> Union[None, str, float]:
+    """Normalise the ``class_balance`` config into ``None | "auto" | float``.
+
+    Accepts ``None`` / ``"none"`` / ``"null"`` (disabled), ``"auto"``
+    (per-offset inverse-frequency rebalancing), or a numeric multiplier on
+    the positive ("merge") class.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in ("none", "null", ""):
+            return None
+        if key == "auto":
+            return "auto"
+        raise ValueError(
+            f"class_balance must be None, 'auto', or a number; got {value!r}."
+        )
+    return float(value)
+
+
 class AffinityFGLoss(nn.Module):
     """Affinity + foreground loss for the Mutex Watershed head.
 
     Args:
         weight_aff: Field-level config for the affinity head (scalar or
             ``{weight, lambda_bce, lambda_dice, lambda_focal, gamma,
-            pull_weight, push_weight, mask_to_foreground}``).
+            pull_weight, push_weight, mask_to_foreground, class_balance,
+            class_balance_clip, dice_two_sided, focal_alpha}``).  The last
+            four are robustness knobs against Mutex-Watershed over-merging
+            (all default to the prior, un-rebalanced behaviour):
+            ``class_balance`` (``None`` / ``"auto"`` / float) rebalances the
+            positive ("merge") vs negative ("separate") affinity classes;
+            ``dice_two_sided`` adds the complementary split-class Dice;
+            ``focal_alpha`` up-weights the rare "separate" class in the
+            focal term.
         weight_sem: Field-level config for the foreground (semantic) head
             (scalar or ``{weight, lambda_bce, lambda_dice, lambda_focal,
             gamma}``).
@@ -160,6 +195,22 @@ class AffinityFGLoss(nn.Module):
         self.pull_weight = float(aff_kw.pop("pull_weight", 1.0))
         self.push_weight = float(aff_kw.pop("push_weight", 1.0))
         self.mask_to_foreground = bool(aff_kw.pop("mask_to_foreground", True))
+        # ----- robustness knobs (all default to the prior behaviour) -----
+        # Per-offset positive/negative rebalancing for the affinity head.
+        # The target is dominated by the positive ("merge") class, which
+        # biases the head toward high affinities everywhere -> the Mutex
+        # Watershed under-segments (push priority ``1 - aff`` collapses).
+        #   None      -> no rebalancing (legacy)
+        #   "auto"    -> per-offset inverse-frequency weighting (clamped)
+        #   <float>   -> fixed multiplier on the positive ("merge") class
+        self.class_balance = _parse_class_balance(aff_kw.pop("class_balance", None))
+        self.class_balance_clip = float(aff_kw.pop("class_balance_clip", 10.0))
+        # Symmetric soft-Dice: add the complementary ("separate") Dice so
+        # boundaries get direct region supervision, not just the merge class.
+        self.dice_two_sided = bool(aff_kw.pop("dice_two_sided", False))
+        # Optional focal alpha weighting the rare "separate" (t==0) class.
+        _fa = aff_kw.pop("focal_alpha", None)
+        self.focal_alpha = float(_fa) if _fa is not None else None
         if aff_kw:
             import warnings
 
@@ -274,7 +325,13 @@ class AffinityFGLoss(nn.Module):
         dice_inter = zero.clone()
         dice_pm = zero.clone()
         dice_tm = zero.clone()
+        # Complementary ("separate"/split-class) soft-Dice accumulators;
+        # only used when ``dice_two_sided`` is set.
+        ndice_inter = zero.clone()
+        ndice_pm = zero.clone()
+        ndice_tm = zero.clone()
 
+        cb = self.class_balance
         need_probs = self.aff_lambda_focal > 0 or self.aff_lambda_dice > 0
         for c0 in range(0, n, chunk):
             c1 = min(c0 + chunk, n)
@@ -282,10 +339,28 @@ class AffinityFGLoss(nn.Module):
             t = target[:, c0:c1].float()
             p = z.sigmoid() if need_probs else None
             cw = ch_w[c0:c1].view(1, -1, 1, 1, 1)
-            if mask is None:
-                wm_full = torch.ones_like(z) * cw
-            else:
-                wm_full = mask[:, c0:c1].float() * cw
+            # Base per-voxel weight = validity mask * pull/push channel weight.
+            vm = torch.ones_like(z) if mask is None else mask[:, c0:c1].float()
+            wm_full = vm * cw
+
+            # Per-offset class rebalancing folded in as a per-voxel multiplier.
+            # Each offset lives entirely in one chunk, so the per-offset
+            # statistics are independent of ``chunk`` -> chunk-invariant.
+            if cb is not None:
+                if cb == "auto":
+                    dims = (0, 2, 3, 4)
+                    tot = vm.sum(dim=dims).clamp_min(1.0)
+                    pos = (t * vm).sum(dim=dims)
+                    f = (pos / tot).clamp(self.eps, 1.0 - self.eps)
+                    w_pos = (0.5 / f).clamp(max=self.class_balance_clip)
+                    w_neg = (0.5 / (1.0 - f)).clamp(max=self.class_balance_clip)
+                    cls_w = (
+                        t * w_pos.view(1, -1, 1, 1, 1)
+                        + (1.0 - t) * w_neg.view(1, -1, 1, 1, 1)
+                    )
+                else:  # fixed multiplier on the positive ("merge") class
+                    cls_w = t * float(cb) + (1.0 - t)
+                wm_full = wm_full * cls_w
             wmask_sum = wmask_sum + wm_full.sum()
 
             if self.aff_lambda_bce > 0:
@@ -298,6 +373,9 @@ class AffinityFGLoss(nn.Module):
                 pc = p.clamp(self.eps, 1.0 - self.eps)
                 p_t = t * pc + (1.0 - t) * (1.0 - pc)
                 focal = (1.0 - p_t).pow(self.aff_gamma) * (-p_t.log())
+                if self.focal_alpha is not None:
+                    a = self.focal_alpha
+                    focal = focal * ((1.0 - t) * a + t * (1.0 - a))
                 focal_sum = focal_sum + (focal * wm_full).sum()
 
             if self.aff_lambda_dice > 0:
@@ -305,6 +383,12 @@ class AffinityFGLoss(nn.Module):
                 dice_inter = dice_inter + (pm * t).sum()
                 dice_pm = dice_pm + pm.sum()
                 dice_tm = dice_tm + (t * wm_full).sum()
+                if self.dice_two_sided:
+                    qm = (1.0 - p) * wm_full
+                    s = 1.0 - t
+                    ndice_inter = ndice_inter + (qm * s).sum()
+                    ndice_pm = ndice_pm + qm.sum()
+                    ndice_tm = ndice_tm + (s * wm_full).sum()
 
         denom = wmask_sum.clamp_min(1.0)
         total = zero.clone()
@@ -313,9 +397,16 @@ class AffinityFGLoss(nn.Module):
         if self.aff_lambda_focal > 0:
             total = total + self.aff_lambda_focal * focal_sum / denom
         if self.aff_lambda_dice > 0:
-            dice = 1.0 - (2.0 * dice_inter + self.dice_eps) / (
+            pos_dice = 1.0 - (2.0 * dice_inter + self.dice_eps) / (
                 dice_pm + dice_tm + self.dice_eps
             )
+            if self.dice_two_sided:
+                neg_dice = 1.0 - (2.0 * ndice_inter + self.dice_eps) / (
+                    ndice_pm + ndice_tm + self.dice_eps
+                )
+                dice = 0.5 * (pos_dice + neg_dice)
+            else:
+                dice = pos_dice
             total = total + self.aff_lambda_dice * dice
         return total
 
@@ -434,7 +525,9 @@ class AffinityFGLoss(nn.Module):
             f"channels={self.num_channels}, n_offsets={len(self.offsets)}, "
             f"n_pull={self.n_pull}, "
             f"weight_aff={self.weight_aff}, weight_sem={self.weight_sem}, "
-            f"weight_raw={self.weight_raw})"
+            f"weight_raw={self.weight_raw}, "
+            f"class_balance={self.class_balance}, "
+            f"dice_two_sided={self.dice_two_sided})"
         )
 
 

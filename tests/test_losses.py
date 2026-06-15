@@ -162,6 +162,108 @@ def test_chunked_affinity_loss_matches_unchunked() -> None:
     assert torch.allclose(l1, lN, atol=1e-5)
 
 
+def test_new_robustness_knobs_default_to_legacy_behaviour() -> None:
+    """class_balance / dice_two_sided / focal_alpha default to a no-op.
+
+    With the new keys absent (or at their defaults) the affinity loss must
+    be bit-for-bit identical to the prior composite, so existing runs and
+    checkpoints stay comparable.
+    """
+    _, head, targets = _sample_batch(requires_grad=False)
+    cfg = {"weight": 1.0, "lambda_focal": 1.0, "push_weight": 3.0}
+    legacy = AffinityFGLoss(weight_aff=dict(cfg))(head, dict(targets))["loss/aff"]
+    explicit_off = AffinityFGLoss(
+        weight_aff={**cfg, "class_balance": None, "dice_two_sided": False,
+                    "focal_alpha": None},
+    )(head, dict(targets))["loss/aff"]
+    assert torch.allclose(legacy, explicit_off, atol=0.0)
+
+
+def test_chunk_invariance_holds_with_rebalance_and_two_sided_dice() -> None:
+    """The documented chunk-invariance must survive the new terms.
+
+    ``auto`` rebalancing computes per-offset statistics and the two-sided
+    Dice adds a global ratio -- both must stay independent of the offset
+    chunk size.
+    """
+    _, head, targets = _sample_batch(requires_grad=False)
+    cfg = {
+        "weight": 1.0, "lambda_focal": 1.0, "push_weight": 3.0,
+        "class_balance": "auto", "dice_two_sided": True, "focal_alpha": 0.75,
+    }
+    l1 = AffinityFGLoss(weight_aff=dict(cfg), aff_chunk_size=1)(
+        head, dict(targets))["loss/aff"]
+    lN = AffinityFGLoss(weight_aff=dict(cfg), aff_chunk_size=N_AFF)(
+        head, dict(targets))["loss/aff"]
+    assert torch.allclose(l1, lN, atol=1e-5)
+
+
+def test_auto_class_balance_upweights_rare_separate_class() -> None:
+    """On a positive-dominated target, ``auto`` rebalancing raises the BCE.
+
+    The affinity target here is almost all 1s (one object fills the volume),
+    so negatives are rare.  Inverse-frequency rebalancing must up-weight
+    those rare ``0`` voxels, increasing the BCE term relative to the
+    unweighted mean.
+    """
+    torch.manual_seed(3)
+    B, D, H, W = 1, 6, 32, 32
+    head = torch.randn(B, HEAD_CHANNELS, D, H, W)
+    labels = torch.ones(B, D, H, W, dtype=torch.long)   # single object
+    labels[:, :, :2, :2] = 2                            # a few boundary voxels
+    targets = {"labels": labels, "raw_image": torch.rand(B, 1, D, H, W)}
+
+    base_cfg = {"weight": 1.0, "lambda_dice": 0.0, "lambda_focal": 0.0,
+                "lambda_bce": 1.0, "mask_to_foreground": False}
+    base = AffinityFGLoss(weight_aff=dict(base_cfg))(head, dict(targets))["loss/aff"]
+    bal = AffinityFGLoss(
+        weight_aff={**base_cfg, "class_balance": "auto"},
+    )(head, dict(targets))["loss/aff"]
+    assert float(bal) > float(base)
+
+
+def test_class_balance_clip_bounds_auto_weights() -> None:
+    """A small clip must keep the rebalanced loss finite and bounded."""
+    _, head, targets = _sample_batch(requires_grad=False)
+    out = AffinityFGLoss(
+        weight_aff={"weight": 1.0, "class_balance": "auto",
+                    "class_balance_clip": 2.0, "dice_two_sided": True},
+    )(head, dict(targets))["loss/aff"]
+    assert torch.isfinite(out)
+
+
+def test_two_sided_dice_changes_loss_and_stays_finite() -> None:
+    _, head, targets = _sample_batch(requires_grad=False)
+    cfg = {"weight": 1.0, "lambda_bce": 0.0, "lambda_focal": 0.0,
+           "lambda_dice": 1.0}
+    one = AffinityFGLoss(weight_aff=dict(cfg))(head, dict(targets))["loss/aff"]
+    two = AffinityFGLoss(
+        weight_aff={**cfg, "dice_two_sided": True},
+    )(head, dict(targets))["loss/aff"]
+    assert torch.isfinite(one) and torch.isfinite(two)
+    assert not torch.allclose(one, two)
+
+
+def test_rebalanced_two_sided_loss_backward_is_finite() -> None:
+    raw_head, head, targets = _sample_batch(requires_grad=True)
+    loss_fn = AffinityFGLoss(
+        weight_aff={"weight": 1.0, "lambda_focal": 1.0, "gamma": 2.0,
+                    "push_weight": 3.0, "class_balance": "auto",
+                    "dice_two_sided": True},
+    )
+    targets["_cached_targets"] = loss_fn.build_targets(targets["labels"], targets)
+    out = loss_fn(head, targets)
+    assert torch.isfinite(out["loss"])
+    out["loss"].backward()
+    assert torch.isfinite(raw_head.grad).all()
+    assert raw_head.grad.abs().sum() > 0
+
+
+def test_invalid_class_balance_raises() -> None:
+    with pytest.raises(ValueError, match="class_balance"):
+        AffinityFGLoss(weight_aff={"weight": 1.0, "class_balance": "bogus"})
+
+
 def test_pull_push_offset_weights() -> None:
     loss_fn = AffinityFGLoss(weight_aff={"pull_weight": 2.0, "push_weight": 7.0})
     w = loss_fn._offset_weights
