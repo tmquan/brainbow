@@ -208,6 +208,15 @@ class BaseCircuitModule(pl.LightningModule):
         # ``AffinityFGLoss`` consumes only the instance ``labels`` (affinity
         # + foreground targets) and, for the raw head, the input image.
         targets: Dict[str, Any] = {"labels": labels}
+
+        # Optional separate (boundary-eroded) foreground label for the sem
+        # head only (datamodule ``boundary_target: semantic``).  When absent
+        # the sem target falls back to the instance ``labels`` in the loss.
+        sem_label = batch.get("sem_label")
+        if sem_label is not None:
+            if sem_label.dim() == ndim_with_channel:
+                sem_label = rearrange(sem_label, squeeze)
+            targets["sem_label"] = sem_label
         needs_raw = getattr(self.criterion, "weight_raw", 0.0) > 0
         if "image" in batch and needs_raw:
             raw_image = batch["image"]
@@ -367,7 +376,10 @@ class BaseCircuitModule(pl.LightningModule):
         # Head emits sem as a raw logit -> sigmoid before thresholding.
         sem_probs = head_pred[:, SEM_SLICE].sigmoid()
         sem_pred = (sem_probs[:, 0] > 0.5).long()
-        sem_gt = (targets["labels"] > 0).long()
+        # Score the sem head against the same (possibly boundary-eroded)
+        # foreground it is trained on; falls back to the instance labels.
+        sem_source = targets.get("sem_label", targets["labels"])
+        sem_gt = (sem_source > 0).long()
         metric = f"{prefix}/sem/metric"
         self._accum(
             f"{metric}/acc",

@@ -157,9 +157,16 @@ class FindBoundariesd(MapTransform, Randomizable):
     physically thick boundaries along the low-resolution axis.
 
     For single-channel (binary) semantic segmentation, boundary voxels
-    become 0 (background) in both ``label`` and the derived semantic
+    become 0 (background) in the keyed label and the derived semantic
     target ``(label > 0)``.  This teaches the semantic head to predict
     thin gaps between touching instances, aiding instance separation.
+
+    The keyed array is the only thing modified, so the caller controls
+    scope: applying this to ``label`` erodes everything derived from it
+    (sem + affinity targets), while applying it to a dedicated
+    ``sem_label`` copy (the datamodule's ``boundary_target: semantic``
+    mode) erodes the foreground target only and leaves the instance
+    ``label`` -- hence the affinity targets -- untouched.
 
     Expects input labels in ``[C, *spatial]`` format (post
     ``EnsureChannelFirstd``).  Each channel is processed independently.

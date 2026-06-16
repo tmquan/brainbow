@@ -88,6 +88,7 @@ def _log_predictions(
     offsets: Sequence[Sequence[int]] = AFFINITY_OFFSETS,
     n_pull: int = N_PULL,
     labels_3d: Optional[torch.Tensor] = None,
+    sem_labels: Optional[torch.Tensor] = None,
     seg_pred_2d: Optional[torch.Tensor] = None,
     wan_decoder_2d: Optional[torch.Tensor] = None,
 ) -> None:
@@ -96,6 +97,9 @@ def _log_predictions(
     Tags (under ``{stage}/{mode}/``):
 
     * ``true/image``, ``true/label``
+    * ``true/sem``  -- ground-truth foreground target the sem head is trained
+      on (``sem_labels > 0`` when a boundary-eroded ``sem_label`` is supplied,
+      else the instance ``labels > 0``)
     * ``true/aff/{offset}`` (3-D only; curated subset)
     * ``true/wan_decoder`` (Cosmos + VAE only, passed in)
     * ``pred/sem``  -- foreground probability
@@ -132,6 +136,17 @@ def _log_predictions(
     tb.add_images(head.tag("true/image"), true_img, global_step=epoch)
     tb.add_images(
         head.tag("true/label"), _label_to_rgb(labels[:n]), global_step=epoch,
+    )
+
+    # Ground-truth foreground the sem head is supervised against.  Uses the
+    # (boundary-eroded) ``sem_labels`` when provided so the panel matches the
+    # actual sem target; otherwise falls back to the instance foreground.
+    sem_src = sem_labels if sem_labels is not None else labels
+    gt_sem_2d = rearrange((sem_src[:n] > 0).float(), "b ... -> b 1 ...")
+    tb.add_images(
+        head.tag("true/sem"),
+        repeat(gt_sem_2d, "b 1 h w -> b 3 h w"),
+        global_step=epoch,
     )
 
     if wan_decoder_2d is not None:

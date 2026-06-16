@@ -287,6 +287,21 @@ class ImageLogger(pl.Callback):
             _to_2d(rearrange(labels[:n], "b ... -> b 1 ...")),
             "b 1 ... -> b ...",
         )
+
+        # Optional boundary-eroded foreground label (datamodule
+        # ``boundary_target: semantic``) -- the actual sem-head target, shown
+        # as the ``true/sem`` panel.  Absent in the legacy / both modes.
+        sem_label = batch.get("sem_label")
+        sem_labels_2d = None
+        if sem_label is not None:
+            sem_label = sem_label.to(pl_module.device)
+            if sem_label.dim() == self.spatial_dims + 2:
+                sem_label = rearrange(sem_label, "b 1 ... -> b ...")
+            sem_labels_2d = rearrange(
+                _to_2d(rearrange(sem_label[:n], "b ... -> b 1 ...")),
+                "b 1 ... -> b ...",
+            )
+
         wan_decoder_2d = (
             _to_2d(wan_decoder_pred) if wan_decoder_pred is not None else None
         )
@@ -298,6 +313,7 @@ class ImageLogger(pl.Callback):
             offsets=offsets,
             n_pull=n_pull,
             labels_3d=labels[:n] if self.spatial_dims == 3 else None,
+            sem_labels=sem_labels_2d,
             seg_pred_2d=seg_pred_2d,
             wan_decoder_2d=wan_decoder_2d,
         )

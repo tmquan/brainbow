@@ -38,7 +38,13 @@ data:
   image_size: null
   slice_mode: false
   num_samples: 16000
-  find_boundaries: 0.0
+  # Boundary erosion probability for the FindBoundariesd transform.
+  find_boundaries: 1.0
+  # ``semantic`` -> erode boundary voxels only for the sem (foreground) head's
+  # target (a separate ``sem_label``); the instance ``label`` used for the
+  # affinity targets and the validation instance GT / fg-mask stays pristine.
+  # ``both`` -> legacy behaviour (erode the shared instance label in place).
+  boundary_target: semantic
   elastic_prob: 0.0
   elastic_sigma_range:
   - 35

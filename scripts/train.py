@@ -205,6 +205,7 @@ def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
         "val_volumes": _to_vol_list(data_cfg.get("val_volumes")),
         "test_volumes": _to_vol_list(data_cfg.get("test_volumes")),
         "find_boundaries": float(data_cfg.get("find_boundaries", 0.0)),
+        "boundary_target": str(data_cfg.get("boundary_target", "both")),
         "pixel_size": tuple(pixel_size) if pixel_size is not None else None,
         "min_foreground": float(data_cfg.get("min_foreground", 0.0)),
         "elastic_prob": float(data_cfg.get("elastic_prob", 0.0)),

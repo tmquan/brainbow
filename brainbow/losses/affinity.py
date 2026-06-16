@@ -471,7 +471,10 @@ class AffinityFGLoss(nn.Module):
                 are logits; raw is linear).
             targets: Dict with ``labels`` ``[B, D, H, W]`` integer ids and
                 (optionally) a ``_cached_targets`` dict from
-                :meth:`build_targets`.
+                :meth:`build_targets`.  An optional ``sem_label`` (same shape
+                as ``labels``) supervises the ``sem`` head instead of
+                ``labels`` -- used for boundary-eroded foreground targets that
+                must not perturb the affinity target; falls back to ``labels``.
 
         Returns:
             ``{"loss", "loss/aff", "loss/sem", "loss/raw"}`` (per-field entries only for
@@ -501,7 +504,13 @@ class AffinityFGLoss(nn.Module):
             total = total + self.weight_aff * l_aff
 
         if self.weight_sem > 0:
-            l_sem = self._loss_sem(head[:, SEM_SLICE], labels)
+            # Optional boundary-eroded foreground label for the sem head only
+            # (the affinity target above always uses the pristine instance
+            # ``labels``).  Falls back to ``labels`` when not provided.
+            sem_labels = targets.get("sem_label")
+            if sem_labels is None:
+                sem_labels = labels
+            l_sem = self._loss_sem(head[:, SEM_SLICE], sem_labels)
             out["loss/sem"] = l_sem
             total = total + self.weight_sem * l_sem
 

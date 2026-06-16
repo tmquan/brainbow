@@ -37,6 +37,7 @@ import pytorch_lightning as pl
 from monai.transforms import (
     Compose,
     CenterSpatialCropd,
+    CopyItemsd,
     EnsureTyped,
     EnsureChannelFirstd,
     Resized,
@@ -185,6 +186,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         persistent_workers: bool = True,
         prefetch_factor: int = 6,
         find_boundaries: float = 0.0,
+        boundary_target: str = "both",
         min_foreground: float = 0.0,
         pixel_size: Optional[Tuple[float, ...]] = None,
         elastic_prob: float = 0.0,
@@ -215,6 +217,17 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         self.persistent_workers = persistent_workers and num_workers > 0
         self.prefetch_factor = int(prefetch_factor)
         self.find_boundaries = float(find_boundaries)
+        # ``both``    -> erode boundary voxels in the shared instance ``label``
+        #                (affects sem AND affinity targets + val instance GT).
+        # ``semantic`` -> erode a separate ``sem_label`` copy used only by the
+        #                foreground (sem) head; the instance ``label`` (affinity
+        #                targets + val instance GT / fg_mask) stays pristine.
+        self.boundary_target = str(boundary_target)
+        if self.boundary_target not in ("both", "semantic"):
+            raise ValueError(
+                "boundary_target must be 'both' or 'semantic'; "
+                f"got {boundary_target!r}."
+            )
         self.min_foreground = float(min_foreground)
         self.pixel_size = tuple(pixel_size) if pixel_size is not None else None
         self.elastic_prob = float(elastic_prob)
@@ -381,9 +394,40 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
     # Pipeline assembly
     # ------------------------------------------------------------------
 
+    def _semantic_only_boundaries(self) -> bool:
+        """True when boundary erosion targets only the ``sem`` head.
+
+        In this mode the instance ``label`` is left intact (so the affinity
+        targets and the validation instance GT / foreground mask are
+        unaffected) and a separate eroded ``sem_label`` is produced for the
+        foreground (sem) supervision.
+        """
+        return self.find_boundaries > 0 and self.boundary_target == "semantic"
+
+    def _boundary_semantic_transforms(self, prob: float) -> list:
+        """Build the eroded ``sem_label`` (semantic-only boundary mode).
+
+        Runs last in the pipeline so it copies the final (cropped, relabeled)
+        ``label`` and erodes the boundary on the actual training patch; the
+        instance ``label`` itself is never modified.
+        """
+        if not self._semantic_only_boundaries():
+            return []
+        return [
+            CopyItemsd(keys=["label"], times=1, names=["sem_label"]),
+            FindBoundariesd(
+                keys=["sem_label"],
+                prob=prob,
+                pixel_size=self.pixel_size,
+            ),
+        ]
+
     def _output_keys(self) -> list:
         """All keys that must pass through ``EnsureTyped``."""
-        return ["image", "label"]
+        keys = ["image", "label"]
+        if self._semantic_only_boundaries():
+            keys.append("sem_label")
+        return keys
 
     def get_train_transforms(self) -> Compose:
         io_keys = ["image", "label"]
@@ -393,7 +437,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             EnsureChannelFirstd(keys=io_keys, channel_dim="no_channel"),
         ]
 
-        if self.find_boundaries > 0:
+        if self.find_boundaries > 0 and self.boundary_target == "both":
             transforms.append(
                 FindBoundariesd(
                     keys=["label"],
@@ -457,6 +501,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             *self._original_transforms(sd),
             *self._instance_transforms(sd),
             *self._semantic_transforms(sd),
+            *self._boundary_semantic_transforms(self.find_boundaries),
             EnsureTyped(keys=self._output_keys()),
         ])
 
@@ -470,7 +515,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             EnsureChannelFirstd(keys=io_keys, channel_dim="no_channel"),
         ]
 
-        if self.find_boundaries > 0:
+        if self.find_boundaries > 0 and self.boundary_target == "both":
             transforms.append(
                 FindBoundariesd(
                     keys=["label"],
@@ -493,6 +538,7 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             *self._original_transforms(sd),
             *self._semantic_transforms(sd),
             *self._instance_transforms(sd),
+            *self._boundary_semantic_transforms(1.0),
             EnsureTyped(keys=self._output_keys()),
         ])
         return Compose(transforms)

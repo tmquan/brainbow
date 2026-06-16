@@ -524,3 +524,34 @@ probabilities.
 ``gamma: 0`` reduces the focal term exactly to per-voxel BCE.
 
 **See also.** Entry #2 (loss-config schema).
+
+---
+
+## 46. `boundary_target` decides whether erosion touches the affinity head
+
+**Symptom.** Turning on ``data.find_boundaries`` to teach the `sem`
+head thin gaps also changes the affinity (instance) supervision and
+the validation instance GT — unexpectedly shifting VOI numbers.
+
+**Where.**
+[`brainbow/datamodules/base.py`](../brainbow/datamodules/base.py)
+(`_boundary_semantic_transforms`, `_output_keys`),
+[`brainbow/modules/base.py::_prepare_targets`](../brainbow/modules/base.py),
+and [`brainbow/losses/affinity.py::AffinityFGLoss.forward`](../brainbow/losses/affinity.py).
+
+**Why.** ``FindBoundariesd`` zeros boundary voxels in whatever label it
+is given. With ``boundary_target: both`` (legacy) it mutates the shared
+instance ``label`` in place, so **both** the `sem` target (`label > 0`)
+**and** the affinity target / validity mask / val instance GT derive
+from the eroded label. The fix is ``boundary_target: semantic``: a
+separate eroded ``sem_label`` is produced (added to ``_output_keys`` and
+threaded into ``targets["sem_label"]``); the `sem` loss + metric use it
+while the affinity target (`affinity_target_from_offsets`) and the
+validation instance GT / fg-mask keep the **pristine** ``label``.
+
+**Contract.** When no ``sem_label`` is present (legacy / `both`), the
+loss and metric fall back to ``labels`` — byte-identical to before. The
+`sem_label` must be forwarded by ``scripts/train.py``
+(`_build_datamodule_kwargs`) for the config knob to take effect.
+
+**See also.** Entry #34 (per-volume vs global `find_boundaries`).
