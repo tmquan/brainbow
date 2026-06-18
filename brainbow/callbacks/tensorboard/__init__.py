@@ -11,12 +11,16 @@ where
 * ``stage``  -- ``"train"`` | ``"val"``
 * ``mode``   -- ``"automatic"`` (single mode today; structured so
   additional modes such as ``"prompted"`` can slot in later)
-* ``panel``  -- e.g. ``true/image``, ``true/label``, ``true/aff/*``,
-  ``true/wan_decoder``, ``pred/sem``, ``pred/raw``, ``pred/aff/*``,
-  ``pred/label/{pre,mul}`` (the Mutex Watershed instances).  Affinity
-  panels are named by their offset (``brainbow.losses.AFF_NAMES``, e.g.
-  ``01_pull_z1`` / ``04_push_y3``) with a 1-based numeric prefix so the
-  alphabetical TB sort keeps them in offset order.
+* ``panel``  -- e.g. ``true/image``, ``true/label``, ``true/sem``,
+  ``true/wan_decoder``, ``pred/sem``, ``pred/raw``,
+  ``pred/label/{pre,mul}`` (the Mutex Watershed instances).  All affinity
+  panels live under a single ``aff/`` group -- ``aff/true/*`` and
+  ``aff/pred/*`` -- so the core panels above stay clustered together
+  instead of being split apart by the (config-driven, possibly many)
+  offsets.  Affinity panels are named by their offset
+  (``brainbow.losses.offset_names``, e.g. ``01_pull_z-1`` /
+  ``21_push_y-2x-2``) with a 1-based numeric prefix so the alphabetical
+  TB sort keeps them in offset order.
 
 The scalar logs emitted by
 :class:`brainbow.modules.base.BaseCircuitModule` use the same
@@ -53,7 +57,7 @@ End-to-end flow (rank-0 only, once per ``every_n_epochs``)::
         └──────────┬─────────────┘
                    ▼
         ┌────────────────────────┐   affinity + sem + raw head panels
-        │ heads._log_predictions │   (pred/sem, pred/raw, pred/aff/*,
+        │ heads._log_predictions │   (pred/sem, pred/raw, aff/{true,pred}/*,
         │                        │   Mutex Watershed pred/label/*)
         └──────────┬─────────────┘
                    ▼

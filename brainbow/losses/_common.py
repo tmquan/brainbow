@@ -113,18 +113,52 @@ HEAD_LAYOUT: Dict[str, slice] = {
 }
 
 # Offset names for TensorBoard panels / logging (``pull`` = nearest
-# neighbour, ``push`` = long-range), e.g. ``01_pull_z1``, ``04_push_y3``.
-def _offset_name(idx: int, offset: Tuple[int, int, int]) -> str:
-    kind = "pull" if idx < N_PULL else "push"
+# neighbour, ``push`` = long-range).  Each non-zero axis component is
+# encoded with its signed magnitude so axis-aligned and diagonal offsets
+# get distinct, readable names, e.g. ``01_pull_z-1``, ``21_push_y-2x-2``.
+def _offset_name(idx: int, offset: Sequence[int], n_pull: int = N_PULL) -> str:
+    kind = "pull" if idx < n_pull else "push"
     dz, dy, dx = offset
-    axis = "z" if dz else ("y" if dy else "x")
-    mag = abs(dz or dy or dx)
-    return f"{idx + 1:02d}_{kind}_{axis}{mag}"
+    parts: List[str] = []
+    if dz:
+        parts.append(f"z{int(dz):+d}")
+    if dy:
+        parts.append(f"y{int(dy):+d}")
+    if dx:
+        parts.append(f"x{int(dx):+d}")
+    tag = "".join(parts) or "self"
+    return f"{idx + 1:02d}_{kind}_{tag}"
 
 
-AFF_NAMES: Tuple[str, ...] = tuple(
-    _offset_name(i, o) for i, o in enumerate(AFFINITY_OFFSETS)
-)
+def offset_names(
+    offsets: Sequence[Sequence[int]], n_pull: int = N_PULL,
+) -> Tuple[str, ...]:
+    """Per-offset TB / logging names for an arbitrary offset set."""
+    return tuple(_offset_name(i, o, n_pull) for i, o in enumerate(offsets))
+
+
+def head_channels_for(n_aff: int) -> int:
+    """Total unified-head width for ``n_aff`` affinities (+ sem + raw)."""
+    return n_aff + 2
+
+
+def head_slices(n_aff: int) -> Dict[str, slice]:
+    """``{aff, sem, raw}`` channel slices for ``n_aff`` affinity channels.
+
+    The single source of truth for the channel layout at any head width:
+    affinities first, then the scalar sem logit, then the linear raw
+    channel.  Consumers that know the offset set (the loss) or can read
+    the channel count (``slice_head``) derive their slices from here, so
+    the layout is **config-driven** rather than a fixed module constant.
+    """
+    return {
+        "aff": slice(0, n_aff),
+        "sem": slice(n_aff, n_aff + 1),
+        "raw": slice(n_aff + 1, n_aff + 2),
+    }
+
+
+AFF_NAMES: Tuple[str, ...] = offset_names(AFFINITY_OFFSETS, N_PULL)
 AFF_CHANNELS: int = N_AFF
 
 
@@ -147,16 +181,19 @@ def slice_head(
     Returns:
         Dict mapping ``"aff"`` -> ``[B, N_AFF, *spatial]``, ``"sem"`` ->
         ``[B, 1, *spatial]``, and ``"raw"`` -> ``[B, 1, *spatial]``
-        (views of ``head``).
+        (views of ``head``).  The affinity width is inferred from the
+        channel count (``N_AFF = C - 2``), so this works for any
+        config-driven offset set, not just the default layout.
     """
-    if head.shape[channel_dim] != HEAD_CHANNELS:
+    c = head.shape[channel_dim]
+    if c < 3:
         raise ValueError(
-            f"slice_head: expected {HEAD_CHANNELS} channels along axis "
-            f"{channel_dim}; got {head.shape[channel_dim]}."
+            f"slice_head: expected >= 3 channels (aff + sem + raw) along "
+            f"axis {channel_dim}; got {c}."
         )
     return {
         name: head.narrow(channel_dim, sl.start, sl.stop - sl.start)
-        for name, sl in HEAD_LAYOUT.items()
+        for name, sl in head_slices(c - 2).items()
     }
 
 
@@ -386,6 +423,8 @@ __all__ = [
     "AFF_SLICE", "SEM_SLICE", "RAW_SLICE",
     "HEAD_CHANNELS", "HEAD_LAYOUT",
     "AFF_NAMES", "AFF_CHANNELS",
+    # Config-driven layout helpers
+    "offset_names", "head_channels_for", "head_slices",
     # Helpers
     "slice_head",
     "shift_replicate", "shift_nd",

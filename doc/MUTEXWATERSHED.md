@@ -26,14 +26,19 @@ Every backbone (`Cosmos3Nano3DWrapper`, `CosmosPredict3DWrapper`,
 of truth in `brainbow/losses/_common.py`:
 
 ```
-ch  0 .. N_AFF-1 : aff   (N_AFF=14)  logit,  per-offset affinity
+ch  0 .. N_AFF-1 : aff   (N_AFF)     logit,  per-offset affinity
 ch  N_AFF        : sem   (1)         logit,  foreground / boundary
 ch  N_AFF + 1    : raw   (1)         linear, L1 reconstruction of input EM
                                      -----------------------------------
-                                     HEAD_CHANNELS = N_AFF + 2 = 16
+                                     HEAD_CHANNELS = N_AFF + 2
 ```
 
-- `AFF_SLICE = slice(0, 14)`, `SEM_SLICE = slice(14, 15)`, `RAW_SLICE = slice(15, 16)`.
+`N_AFF = len(offsets)` is **config-driven** (`loss.offsets`): the default
+set gives `N_AFF = 14` / `HEAD_CHANNELS = 16`; the flagship 30-offset set
+gives `N_AFF = 30` / `HEAD_CHANNELS = 32`.  Slices are derived from the
+channel count at runtime — `AFF_SLICE = slice(0, N_AFF)`,
+`SEM_SLICE = slice(N_AFF, N_AFF + 1)`, `RAW_SLICE = slice(N_AFF + 1, N_AFF + 2)`
+(e.g. `slice(0, 14)` / `slice(14, 15)` / `slice(15, 16)` for the default).
 - The head emits **raw logits / linear values** (no activation in
   `forward`): `aff` / `sem` are logits, `raw` is linear. Each consumer
   applies its own activation — logit-stable BCE in the loss, and `sigmoid`
@@ -43,36 +48,68 @@ ch  N_AFF + 1    : raw   (1)         linear, L1 reconstruction of input EM
 
 `aff[o, v] = P(label[v] == label[v + offset_o])` — a **high** value means
 "these two voxels belong to the same object" (the `+`/pull
-convention).  The offset list `AFFINITY_OFFSETS` (`(dz, dy, dx)`) is
-anisotropy-aware for EM (long reach in-plane, short in Z):
+convention).  The offset list (`(dz, dy, dx)`) is anisotropy-aware for EM
+(long reach in-plane, short in Z).
 
-| #  | offset (dz,dy,dx) | role                 |
-|----|-------------------|----------------------|
-| 1  | (-1, 0, 0)        | pull nn (z)    |
-| 2  | (0, -1, 0)        | pull nn (y)    |
-| 3  | (0, 0, -1)        | pull nn (x)    |
-| 4  | (0, -3, 0)        | push in-plane   |
-| 5  | (0, 0, -3)        | push in-plane   |
-| 6  | (0, -9, 0)        | push in-plane   |
-| 7  | (0, 0, -9)        | push in-plane   |
-| 8  | (0, -27, 0)       | push in-plane   |
-| 9  | (0, 0, -27)       | push in-plane   |
-| 10 | (0, -9, -9)       | push diagonal   |
-| 11 | (0, 9, -9)        | push diagonal   |
-| 12 | (-2, 0, 0)        | push z          |
-| 13 | (-3, 0, 0)        | push z          |
-| 14 | (-4, 0, 0)        | push z          |
+**Default set** (`AFFINITY_OFFSETS` in `_common.py`, `N_PULL = 3`): 3 pull
+nearest-neighbours (z/y/x) + 11 push offsets (in-plane axis at 3/9/27, two
+in-plane diagonals at 9, and short z at 2/3/4) — 14 total, used by any
+config that does not set `loss.offsets`.
 
-`N_PULL = 3` (the leading nearest-neighbour offsets).  The first
-three are the **pull** edges; the remaining eleven are **push**
-(long-range) edges that the Mutex Watershed uses as mutual-exclusion
-constraints.
+**Flagship set** (`cosmospredict3d.yaml` / `cosmos3nano3d.yaml` via
+`loss.offsets`, `n_pull = 5`): a 30-offset set grouped as below.
 
-To change the offset set, edit `AFFINITY_OFFSETS` / `N_PULL` in
-`_common.py` — `HEAD_CHANNELS` and every downstream consumer (head width,
-loss, target builder, agglomerator) re-derive from it automatically.  If
-you do, set `model.head_channels` and the `training.mutex_watershed.offsets`
-override accordingly.
+| #  | offset (dz,dy,dx) | group                          | pull/push |
+|----|-------------------|--------------------------------|-----------|
+| 1  | (-1, 0, 0)        | base glue — nn z               | pull |
+| 2  | (0, -1, 0)        | base glue — nn y               | pull |
+| 3  | (0, 0, -1)        | base glue — nn x               | pull |
+| 4  | (0, -1, -1)       | high-res anti-leak diagonal    | pull |
+| 5  | (0, 1, -1)        | high-res anti-leak anti-diag   | pull |
+| 6  | (-2, 0, 0)        | deep out-of-plane (z)          | push |
+| 7  | (-3, 0, 0)        | deep out-of-plane (z)          | push |
+| 8  | (-4, 0, 0)        | deep out-of-plane (z)          | push |
+| 9  | (-5, 0, 0)        | deep out-of-plane (z)          | push |
+| 10 | (-10, 0, 0)       | deep out-of-plane (z)          | push |
+| 11 | (0, -2, 0)        | compact in-plane axis (y)      | push |
+| 12 | (0, 0, -2)        | compact in-plane axis (x)      | push |
+| 13 | (0, -4, 0)        | compact in-plane axis (y)      | push |
+| 14 | (0, 0, -4)        | compact in-plane axis (x)      | push |
+| 15 | (0, -8, 0)        | compact in-plane axis (y)      | push |
+| 16 | (0, 0, -8)        | compact in-plane axis (x)      | push |
+| 17 | (0, -16, 0)       | compact in-plane axis (y)      | push |
+| 18 | (0, 0, -16)       | compact in-plane axis (x)      | push |
+| 19 | (0, -32, 0)       | compact in-plane axis (y)      | push |
+| 20 | (0, 0, -32)       | compact in-plane axis (x)      | push |
+| 21 | (0, -2, -2)       | mid-range in-plane diagonal    | push |
+| 22 | (0, 2, -2)        | mid-range in-plane anti-diag   | push |
+| 23 | (0, -4, -4)       | mid-range in-plane diagonal    | push |
+| 24 | (0, 4, -4)        | mid-range in-plane anti-diag   | push |
+| 25 | (0, -8, -8)       | mid-range in-plane diagonal    | push |
+| 26 | (0, 8, -8)        | mid-range in-plane anti-diag   | push |
+| 27 | (0, -16, -16)     | mid-range in-plane diagonal    | push |
+| 28 | (0, 16, -16)      | mid-range in-plane anti-diag   | push |
+| 29 | (0, -32, -32)     | mid-range in-plane diagonal    | push |
+| 30 | (0, 32, -32)      | mid-range in-plane anti-diag   | push |
+
+`N_PULL = 5`: the first five are the **pull** (attractive / merge) edges —
+the 3 nearest neighbours plus 2 high-res in-plane anti-leak diagonals; the
+remaining 25 are **push** (mutual-exclusion) edges the Mutex Watershed uses
+as separation constraints (deep out-of-plane z, compact in-plane axis, and
+mid-range in-plane diagonals).  Pull-first ordering is **required**.
+
+The offset set is now **config-driven**: set `loss.offsets` (a list of
+`[dz, dy, dx]`) and `loss.n_pull` in the YAML.  The head width
+(`head_channels = len(offsets) + 2`), the `{aff, sem, raw}` channel
+slices, the affinity-target builder, the Mutex Watershed, and the
+TensorBoard panel names all derive from the loss's offsets at runtime
+(`AffinityFGLoss` exposes `n_aff` / `aff_slice` / `sem_slice` /
+`raw_slice` / `head_channels` / `offset_names`).  The module derives
+`head_channels` from the offsets and injects it into the model, so
+`model.head_channels` is a cross-check (a mismatch only warns).  Pull-first
+ordering is required: the first `n_pull` offsets are the attractive
+edges.  `AFFINITY_OFFSETS` / `N_PULL` in `_common.py` remain the defaults
+used when a config does not specify `loss.offsets`.
 
 ---
 
@@ -313,10 +350,14 @@ segmentation panels:
 {stage}/automatic/pred/label/mul    # × predicted sem mask
 {stage}/automatic/pred/sem          # foreground probability
 {stage}/automatic/pred/raw          # linear reconstruction
-{stage}/automatic/pred/aff/{offset} # all N_AFF affinity channels
-{stage}/automatic/true/aff/{offset} # GT affinity (3-D)
-{stage}/automatic/true/{image,label}
+{stage}/automatic/true/{image,label,sem}
+{stage}/automatic/aff/pred/{offset} # all N_AFF affinity channels
+{stage}/automatic/aff/true/{offset} # GT affinity (3-D)
 ```
+
+Affinity panels live under a single `aff/` group (`aff/pred/*`,
+`aff/true/*`) so the core `image / label / sem / raw` panels stay
+clustered together instead of being split apart by the many offsets.
 
 All `N_AFF` affinity channels are shown by default
 (`aff_panel_indices(...)`); pass `max_push=N` to log a curated
@@ -330,11 +371,16 @@ subset instead.
 
 ```yaml
 model:
-  head_channels: 16            # = N_AFF + 2; must match the layout
+  head_channels: 16            # = N_AFF + 2; derived from loss.offsets and
+                               # injected by the module (a mismatch warns)
 
 loss:                          # AffinityFGLoss
   background: -1
   ignore_index: -100
+  # offsets / n_pull are optional; omit to use the default 14-offset set.
+  # The flagship recipes set a 30-offset set here (see configs/cosmospredict3d.yaml):
+  #   n_pull: 5
+  #   offsets: [[-1,0,0], [0,-1,0], ...]
   weight_aff:
     weight: 1.0
     lambda_bce: 1.0
@@ -344,6 +390,8 @@ loss:                          # AffinityFGLoss
     pull_weight: 1.0
     push_weight: 1.0
     mask_to_foreground: true
+  # weight_sem accepts the same rebalancing knobs as weight_aff
+  # (class_balance / class_balance_clip / focal_alpha / dice_two_sided).
   weight_sem: { weight: 1.0, lambda_bce: 1.0, lambda_dice: 1.0, lambda_focal: 1.0, gamma: 2.0 }
   weight_raw: { weight: 1.0, loss: l1 }
 
@@ -351,8 +399,8 @@ training:
   mutex_watershed:
     strides: [1, 4, 4]         # push-edge subsampling (Z, Y, X)
     size_filter: 50            # min component size (voxels)
-    # offsets / n_pull default to the loss's; only set if you also
-    # override AFFINITY_OFFSETS in brainbow/losses/_common.py
+    # offsets / n_pull default to the loss's (set them via loss.offsets /
+    # loss.n_pull above) -- only override here for an MWS-only experiment
 ```
 
 ---

@@ -51,15 +51,18 @@ def _make_labels(B: int = 2, D: int = _D, H: int = _H, W: int = _W) -> torch.Ten
 
 # By default all N_AFF offsets are visualised.
 _AFF_PANELS = [AFF_NAMES[i] for i in aff_panel_indices(N_AFF, N_PULL)]
+# Affinity panels live under a single ``aff/`` group (so the core
+# image/label/sem/raw panels stay clustered); core panels keep true/pred.
 _EXPECTED_PRED_TAGS = {
     "train/automatic/pred/sem",
     "train/automatic/pred/raw",
-    *(f"train/automatic/pred/aff/{n}" for n in _AFF_PANELS),
+    *(f"train/automatic/aff/pred/{n}" for n in _AFF_PANELS),
 }
 _EXPECTED_TRUE_TAGS = {
     "train/automatic/true/image",
     "train/automatic/true/label",
-    *(f"train/automatic/true/aff/{n}" for n in _AFF_PANELS),
+    "train/automatic/true/sem",
+    *(f"train/automatic/aff/true/{n}" for n in _AFF_PANELS),
 }
 _SEG_TAGS = {
     "train/automatic/pred/label/pre",
@@ -103,8 +106,8 @@ class TestLogPredictions:
 
     def test_all_affinity_offsets_are_shown(self) -> None:
         emitted = set(_run().tags)
-        assert sum(t.startswith("train/automatic/pred/aff/") for t in emitted) == N_AFF
-        assert sum(t.startswith("train/automatic/true/aff/") for t in emitted) == N_AFF
+        assert sum(t.startswith("train/automatic/aff/pred/") for t in emitted) == N_AFF
+        assert sum(t.startswith("train/automatic/aff/true/") for t in emitted) == N_AFF
 
     def test_no_seg_panels_without_seg_input(self) -> None:
         emitted = set(_run(seg_pred_2d=None).tags)
@@ -135,7 +138,7 @@ class TestLogPredictions:
         for tag in (
             "train/automatic/pred/sem",
             "train/automatic/pred/raw",
-            f"train/automatic/pred/aff/{_AFF_PANELS[0]}",
+            f"train/automatic/aff/pred/{_AFF_PANELS[0]}",
             "train/automatic/pred/label/pre",
         ):
             assert tb.payloads[tag].shape[1] == 3, f"{tag} should be RGB"

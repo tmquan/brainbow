@@ -16,7 +16,7 @@ from einops import rearrange
 from brainbow.callbacks.tensorboard.heads import _log_predictions
 from brainbow.callbacks.tensorboard.tags import TagContext
 from brainbow.callbacks.tensorboard.viz import _to_2d
-from brainbow.losses import AFF_SLICE, AFFINITY_OFFSETS, N_PULL, SEM_SLICE
+from brainbow.losses import AFFINITY_OFFSETS, N_PULL
 
 
 class ImageLogger(pl.Callback):
@@ -37,18 +37,20 @@ class ImageLogger(pl.Callback):
 
     All tags live under ``{stage}/{mode}/...`` where
     ``stage`` ∈ {``train``, ``val``} and ``mode`` = ``"automatic"``.
-    The affinity panels show a curated subset of offsets (all pull
-    nearest-neighbours plus a few long-range push ones)::
+    Affinity panels are grouped under a single ``aff/`` namespace (so the
+    core image/label/sem/raw panels stay clustered together rather than
+    being split apart by the offset panels) and show all offsets::
 
         {stage}/automatic/true/image
         {stage}/automatic/true/label
-        {stage}/automatic/true/aff/{offset}                     (3-D only)
+        {stage}/automatic/true/sem                              (sem target)
         {stage}/automatic/true/wan_decoder                      (Cosmos + VAE only)
         {stage}/automatic/pred/sem
         {stage}/automatic/pred/raw
-        {stage}/automatic/pred/aff/{offset}
         {stage}/automatic/pred/label/pre                        (Mutex Watershed, 3-D)
         {stage}/automatic/pred/label/mul                        (× predicted sem)
+        {stage}/automatic/aff/true/{offset}                     (3-D only)
+        {stage}/automatic/aff/pred/{offset}
 
     This matches the scalar hierarchy emitted by
     :class:`brainbow.modules.base.BaseCircuitModule`
@@ -274,8 +276,10 @@ class ImageLogger(pl.Callback):
             if self.spatial_dims == 3:
                 # Head emits aff / sem as raw logits -> sigmoid before MWS
                 # (probabilities) and before thresholding the fg mask.
-                aff = head_pred[:, AFF_SLICE].sigmoid().float()
-                sem_fg = head_pred[:, SEM_SLICE].sigmoid()[:, 0] > 0.5
+                aff = head_pred[:, pl_module.criterion.aff_slice].sigmoid().float()
+                sem_fg = (
+                    head_pred[:, pl_module.criterion.sem_slice].sigmoid()[:, 0] > 0.5
+                )
                 seg_3d = agglomerator(aff, sem_fg)            # [n, D, H, W] long
                 seg_pred_2d = rearrange(
                     _to_2d(rearrange(seg_3d, "b ... -> b 1 ...")),

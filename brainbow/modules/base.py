@@ -52,7 +52,7 @@ from brainbow.metrics import (
     compute_per_batch_voi,
     compute_per_batch_ted,
 )
-from brainbow.losses import AFF_SLICE, SEM_SLICE
+from brainbow.losses import AFFINITY_OFFSETS
 
 _SPATIAL_AXES = {2: "h w", 3: "d h w"}
 
@@ -128,8 +128,26 @@ class BaseCircuitModule(pl.LightningModule):
         self.optimizer_config = dict(optimizer_config or {})
         self.training_config = dict(training_config or {})
         loss_config = dict(loss_config or {})
+        model_config = dict(model_config or {})
 
-        self.model = self._build_model(dict(model_config or {}))
+        # Config-driven head layout: the affinity offset set (loss config)
+        # determines the unified-head width so the model, loss, and Mutex
+        # Watershed all agree on one channel count.  Derive it here and
+        # inject into the model kwargs (overriding any stale config value).
+        _offsets = loss_config.get("offsets")
+        _n_aff = len(_offsets) if _offsets is not None else len(AFFINITY_OFFSETS)
+        _head_channels = _n_aff + 2
+        _cfg_hc = model_config.get("head_channels")
+        if _cfg_hc is not None and int(_cfg_hc) != _head_channels:
+            warnings.warn(
+                f"{type(self).__name__}: model.head_channels={_cfg_hc} does "
+                f"not match {_head_channels} derived from {_n_aff} affinity "
+                f"offsets; using {_head_channels}.",
+                stacklevel=2,
+            )
+        model_config["head_channels"] = _head_channels
+
+        self.model = self._build_model(model_config)
         self.criterion = self._loss_cls(**loss_config)
 
         # Validation-time agglomeration: Mutex Watershed over the predicted
@@ -358,10 +376,10 @@ class BaseCircuitModule(pl.LightningModule):
     ) -> None:
         """Compute per-head classification / segmentation metrics.
 
-        Metrics are computed from fixed slices of the affinity + sem head:
-        the foreground accuracy / IoU / Dice from ``SEM_SLICE`` and the
-        instance metrics from the Mutex Watershed agglomeration of the
-        affinity slice ``AFF_SLICE``.
+        Metrics are computed from the criterion's channel slices: the
+        foreground accuracy / IoU / Dice from ``criterion.sem_slice`` and
+        the instance metrics from the Mutex Watershed agglomeration of
+        ``criterion.aff_slice`` (both config-driven by the offset set).
         """
         self._accumulate_semantic_metrics(head, targets, prefix, bs)
         self._accumulate_instance_metrics(head, targets, prefix, bs)
@@ -374,7 +392,7 @@ class BaseCircuitModule(pl.LightningModule):
         bs: float,
     ) -> None:
         # Head emits sem as a raw logit -> sigmoid before thresholding.
-        sem_probs = head_pred[:, SEM_SLICE].sigmoid()
+        sem_probs = head_pred[:, self.criterion.sem_slice].sigmoid()
         sem_pred = (sem_probs[:, 0] > 0.5).long()
         # Score the sem head against the same (possibly boundary-eroded)
         # foreground it is trained on; falls back to the instance labels.
@@ -409,7 +427,7 @@ class BaseCircuitModule(pl.LightningModule):
         # GT foreground (isolates agglomeration quality from the sem head).
         # Head emits aff as raw logits -> sigmoid to probabilities for MWS.
         ins_pred = self.agglomerator(
-            head_pred[:, AFF_SLICE].sigmoid().float(), fg_mask,
+            head_pred[:, self.criterion.aff_slice].sigmoid().float(), fg_mask,
         )
         ins_gt = targets["labels"]
         metric = f"{prefix}/ins/metric"

@@ -24,11 +24,10 @@ from einops import rearrange, repeat
 from brainbow.callbacks.tensorboard.tags import TagContext
 from brainbow.callbacks.tensorboard.viz import _label_to_rgb, _normalise, _to_2d
 from brainbow.losses import (
-    AFF_NAMES,
     AFFINITY_OFFSETS,
-    HEAD_CHANNELS,
     N_PULL,
     affinity_target_from_offsets,
+    offset_names,
     slice_head,
 )
 
@@ -62,6 +61,7 @@ def _add_aff_panels(
     aff_3d: torch.Tensor,
     indices: Sequence[int],
     *,
+    names: Sequence[str],
     mask_2d: torch.Tensor,
     epoch: int,
     tag_prefix: str,
@@ -71,7 +71,7 @@ def _add_aff_panels(
     for k in indices:
         panel = repeat(aff_2d[:, k:k + 1] * mask_2d, "b 1 h w -> b 3 h w")
         tb.add_images(
-            head.tag(f"{tag_prefix}/{AFF_NAMES[k]}"), panel, global_step=epoch,
+            head.tag(f"{tag_prefix}/{names[k]}"), panel, global_step=epoch,
         )
 
 
@@ -100,24 +100,33 @@ def _log_predictions(
     * ``true/sem``  -- ground-truth foreground target the sem head is trained
       on (``sem_labels > 0`` when a boundary-eroded ``sem_label`` is supplied,
       else the instance ``labels > 0``)
-    * ``true/aff/{offset}`` (3-D only; curated subset)
     * ``true/wan_decoder`` (Cosmos + VAE only, passed in)
     * ``pred/sem``  -- foreground probability
     * ``pred/raw``  -- linear reconstruction
-    * ``pred/aff/{offset}`` -- predicted affinities (same subset)
     * ``pred/label/pre`` / ``pred/label/mul`` -- Mutex Watershed instances
       (raw, and multiplied by the predicted sem mask), when ``seg_pred_2d``
       is supplied.
+    * ``aff/true/{offset}`` / ``aff/pred/{offset}`` (3-D only; curated
+      subset) -- all affinity panels live under one ``aff/`` group so the
+      core ``image / label / sem / raw`` panels stay clustered together
+      instead of being split apart by the (potentially many) offsets.
+
+    The affinity layout is inferred from the head's channel count, so any
+    config-driven offset set works (the offset names come from ``offsets``
+    / ``n_pull``).
     """
-    if head_pred.shape[1] != HEAD_CHANNELS:
+    expected = len(offsets) + 2
+    if head_pred.shape[1] != expected:
         raise ValueError(
-            f"_log_predictions expects {HEAD_CHANNELS} channels; "
+            f"_log_predictions expects {expected} channels "
+            f"(len(offsets)={len(offsets)} + sem + raw); "
             f"got {head_pred.shape[1]}."
         )
 
     head = ctx
     fields = slice_head(head_pred[:n])
     indices = aff_panel_indices(len(offsets), n_pull)
+    names = offset_names(offsets, n_pull)
 
     # ----- true panels -----
     gt_fg_2d = rearrange((labels[:n] > 0).float(), "b ... -> b 1 ...")
@@ -127,7 +136,7 @@ def _log_predictions(
         )
         _add_aff_panels(
             tb, head, aff_true, indices,
-            mask_2d=gt_fg_2d, epoch=epoch, tag_prefix="true/aff",
+            names=names, mask_2d=gt_fg_2d, epoch=epoch, tag_prefix="aff/true",
         )
 
     true_img = _normalise(images[:n])
@@ -181,7 +190,7 @@ def _log_predictions(
 
     _add_aff_panels(
         tb, head, fields["aff"].sigmoid(), indices,
-        mask_2d=sem, epoch=epoch, tag_prefix="pred/aff",
+        names=names, mask_2d=sem, epoch=epoch, tag_prefix="aff/pred",
     )
 
     # ----- Mutex Watershed instance segmentation -----

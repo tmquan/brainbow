@@ -138,7 +138,9 @@ model:
   type: cosmospredict3d
   variant: 2B
   in_channels: 1
-  head_channels: 16
+  # Derived from loss.offsets (len(offsets) + sem + raw = 30 + 2); kept
+  # explicit here as a cross-check (the module derives + injects it).
+  head_channels: 32
   feature_size: 64
   dropout: 0.2
   pretrained: true
@@ -168,6 +170,46 @@ optimizer:
 loss:
   ignore_index: -100
   background: -1
+  # Config-driven affinity offset set (head width = len(offsets) + 2 derives
+  # automatically; MWS + TB read these too).  Pull-first ordering is required:
+  # the first ``n_pull`` offsets are the attractive (merge) edges, the rest
+  # are repulsive (mutex/separate) push edges.
+  n_pull: 5
+  offsets:
+  # --- pull: base glue (nn z/y/x) + high-res anti-leak diagonals ---
+  - [-1, 0, 0]      # z nn
+  - [0, -1, 0]      # y nn
+  - [0, 0, -1]      # x nn
+  - [0, -1, -1]     # xy diagonal
+  - [0, 1, -1]      # xy anti-diagonal
+  # --- push: deep out-of-plane (z) ---
+  - [-2, 0, 0]
+  - [-3, 0, 0]
+  - [-4, 0, 0]
+  - [-5, 0, 0]
+  - [-10, 0, 0]
+  # --- push: compact in-plane axis (y/x at 2,4,8,16,32) ---
+  - [0, -2, 0]
+  - [0, 0, -2]
+  - [0, -4, 0]
+  - [0, 0, -4]
+  - [0, -8, 0]
+  - [0, 0, -8]
+  - [0, -16, 0]
+  - [0, 0, -16]
+  - [0, -32, 0]
+  - [0, 0, -32]
+  # --- push: mid-range in-plane diagonals (at 2,4,8,16,32) ---
+  - [0, -2, -2]
+  - [0, 2, -2]
+  - [0, -4, -4]
+  - [0, 4, -4]
+  - [0, -8, -8]
+  - [0, 8, -8]
+  - [0, -16, -16]
+  - [0, 16, -16]
+  - [0, -32, -32]
+  - [0, 32, -32]
   weight_aff:
     weight: 1.0
     lambda_bce: 1.0
@@ -195,6 +237,14 @@ loss:
     lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 3.0
+    # Foreground-dominant (min_foreground 0.8 + thin eroded boundary gaps),
+    # so rebalance fg/bg like the affinity head: inverse-freq class weights
+    # + the complementary background-class soft-Dice for direct supervision
+    # on the rare background / boundary voxels.
+    class_balance: auto
+    class_balance_clip: 10.0
+    dice_two_sided: true
+    focal_alpha: null
   weight_raw:
     weight: 1.0
     loss: l1

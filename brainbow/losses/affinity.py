@@ -53,6 +53,10 @@ the field weight) or a mapping ``{weight: ..., **sub_kwargs}``::
       lambda_dice: 1.0
       lambda_focal: 1.0
       gamma: 2.0
+      class_balance: null   # null | "auto" (inverse-freq fg/bg) | <float>
+      class_balance_clip: 10.0
+      dice_two_sided: false # also score the complementary background Dice
+      focal_alpha: null     # null | float up-weighting the rare bg class
     weight_raw:
       weight: 1.0
       loss: l1                   # l1 / mse / smooth_l1
@@ -75,15 +79,14 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from brainbow.losses._common import (
-    AFF_SLICE,
     AFFINITY_OFFSETS,
-    SEM_SLICE,
-    HEAD_CHANNELS,
     N_PULL,
-    RAW_SLICE,
     affinity_target_from_offsets,
     affinity_validity_mask,
     canonical_regression_name,
+    head_channels_for,
+    head_slices,
+    offset_names,
     regression_loss_fn,
 )
 from brainbow.losses.dice_bce_focal import DiceBCEFocalLoss
@@ -143,7 +146,11 @@ class AffinityFGLoss(nn.Module):
             focal term.
         weight_sem: Field-level config for the foreground (semantic) head
             (scalar or ``{weight, lambda_bce, lambda_dice, lambda_focal,
-            gamma}``).
+            gamma}``).  Also accepts the same rebalancing knobs as the
+            affinity head -- ``class_balance`` (``None`` / ``"auto"`` /
+            float), ``class_balance_clip``, ``focal_alpha``, and
+            ``dice_two_sided`` -- to counter the fg-dominant class
+            imbalance (all default to the prior, un-rebalanced behaviour).
         weight_raw: Field-level config for the raw reconstruction head
             (scalar or ``{weight, loss}`` with ``loss`` in
             ``l1 / mse / smooth_l1``).
@@ -159,7 +166,9 @@ class AffinityFGLoss(nn.Module):
             (those voxels contribute as background in the sem target).
     """
 
-    num_channels: int = HEAD_CHANNELS
+    # Total head width -- set per-instance from the configured offset set
+    # (``head_channels_for(n_aff)``); not a fixed module constant.
+    num_channels: int
 
     def __init__(
         self,
@@ -178,6 +187,19 @@ class AffinityFGLoss(nn.Module):
         super().__init__()
         self.offsets = tuple(tuple(int(c) for c in o) for o in offsets)
         self.n_pull = int(n_pull)
+
+        # Config-driven head layout derived from the offset set: the loss
+        # owns the canonical {aff, sem, raw} slices + total width so the
+        # model head, MWS, and TB all agree without a fixed constant.
+        self.n_aff = len(self.offsets)
+        _slices = head_slices(self.n_aff)
+        self.aff_slice = _slices["aff"]
+        self.sem_slice = _slices["sem"]
+        self.raw_slice = _slices["raw"]
+        self.head_channels = head_channels_for(self.n_aff)
+        self.num_channels = self.head_channels
+        self.offset_names = offset_names(self.offsets, self.n_pull)
+
         self.background = int(background) if background is not None else None
         self.ignore_index = int(ignore_index)
         self.eps = float(eps)
@@ -221,12 +243,20 @@ class AffinityFGLoss(nn.Module):
             )
 
         # ----- sem (composite Dice + BCE + Focal on the foreground logit) -----
+        # Mirrors the affinity head's rebalancing knobs (class_balance /
+        # class_balance_clip / focal_alpha / dice_two_sided) so the
+        # foreground head can fight the same fg-dominant class imbalance.
         self.weight_sem, sem_kw = _split_field(weight_sem)
+        _sem_fa = sem_kw.pop("focal_alpha", None)
         self._sem_loss = DiceBCEFocalLoss(
             lambda_dice=float(sem_kw.pop("lambda_dice", 1.0)),
             lambda_bce=float(sem_kw.pop("lambda_bce", 1.0)),
             lambda_focal=float(sem_kw.pop("lambda_focal", 1.0)),
             gamma=float(sem_kw.pop("gamma", 2.0)),
+            class_balance=_parse_class_balance(sem_kw.pop("class_balance", None)),
+            class_balance_clip=float(sem_kw.pop("class_balance_clip", 10.0)),
+            focal_alpha=float(_sem_fa) if _sem_fa is not None else None,
+            dice_two_sided=bool(sem_kw.pop("dice_two_sided", False)),
             smooth_nr=float(sem_kw.pop("smooth_nr", self.dice_eps)),
             smooth_dr=float(sem_kw.pop("smooth_dr", self.dice_eps)),
             eps=self.eps,
@@ -423,7 +453,7 @@ class AffinityFGLoss(nn.Module):
         valid = rearrange(
             (labels != self.ignore_index).float(), "b ... -> b 1 ...",
         )
-        return self._sem_loss(logits, target * valid)
+        return self._sem_loss(logits, target, mask=valid)
 
     def _loss_raw(
         self, pred: torch.Tensor, raw_image: torch.Tensor,
@@ -480,10 +510,10 @@ class AffinityFGLoss(nn.Module):
             ``{"loss", "loss/aff", "loss/sem", "loss/raw"}`` (per-field entries only for
             active fields).
         """
-        if head.shape[1] != HEAD_CHANNELS:
+        if head.shape[1] != self.head_channels:
             raise ValueError(
-                f"AffinityFGLoss expects head with {HEAD_CHANNELS} channels; "
-                f"got {head.shape[1]}."
+                f"AffinityFGLoss expects head with {self.head_channels} "
+                f"channels; got {head.shape[1]}."
             )
         labels = targets["labels"]
         cached: Dict[str, torch.Tensor] = targets.get("_cached_targets") or {}
@@ -499,7 +529,7 @@ class AffinityFGLoss(nn.Module):
                 )
                 if self.mask_to_foreground:
                     aff_mask = affinity_validity_mask(labels > 0, self.offsets)
-            l_aff = self._loss_aff(head[:, AFF_SLICE], aff_target, aff_mask)
+            l_aff = self._loss_aff(head[:, self.aff_slice], aff_target, aff_mask)
             out["loss/aff"] = l_aff
             total = total + self.weight_aff * l_aff
 
@@ -510,7 +540,7 @@ class AffinityFGLoss(nn.Module):
             sem_labels = targets.get("sem_label")
             if sem_labels is None:
                 sem_labels = labels
-            l_sem = self._loss_sem(head[:, SEM_SLICE], sem_labels)
+            l_sem = self._loss_sem(head[:, self.sem_slice], sem_labels)
             out["loss/sem"] = l_sem
             total = total + self.weight_sem * l_sem
 
@@ -521,7 +551,7 @@ class AffinityFGLoss(nn.Module):
                     "AffinityFGLoss requires `targets['raw_image']` when "
                     "weight_raw > 0; pass the normalised input image."
                 )
-            l_raw = self._loss_raw(head[:, RAW_SLICE], raw_image)
+            l_raw = self._loss_raw(head[:, self.raw_slice], raw_image)
             out["loss/raw"] = l_raw
             total = total + self.weight_raw * l_raw
 
