@@ -70,7 +70,7 @@ config that does not set `loss.offsets`.
 | 7  | (-3, 0, 0)        | deep out-of-plane (z)          | push |
 | 8  | (-4, 0, 0)        | deep out-of-plane (z)          | push |
 | 9  | (-5, 0, 0)        | deep out-of-plane (z)          | push |
-| 10 | (-10, 0, 0)       | deep out-of-plane (z)          | push |
+| 10 | (-8, 0, 0)        | deep out-of-plane (z)          | push |
 | 11 | (0, -2, 0)        | compact in-plane axis (y)      | push |
 | 12 | (0, 0, -2)        | compact in-plane axis (x)      | push |
 | 13 | (0, -4, 0)        | compact in-plane axis (y)      | push |
