@@ -237,7 +237,7 @@ loss:
     lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 3.0
-    # Foreground-dominant (min_foreground 0.8 + thin eroded boundary gaps),
+    # Foreground-dominant (min_foreground 0.9 + thin eroded boundary gaps),
     # so rebalance fg/bg like the affinity head: inverse-freq class weights
     # + the complementary background-class soft-Dice for direct supervision
     # on the rare background / boundary voxels.
@@ -272,7 +272,7 @@ training:
     # Optionally grow labels into the unlabeled band so segments meet at a
     # thin border (only relevant when gate_with_sem: true).  <= 0 fills all.
     grow_boundaries: true
-    grow_max_distance: 4.0
+    grow_max_distance: 2.0
   max_epochs: 301
   accelerator: auto
   devices: auto

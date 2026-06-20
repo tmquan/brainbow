@@ -134,7 +134,7 @@ data:
   - 80
   - 256
   - 256
-  min_foreground: 0.8
+  min_foreground: 0.9
   pixel_size:
   - 30
   - 6
@@ -169,7 +169,7 @@ optimizer:
     type: cosine_warmup
     T_max: 101
     eta_min: 1.0e-06
-    warmup_epochs: 2
+    warmup_epochs: 5
   dit_backbone_lr: 1.0e-05
   controlnet_lr: 1.0e-05
 
@@ -221,7 +221,7 @@ loss:
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 2.0
+    gamma: 3.0
     pull_weight: 1.0
     # Emphasize the long-range push edges -- they are the only separation
     # mechanism the Mutex Watershed has, and the channel where the head was
@@ -245,7 +245,7 @@ loss:
     lambda_dice: 1.0
     lambda_focal: 1.0
     gamma: 3.0
-    # Foreground-dominant (min_foreground 0.8 + thin eroded boundary gaps),
+    # Foreground-dominant (min_foreground 0.9 + thin eroded boundary gaps),
     # so rebalance fg/bg like the affinity head: inverse-freq class weights
     # + the complementary background-class soft-Dice for direct supervision
     # on the rare background / boundary voxels.
@@ -279,8 +279,8 @@ training:
     sem_gate_threshold: 0.5
     # Optionally grow labels into the unlabeled band so segments meet at a
     # thin border (only relevant when gate_with_sem: true).  <= 0 fills all.
-    grow_boundaries: false
-    grow_max_distance: 0.0
+    grow_boundaries: true
+    grow_max_distance: 2.0
   max_epochs: 101
   accelerator: auto
   devices: auto
