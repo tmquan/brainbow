@@ -128,7 +128,7 @@ data:
   - 80
   - 256
   - 256
-  min_foreground: 0.8
+  min_foreground: 0.9
   pixel_size:
   - 30
   - 6
@@ -215,7 +215,7 @@ loss:
     lambda_bce: 1.0
     lambda_dice: 1.0
     lambda_focal: 1.0
-    gamma: 2.0
+    gamma: 3.0
     pull_weight: 1.0
     # Emphasize the long-range push edges -- they are the only separation
     # mechanism the Mutex Watershed has, and the channel where the head was
@@ -262,6 +262,17 @@ training:
     buckets: 16
     # null (or 0) = no cap, full edges.
     max_push_edges: null
+    # Gate the agglomeration with the predicted sem foreground
+    # (sem > sem_gate_threshold).  true -> instances are masked to the
+    # predicted membrane (thick rind where sem is blurry).  false -> MWS
+    # runs unmasked, so borders are 1-voxel affinity cuts (no thick rind).
+    # The eval instance metric always gates with the GT foreground.
+    gate_with_sem: true
+    sem_gate_threshold: 0.5
+    # Optionally grow labels into the unlabeled band so segments meet at a
+    # thin border (only relevant when gate_with_sem: true).  <= 0 fills all.
+    grow_boundaries: true
+    grow_max_distance: 4.0
   max_epochs: 301
   accelerator: auto
   devices: auto

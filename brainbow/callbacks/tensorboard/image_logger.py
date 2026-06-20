@@ -277,9 +277,18 @@ class ImageLogger(pl.Callback):
                 # Head emits aff / sem as raw logits -> sigmoid before MWS
                 # (probabilities) and before thresholding the fg mask.
                 aff = head_pred[:, pl_module.criterion.aff_slice].sigmoid().float()
-                sem_fg = (
-                    head_pred[:, pl_module.criterion.sem_slice].sigmoid()[:, 0] > 0.5
-                )
+                # Optionally gate the agglomeration with the predicted sem
+                # foreground (config: training.mutex_watershed.gate_with_sem).
+                # When disabled, MWS runs unmasked so segment borders are
+                # 1-voxel affinity cuts rather than the thick predicted-
+                # membrane rind.
+                if getattr(agglomerator, "gate_with_sem", True):
+                    thr = getattr(agglomerator, "sem_gate_threshold", 0.5)
+                    sem_fg = (
+                        head_pred[:, pl_module.criterion.sem_slice].sigmoid()[:, 0] > thr
+                    )
+                else:
+                    sem_fg = None
                 seg_3d = agglomerator(aff, sem_fg)            # [n, D, H, W] long
                 seg_pred_2d = rearrange(
                     _to_2d(rearrange(seg_3d, "b ... -> b 1 ...")),

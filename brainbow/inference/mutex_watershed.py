@@ -394,6 +394,50 @@ def _relabel_consecutive(seg: np.ndarray, ignore: int = -1) -> np.ndarray:
     return out.reshape(seg.shape)
 
 
+def grow_labels_to_fill(
+    seg: np.ndarray,
+    max_distance: float = 0.0,
+    sampling: Optional[Sequence[float]] = None,
+) -> np.ndarray:
+    """Grow instance labels into the unlabeled (background) band.
+
+    The Mutex Watershed leaves voxels outside the foreground mask as
+    background (``0``).  When that mask is the predicted ``sem`` head, the
+    blurry / boundary-eroded membrane band is a **thick** unlabeled rind
+    between segments.  This reassigns each background voxel the id of its
+    nearest labeled voxel (via a Euclidean distance transform), so adjacent
+    segments grow until they meet at a thin (~1-voxel) border.
+
+    Args:
+        seg: ``[D, H, W]`` (or any ND) integer label volume; ``0`` =
+            background / unlabeled.
+        max_distance: Only fill background voxels within this distance of a
+            labeled voxel, keeping large true-background cores at ``0``.
+            ``<= 0`` fills every background voxel (full watershed-style).
+        sampling: Per-axis voxel spacing for an anisotropy-aware grow
+            (e.g. ``pixel_size``); ``None`` = isotropic voxels.
+
+    Returns:
+        Label volume with the boundary band filled (same shape).
+    """
+    bg = seg == 0
+    if not bg.any() or not (seg != 0).any():
+        return seg
+    from scipy.ndimage import distance_transform_edt
+
+    # EDT of the background mask: distance (and nearest-labeled-voxel
+    # indices) to the closest non-background voxel.  ``seg[tuple(inds)]``
+    # then carries each labeled id outward into the band.
+    dist, inds = distance_transform_edt(
+        bg, sampling=sampling, return_indices=True,
+    )
+    filled = seg[tuple(inds)]
+    if max_distance and max_distance > 0:
+        keep_bg = bg & (dist > float(max_distance))
+        filled = np.where(keep_bg, 0, filled)
+    return filled
+
+
 def _apply_size_filter(seg: np.ndarray, min_size: int) -> np.ndarray:
     """Reset instances smaller than ``min_size`` voxels to background."""
     flat = seg.reshape(-1)
@@ -830,6 +874,20 @@ class MutexWatershed(nn.Module):
         max_push_edges: Cap on push (mutex) edges; ``None`` = full edges.
         backend: ``auto`` / ``torch`` / ``cupy`` / ``cpu``.
         buckets: Priority buckets for the GPU Boruvka approximation.
+        grow_boundaries: When ``True``, grow instance labels into the
+            unlabeled (background) band after agglomeration so adjacent
+            segments meet at a thin border -- removes the thick rind left
+            where the foreground mask excludes the predicted membrane.
+        grow_max_distance: Max voxel distance a label grows into the band
+            (``<= 0`` fills all background).  Keeps large true-background
+            cores at ``0``.
+        gate_with_sem: Metadata for callers (e.g. the TB ImageLogger / a
+            predict script): when ``True`` (default), gate the agglomeration
+            with the predicted ``sem`` foreground (``sem > sem_gate_threshold``);
+            when ``False``, run MWS unmasked so borders are the 1-voxel
+            affinity cuts (no thick predicted-membrane rind).  The eval
+            instance metric always gates with the GT foreground regardless.
+        sem_gate_threshold: Probability threshold for the predicted-sem gate.
     """
 
     def __init__(
@@ -841,6 +899,10 @@ class MutexWatershed(nn.Module):
         max_push_edges: Optional[int] = None,
         backend: str = "auto",
         buckets: int = 16,
+        grow_boundaries: bool = False,
+        grow_max_distance: float = 0.0,
+        gate_with_sem: bool = True,
+        sem_gate_threshold: float = 0.5,
     ) -> None:
         super().__init__()
         from brainbow.losses import AFFINITY_OFFSETS, N_PULL
@@ -859,6 +921,19 @@ class MutexWatershed(nn.Module):
         )
         self.backend = str(backend).lower()
         self.buckets = int(buckets)
+        # Post-process: grow segments into the unlabeled (background) band so
+        # adjacent instances meet at a thin border instead of the thick rind
+        # left where the foreground mask excludes the predicted membrane.
+        self.grow_boundaries = bool(grow_boundaries)
+        self.grow_max_distance = float(grow_max_distance)
+        # Whether callers should gate the agglomeration with the predicted
+        # ``sem`` foreground (``sem > sem_gate_threshold``).  When False, MWS
+        # runs unmasked -- every voxel is labeled and segment borders are the
+        # 1-voxel affinity cuts (no thick predicted-membrane rind).  This is
+        # metadata read by the caller (e.g. the TB ImageLogger); the eval
+        # instance metric deliberately gates with the GT foreground instead.
+        self.gate_with_sem = bool(gate_with_sem)
+        self.sem_gate_threshold = float(sem_gate_threshold)
 
     def _resolve_backend(self, affinities: torch.Tensor) -> str:
         """Resolve the effective backend for this input: torch / cupy / cpu.
@@ -876,6 +951,20 @@ class MutexWatershed(nn.Module):
         if b in ("torch", "gpu", "auto"):
             return "torch"
         return "torch"
+
+    def _maybe_grow(self, seg: torch.Tensor) -> torch.Tensor:
+        """Optionally grow labels to fill the unlabeled boundary band.
+
+        No-op unless ``grow_boundaries`` is set.  Runs per batch element on
+        the host (scipy EDT); only enabled paths pay the transfer.
+        """
+        if not self.grow_boundaries:
+            return seg
+        dev = seg.device
+        seg_np = seg.detach().cpu().numpy()
+        for b in range(seg_np.shape[0]):
+            seg_np[b] = grow_labels_to_fill(seg_np[b], self.grow_max_distance)
+        return torch.from_numpy(seg_np).to(dev)
 
     @torch.no_grad()
     def forward(
@@ -917,7 +1006,7 @@ class MutexWatershed(nn.Module):
                     max_push_edges=self.max_push_edges,
                     buckets=self.buckets,
                 ))
-            return torch.stack(outs, dim=0).to(affinities.device)
+            return self._maybe_grow(torch.stack(outs, dim=0).to(affinities.device))
 
         # GPU path (cupy mws_cp): zero-copy view of the CUDA tensor via
         # DLPack -- the dense affinity volume never leaves the device.
@@ -939,7 +1028,7 @@ class MutexWatershed(nn.Module):
                     buckets=self.buckets,
                 )
                 outs.append(torch.from_dlpack(seg))
-            return torch.stack(outs, dim=0).to(affinities.device)
+            return self._maybe_grow(torch.stack(outs, dim=0).to(affinities.device))
 
         # CPU fallback / reference (mws_np): single host transfer + numba.
         affs_np = affinities.detach().float().cpu().numpy()
@@ -961,7 +1050,7 @@ class MutexWatershed(nn.Module):
                 size_filter=self.size_filter,
                 max_push_edges=self.max_push_edges,
             )
-        return torch.from_numpy(out).to(affinities.device)
+        return self._maybe_grow(torch.from_numpy(out).to(affinities.device))
 
     def __repr__(self) -> str:
         return (
@@ -969,8 +1058,19 @@ class MutexWatershed(nn.Module):
             f"n_pull={self.n_pull}, strides={self.strides}, "
             f"size_filter={self.size_filter}, "
             f"max_push_edges={self.max_push_edges}, "
-            f"backend={self.backend}, buckets={self.buckets})"
+            f"backend={self.backend}, buckets={self.buckets}, "
+            f"grow_boundaries={self.grow_boundaries}, "
+            f"grow_max_distance={self.grow_max_distance}, "
+            f"gate_with_sem={self.gate_with_sem}, "
+            f"sem_gate_threshold={self.sem_gate_threshold})"
         )
 
 
-__all__ = ["mutex_watershed", "mws_np", "mws_cp", "mws_th", "MutexWatershed"]
+__all__ = [
+    "mutex_watershed",
+    "mws_np",
+    "mws_cp",
+    "mws_th",
+    "grow_labels_to_fill",
+    "MutexWatershed",
+]
