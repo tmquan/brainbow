@@ -165,10 +165,18 @@ model:
 optimizer:
   lr: 0.0002
   weight_decay: 0.0001
+  # AdamW betas; beta2=0.99 (Cosmos-3 generator recipe) adapts faster than
+  # the 0.999 default when fine-tuning the pretrained backbone.
+  betas:
+  - 0.9
+  - 0.99
   scheduler:
     type: cosine_warmup
+    # T_max spans the whole run (== training.max_epochs: 101).
     T_max: 101
-    eta_min: 1.0e-06
+    # Floor the LR at ~0.3x peak (Cosmos-3 generator uses a 0.30x floor)
+    # instead of decaying to ~0, so late epochs keep converging.
+    eta_min: 6.0e-05
     warmup_epochs: 5
   dit_backbone_lr: 1.0e-04
   controlnet_lr: 1.0e-05

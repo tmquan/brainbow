@@ -242,6 +242,10 @@ class BaseCosmosModule(BaseCircuitModule):
     def configure_optimizers(self) -> Any:
         lr = self.optimizer_config.get("lr", 1e-4)
         wd = self.optimizer_config.get("weight_decay", 1e-5)
+        # AdamW betas: default to PyTorch's (0.9, 0.999); a lower beta2
+        # (e.g. 0.99, as in the Cosmos-3 generator recipe) adapts the
+        # second moment faster when fine-tuning a pretrained backbone.
+        betas = tuple(self.optimizer_config.get("betas", (0.9, 0.999)))
         # Use explicit ``is None`` so a deliberate ``dit_backbone_lr: 0``
         # (e.g. to keep the unfrozen DiT weights pinned via gradient-
         # only updates from learned LR schedulers) is honoured rather
@@ -306,7 +310,7 @@ class BaseCosmosModule(BaseCircuitModule):
             and all(p.is_cuda for g in param_groups for p in g["params"])
         )
         optimizer = torch.optim.AdamW(
-            param_groups, lr=lr, weight_decay=wd, fused=use_fused,
+            param_groups, lr=lr, betas=betas, weight_decay=wd, fused=use_fused,
         )
 
         return self._maybe_wrap_scheduler(optimizer)

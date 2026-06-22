@@ -551,6 +551,7 @@ class BaseCircuitModule(pl.LightningModule):
     def configure_optimizers(self) -> Any:
         lr = self.optimizer_config.get("lr", 1e-4)
         wd = self.optimizer_config.get("weight_decay", 1e-5)
+        betas = tuple(self.optimizer_config.get("betas", (0.9, 0.999)))
 
         decay, no_decay = [], []
         for name, param in self.named_parameters():
@@ -564,7 +565,7 @@ class BaseCircuitModule(pl.LightningModule):
             {"params": decay, "weight_decay": wd},
             {"params": no_decay, "weight_decay": 0.0},
         ]
-        optimizer = torch.optim.AdamW(param_groups, lr=lr, weight_decay=wd)
+        optimizer = torch.optim.AdamW(param_groups, lr=lr, betas=betas, weight_decay=wd)
 
         return self._maybe_wrap_scheduler(optimizer)
 
