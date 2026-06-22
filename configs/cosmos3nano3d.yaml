@@ -170,7 +170,7 @@ optimizer:
     T_max: 101
     eta_min: 1.0e-06
     warmup_epochs: 5
-  dit_backbone_lr: 1.0e-05
+  dit_backbone_lr: 1.0e-04
   controlnet_lr: 1.0e-05
 
 loss:
