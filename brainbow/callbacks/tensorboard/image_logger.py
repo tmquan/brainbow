@@ -121,6 +121,33 @@ class ImageLogger(pl.Callback):
     # Epoch-end dispatch
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_autocast_dtype(trainer: pl.Trainer, pl_module: pl.LightningModule):
+        """Autocast dtype for the epoch-end viz forward.
+
+        Mirrors the dtype the model actually computes in so the panels
+        match training:
+
+        1. the backbone's own ``model._dtype`` (Cosmos wrappers set this to
+           bf16/fp16/fp32), else
+        2. the trainer's mixed-precision setting (``bf16-mixed`` -> bf16,
+           ``16-mixed`` -> fp16), else
+        3. bf16 -- a safe default whose wide range never overflows.
+
+        Never defaults to fp16 (the ``torch.amp.autocast`` default on CUDA),
+        whose narrow range turns a bf16-trained forward into Inf/NaN.
+        """
+        model_dtype = getattr(getattr(pl_module, "model", None), "_dtype", None)
+        if isinstance(model_dtype, torch.dtype):
+            return model_dtype
+
+        precision = str(getattr(trainer, "precision", "")).lower()
+        if "bf16" in precision:
+            return torch.bfloat16
+        if "16" in precision:
+            return torch.float16
+        return torch.bfloat16
+
     def _get_tb(self, trainer: pl.Trainer):
         """Return TensorBoard SummaryWriter or None."""
         logger = trainer.logger
@@ -200,8 +227,17 @@ class ImageLogger(pl.Callback):
         # CUDA autocast on when the user has chosen a CPU trainer.
         device_type = str(pl_module.device).split(":")[0]
         autocast_enabled = device_type == "cuda"
+        # Match the backbone's compute dtype.  ``torch.amp.autocast`` defaults
+        # to *float16* on CUDA, but the Cosmos backbone runs (and trains, under
+        # ``bf16-mixed``) in bf16: its VAE/DiT activations routinely exceed
+        # fp16's ~65504 range, so an fp16 autocast here overflows them to
+        # Inf -> NaN and every model-derived panel (pred/*, aff/pred/*,
+        # true/wan_decoder) renders all-black while the data-derived GT panels
+        # stay fine.  Use the model's own dtype (falling back to the trainer's
+        # mixed-precision setting) so the viz forward mirrors training exactly.
+        amp_dtype = self._resolve_autocast_dtype(trainer, pl_module)
         with torch.no_grad(), torch.amp.autocast(
-            device_type=device_type, enabled=autocast_enabled,
+            device_type=device_type, enabled=autocast_enabled, dtype=amp_dtype,
         ):
             images = batch["image"].to(pl_module.device)
             if images.dim() == self.spatial_dims + 1:
