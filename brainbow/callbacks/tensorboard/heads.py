@@ -19,7 +19,7 @@ and passed in as a central-slice label map.
 from typing import Any, List, Optional, Sequence
 
 import torch
-from einops import rearrange, repeat
+from einops import rearrange, reduce, repeat
 
 from brainbow.callbacks.tensorboard.tags import TagContext
 from brainbow.callbacks.tensorboard.viz import _label_to_rgb, _normalise, _to_2d
@@ -159,19 +159,16 @@ def _log_predictions(
     )
 
     if wan_decoder_2d is not None:
-        wan = _normalise(wan_decoder_2d[:n])
-        # Coerce to 3 channels for ``add_images`` (TensorBoard's make_grid
-        # requires exactly 3).  Backbone VAEs differ: Cosmos-Predict decodes
-        # to 3-channel RGB, but Cosmos-3's residual VAE has a different
-        # output width -- show its first channel as grayscale rather than
-        # crash the run (this is a diagnostic panel only).
-        c = wan.shape[1]
-        if c == 3:
-            pass
-        elif c == 1:
-            wan = repeat(wan, "b 1 h w -> b 3 h w")
-        else:
-            wan = repeat(wan[:, :1], "b 1 h w -> b 3 h w")
+        # Collapse the VAE reconstruction to a single grayscale channel
+        # BEFORE normalising so the panel looks identical regardless of the
+        # backbone VAE's ``conv_out`` width (Cosmos-Predict decodes to
+        # 3-channel RGB, Cosmos-3's residual VAE to a different width).  EM
+        # is grayscale, so the channel-mean is the faithful display and also
+        # drops the misleading per-channel colour cast (the reddish tint the
+        # 3-channel Wan decoder otherwise shows).  Repeat back to 3 channels
+        # only because TensorBoard's make_grid requires exactly 3.
+        wan = reduce(wan_decoder_2d[:n], "b c h w -> b 1 h w", "mean")
+        wan = repeat(_normalise(wan), "b 1 h w -> b 3 h w")
         tb.add_images(head.tag("true/wan_decoder"), wan, global_step=epoch)
 
     # ----- pred panels -----
