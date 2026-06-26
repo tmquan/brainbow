@@ -108,7 +108,7 @@ data:
   # OFF by default (decide during training).  Set ``missing_slice_prob > 0``
   # to randomly blank whole z-sections of the image (train-only, image-only;
   # labels untouched so affinities still supervise the true connectivity).
-  missing_slice_prob: 0.0
+  missing_slice_prob: 1.0
   missing_slice_max: 2
   missing_slice_fill: zero
   missing_slice_consecutive: false
