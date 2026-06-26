@@ -232,15 +232,31 @@ The script doubles as a template for any Zenodo record (change
    (`(z, y, x)` nm), keyed by a **prefix of the volume name** (e.g.
    `fib253d`, `cremi3d`, `minnie65`, `neurons`, `AC`). It is consumed
    only by the `resolution_zoom` augmentation.
-4. **Resolution policy** (see `configs/cosmos3nano3d.yaml`):
-   `resolution_zoom_mode: union` with `resolution_zoom_prob: 0.5`. Each
-   anisotropic patch is resampled to a **random target inside the shared
-   union envelope** `z ∈ [30,40]`, `xy ∈ [4,8]` nm (the union of all native
-   resolutions), with the `z` and `xy` targets sampled **independently**
-   (log-uniform). Because the affinity offsets are defined in **voxels**,
-   harmonising onto a common resolution space gives them a *consistent
+4. **Resolution policy** (`cosmos3nano3d.yaml` / `cosmospredict3d.yaml`):
+   `resolution_zoom_mode: union` with `resolution_zoom_prob` **0.9** (nano) /
+   **0.5** (predict) — the fraction of training patches that are jittered
+   (the rest are fed at native scale). Each anisotropic patch is resampled to
+   a **random target inside the shared union envelope** `z ∈ [30,40]`,
+   `xy ∈ [4,8]` nm (the union of all native resolutions); the `z` and `xy`
+   targets are sampled **independently** (log-uniform), so every dataset's
+   *output* resolution lands in that envelope while the per-dataset *zoom*
+   (`= native / target`) differs. Because the affinity offsets are defined in
+   **voxels**, harmonising onto a common space gives them a *consistent
    physical meaning across datasets*, and the random target doubles as
-   scale/anisotropy augmentation.
+   scale/anisotropy augmentation. Train-only (validation is always native).
+
+   Per-dataset behaviour (verified empirically against the config):
+
+   | dataset (`resolution_map` key) | native z,y,x | zoom z | zoom xy | output (z / xy) |
+   | --- | --- | --- | --- | --- |
+   | `AC` / `neurons` | 30,6,6 | 0.75–1.00 | 0.75–1.50 | 30–40 / 4–8 |
+   | `minnie65` | 40,8,8 | 1.00–1.33 (up) | 1.00–2.00 (up) | 30–40 / 4–8 |
+   | `cremi3d` | 40,4,4 | 1.00–1.33 (up) | 0.50–1.00 (down ≤2×) | 30–40 / 4–8 |
+   | `fib253d` (native) | 8,8,8 | — skipped (isotropic) — | — | native 8³ |
+   | `fib253d_z32` (12 variants) | 32,8,8 | 0.80–1.07 | 1.00–2.00 (up) | 30–40 / 4–8 |
+
+   (zoom > 1 = upsample/finer; < 1 = downsample/coarser. Anisotropy ratio
+   `z:xy` of the output spans ~3.75:1 to 10:1 since z and xy are independent.)
    - **Isotropic volumes (FIB-25 `8×8×8`) are skipped** by the union
      resample (`z==y==x` in `resolution_map`): upsampling their fine 8 nm z
      to the 30–40 nm envelope would be a ~5× downsample, blowing up the
