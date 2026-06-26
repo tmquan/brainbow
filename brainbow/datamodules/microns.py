@@ -55,7 +55,12 @@ class MICRONSDataModule(CircuitDataModule):
         elastic_magnitude_range: Tuple[float, float] = (10.0, 40.0),
         resolution_zoom_prob: float = 0.0,
         resolution_zoom_range: Optional[Tuple[Tuple[float, float], ...]] = None,
+        resolution_zoom_mode: str = "ratio",
         resolution_map: Optional[Dict[str, Tuple[float, float, float]]] = None,
+        missing_slice_prob: float = 0.0,
+        missing_slice_max: int = 2,
+        missing_slice_fill: str = "zero",
+        missing_slice_consecutive: bool = False,
     ) -> None:
         self.slice_mode = slice_mode
         self.num_samples = num_samples
@@ -83,7 +88,12 @@ class MICRONSDataModule(CircuitDataModule):
             elastic_magnitude_range=elastic_magnitude_range,
             resolution_zoom_prob=resolution_zoom_prob,
             resolution_zoom_range=resolution_zoom_range,
+            resolution_zoom_mode=resolution_zoom_mode,
             resolution_map=resolution_map,
+            missing_slice_prob=missing_slice_prob,
+            missing_slice_max=missing_slice_max,
+            missing_slice_fill=missing_slice_fill,
+            missing_slice_consecutive=missing_slice_consecutive,
         )
 
     @property

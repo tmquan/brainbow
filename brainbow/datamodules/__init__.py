@@ -18,7 +18,9 @@ Public surface
   three dataloader hooks; subclasses only declare ``dataset_class`` and
   any per-leaf overrides.
 * :class:`SNEMI3DDataModule`, :class:`MICRONSDataModule`,
-  :class:`NeuronsDataModule` -- one leaf per dataset.
+  :class:`NeuronsDataModule`, :class:`CREMI3DDataModule`,
+  :class:`FIB253DDataModule` -- one leaf per dataset (the last two are
+  thin metadata subclasses of :class:`MICRONSDataModule`).
 
 Extending this module
 ---------------------
@@ -30,11 +32,15 @@ dataset" for the full recipe.
 from brainbow.datamodules.base import CircuitDataModule
 from brainbow.datamodules.snemi3d import SNEMI3DDataModule
 from brainbow.datamodules.microns import MICRONSDataModule
+from brainbow.datamodules.fib253d import FIB253DDataModule
+from brainbow.datamodules.cremi3d import CREMI3DDataModule
 from brainbow.datamodules.neurons import NeuronsDataModule
 
 __all__ = [
     "CircuitDataModule",
     "SNEMI3DDataModule",
     "MICRONSDataModule",
+    "FIB253DDataModule",
+    "CREMI3DDataModule",
     "NeuronsDataModule",
 ]

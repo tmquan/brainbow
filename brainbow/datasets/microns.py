@@ -45,7 +45,11 @@ class MICRONSDataset(CircuitDataset):
         "MICrONS Consortium (2021). Functional connectomics spanning multiple "
         "areas of mouse visual cortex. bioRxiv. doi:10.1101/2021.07.28.454025"
     )
-    _resolution: Dict[str, float] = {"x": 4.0, "y": 4.0, "z": 40.0}
+    # minnie65 EM imagery is served at 8x8x40 nm (mip 0 of the released
+    # precomputed image bucket); the 4x4x40 nm figure is the *annotation*
+    # coordinate frame (synapses / nuclei / segment lookups), not the voxel
+    # size of the EM crops this dataset loads.
+    _resolution: Dict[str, float] = {"x": 8.0, "y": 8.0, "z": 40.0}
     _labels_base: List[str] = ["background", "neuron"]
 
     def __init__(

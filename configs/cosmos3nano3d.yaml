@@ -32,7 +32,7 @@ data:
   dataset: snemi3d
   data_root: data/SNEMI3D
   batch_size: 2
-  num_workers: 16
+  num_workers: 8
   cache_rate: 0.0
   pin_memory: true
   image_size: null
@@ -52,14 +52,27 @@ data:
   elastic_magnitude_range:
   - 10
   - 40
-  resolution_zoom_prob: 1.0
-  resolution_zoom_range:
+  # Resolution harmonisation (``union`` mode): each anisotropic patch is
+  # resampled to a RANDOM target inside the shared resolution envelope below
+  # (z 30-40, xy 4-8 nm), the union of all native resolutions.  This gives the
+  # voxel-defined affinity offsets a consistent physical meaning across
+  # datasets AND acts as scale/anisotropy augmentation (z and xy targets are
+  # sampled independently).  Isotropic volumes (FIB-25 8x8x8) are passed
+  # through untouched -- their fine 8 nm z would otherwise force a ~5x z
+  # safe-crop; FIB's anisotropic contribution comes from the z-strided
+  # [40,8,8] copy instead.
+  resolution_zoom_prob: 0.9
+  resolution_zoom_mode: union
+  resolution_zoom_range:   # union envelope (z, y, x) in nm
   - - 30
     - 40
-  - - 6
+  - - 4
     - 8
-  - - 6
+  - - 4
     - 8
+  # True native voxel sizes (z, y, x in nm) per volume-name prefix.  In
+  # ``union`` mode these are the source resolutions resampled onto the
+  # envelope above (isotropic entries are skipped).
   resolution_map:
     AC:
     - 30
@@ -73,6 +86,32 @@ data:
     - 40
     - 8
     - 8
+    # CREMI3D ssTEM (Drosophila): 40 nm sections, 4 nm in-plane.
+    cremi3d:
+    - 40
+    - 4
+    - 4
+    # FIB253D FIB-SEM (Drosophila): 8 nm isotropic (native) -- skipped by the
+    # union resample.  The anisotropic copies (z-stride 4 -> 32 nm sections, all
+    # 4 phase offsets) use the fib253d_z32 key; 32 nm sits just above the union
+    # z floor so the jitter mostly DOWNSAMPLES it (honest) rather than
+    # upsampling.  Download: scripts/download_fib253d.py ... --z-stride 4
+    fib253d:
+    - 8
+    - 8
+    - 8
+    fib253d_z32:
+    - 32
+    - 8
+    - 8
+  # Missing-section augmentation (CREMI-style ssTEM defect): fully wired but
+  # OFF by default (decide during training).  Set ``missing_slice_prob > 0``
+  # to randomly blank whole z-sections of the image (train-only, image-only;
+  # labels untouched so affinities still supervise the true connectivity).
+  missing_slice_prob: 0.0
+  missing_slice_max: 2
+  missing_slice_fill: zero
+  missing_slice_consecutive: false
   persistent_workers: true
   train_volumes:
   - vol: neurons_5000x2900x300_x3000_y7200_z950_volume
@@ -108,6 +147,64 @@ data:
   - vol: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_volume
     seg: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_v1300_segmentation
     root: data/MICRONS
+  # CREMI3D ssTEM (Drosophila, 4x4x40 nm).  Download + convert with
+  # ``python scripts/download_cremi3d.py --out-dir data/CREMI3D``.
+  - vol: cremi3d_sample_A_volume
+    seg: cremi3d_sample_A_segmentation
+    root: data/CREMI3D
+  - vol: cremi3d_sample_B_volume
+    seg: cremi3d_sample_B_segmentation
+    root: data/CREMI3D
+  - vol: cremi3d_sample_C_volume
+    seg: cremi3d_sample_C_segmentation
+    root: data/CREMI3D
+  # FIB253D FIB-SEM (Drosophila).  12 anisotropic variants (32x8x8 nm) of the
+  # 1536^3 dense core (~99.7% fg): 3 section-axis orientations (z / xz / yz) x
+  # 4 z-stride-4 phase offsets (p0..p3).  All match resolution_map key
+  # fib253d_z32 and ride the union resample.  These are correlated (one cube,
+  # permuted/sub-sampled) -- consider down-weighting so FIB doesn't dominate
+  # the sampler.  Download: fetch the native cube once, then process locally:
+  #   python scripts/download_fib253d.py --out-dir data/FIB253D --name fib253d \
+  #       --origin 2304 2048 6144 --size 1536 1536 1536 --mip 0
+  #   python scripts/download_fib253d.py --from-local \
+  #       data/FIB253D/fib253d_8nm_x2304_y2048_z6144_volume.h5 \
+  #       --name fib253d --orientations z y x --z-stride 4
+  - vol: fib253d_z32xy8nm_p0_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_p0_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_p1_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_p1_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_p2_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_p2_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_p3_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_p3_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_xz_p0_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_xz_p0_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_xz_p1_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_xz_p1_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_xz_p2_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_xz_p2_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_xz_p3_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_xz_p3_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_yz_p0_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_yz_p0_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_yz_p1_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_yz_p1_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_yz_p2_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_yz_p2_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
+  - vol: fib253d_z32xy8nm_yz_p3_x2304_y2048_z6144_volume
+    seg: fib253d_z32xy8nm_yz_p3_x2304_y2048_z6144_segmentation
+    root: data/FIB253D
   val_volumes:
   - vol: AC4_inputs
     seg: AC4_labels
@@ -128,6 +225,9 @@ data:
   - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume
     seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
     root: data/MICRONS
+  # CREMI3D A+/B+/C+ test volumes are intentionally NOT listed here: the
+  # challenge withholds their labels, so they can't produce GT metrics.  Run
+  # blind inference on them separately.
   val_batch_size: 2
   prefetch_factor: 8
   patch_size:

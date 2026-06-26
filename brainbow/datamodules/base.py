@@ -54,6 +54,7 @@ from brainbow.datasets.base import CircuitDataset
 from brainbow.transforms import (
     FindBoundariesd,
     Labeld,
+    RandMissingSliced,
     RandTransposeXYd,
     RandResolutionZoomd,
     RandSpatialCropForegroundd,
@@ -194,7 +195,12 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         elastic_magnitude_range: Tuple[float, float] = (10.0, 40.0),
         resolution_zoom_prob: float = 0.0,
         resolution_zoom_range: Optional[Tuple[Tuple[float, float], ...]] = None,
+        resolution_zoom_mode: str = "ratio",
         resolution_map: Optional[Dict[str, Tuple[float, float, float]]] = None,
+        missing_slice_prob: float = 0.0,
+        missing_slice_max: int = 2,
+        missing_slice_fill: str = "zero",
+        missing_slice_consecutive: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -239,11 +245,22 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             if resolution_zoom_range is not None
             else None
         )
+        # ``ratio`` (legacy, anisotropy-preserving) or ``union`` (resample every
+        # anisotropic volume onto the shared resolution envelope; isotropic
+        # volumes are passed through).
+        self.resolution_zoom_mode = str(resolution_zoom_mode)
         self.resolution_map = (
             {k: tuple(v) for k, v in resolution_map.items()}
             if resolution_map is not None
             else None
         )
+        # Missing-section (missing z-slice) augmentation -- simulates ssTEM
+        # acquisition defects (CREMI).  Train-only; image-only (labels keep
+        # supervising the true connectivity through the corrupted section).
+        self.missing_slice_prob = float(missing_slice_prob)
+        self.missing_slice_max = int(missing_slice_max)
+        self.missing_slice_fill = str(missing_slice_fill)
+        self.missing_slice_consecutive = bool(missing_slice_consecutive)
 
         self.train_dataset: Optional[CircuitDataset] = None
         self.val_dataset: Optional[CircuitDataset] = None
@@ -306,10 +323,30 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
 
         target_range = self.resolution_zoom_range or DEFAULT_TARGET_RANGE
 
+        # Worst-case (smallest) native resolution per axis across all
+        # datasets: a finer native voxel size means a larger downsample
+        # (zoom < 1) toward the target range, hence a bigger safe margin.
+        # Mixing e.g. CREMI (4 nm XY) with MICrONS (8 nm XY) means the
+        # margin must follow the 4 nm dataset, not just ``pixel_size``.
+        # In ``union`` mode, isotropic volumes (FIB-25 8x8x8) are NOT resampled
+        # (the transform skips them), so they must be excluded from the
+        # native-min -- otherwise their fine 8 nm z would force a ~5x z margin.
+        native = list(self.pixel_size)
+        if self.resolution_map:
+            for res in self.resolution_map.values():
+                if (
+                    self.resolution_zoom_mode == "union"
+                    and len(res) == 3
+                    and res[0] == res[1] == res[2]
+                ):
+                    continue
+                for d in range(min(len(native), len(res))):
+                    native[d] = min(native[d], float(res[d]))
+
         safe = []
         needs_margin = False
         for d in range(len(self.patch_size)):
-            min_zoom = self.pixel_size[d] / target_range[d][1]
+            min_zoom = native[d] / target_range[d][1]
             if min_zoom < 1.0:
                 safe.append(math.ceil(self.patch_size[d] / min_zoom))
                 needs_margin = True
@@ -335,12 +372,33 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             "keys": ["image", "label"],
             "native_resolution": self.pixel_size,
             "prob": self.resolution_zoom_prob,
+            "mode": self.resolution_zoom_mode,
         }
         if target_range is not None:
             kwargs["target_range"] = target_range
         if self.resolution_map is not None:
             kwargs["resolution_map"] = self.resolution_map
         return [RandResolutionZoomd(**kwargs)]
+
+    def _missing_section_transforms(self, spatial_dims: int) -> list:
+        """CREMI-style missing-section augmentation (train-only, image-only).
+
+        Blanks whole z-sections of the image to mimic ssTEM acquisition
+        defects; the label is left intact so the affinity / sem targets keep
+        supervising the true connectivity through the corrupted section.
+        No-op in 2-D slice mode or when ``missing_slice_prob <= 0``.
+        """
+        if spatial_dims != 3 or self.missing_slice_prob <= 0:
+            return []
+        return [
+            RandMissingSliced(
+                keys=["image"],
+                prob=self.missing_slice_prob,
+                max_slices=self.missing_slice_max,
+                fill=self.missing_slice_fill,
+                consecutive=self.missing_slice_consecutive,
+            )
+        ]
 
     def _original_transforms(self, spatial_dims: int) -> list:
         """Spatial augmentations applied to both image and label.
@@ -501,6 +559,10 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
             *self._original_transforms(sd),
             *self._instance_transforms(sd),
             *self._semantic_transforms(sd),
+            # Train-only: corrupt whole z-sections AFTER intensity aug so the
+            # blanked sections are not re-normalised away.  Not added to the
+            # validation pipeline.
+            *self._missing_section_transforms(sd),
             *self._boundary_semantic_transforms(self.find_boundaries),
             EnsureTyped(keys=self._output_keys()),
         ])
@@ -596,10 +658,11 @@ class CircuitDataModule(pl.LightningDataModule, ABC):
         ``None`` (the caller is then responsible for deciding whether
         that's an error or a no-op for this split).
 
-        All three lazy-mode datamodules (:class:`SNEMI3DDataModule`,
-        :class:`MICRONSDataModule`, :class:`NeuronsDataModule`) used to
-        carry an identical ~30-line block per split; this helper is the
-        single shared implementation.
+        Every lazy-mode datamodule (:class:`SNEMI3DDataModule`,
+        :class:`MICRONSDataModule`, :class:`NeuronsDataModule`, and the
+        :class:`CREMI3DDataModule` / :class:`FIB253DDataModule` subclasses)
+        used to carry an identical ~30-line block per split; this helper is
+        the single shared implementation.
         """
         if not volumes or patch_size is None:
             return None

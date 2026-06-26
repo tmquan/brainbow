@@ -26,6 +26,7 @@ Public surface
 * :class:`RandSpatialCropForegroundd`   -- foreground-biased crop.
 * :class:`RandTransposeXYd`             -- random Y<->X transpose.
 * :class:`RandResolutionZoomd`          -- random resolution zoom.
+* :class:`RandMissingSliced`            -- CREMI-style missing z-sections.
 
 Elastic deformation uses MONAI's :class:`Rand3DElasticd` directly --
 it's configured by the datamodule and not re-exported here.
@@ -43,6 +44,7 @@ from brainbow.transforms.find_boundaries import FindBoundariesd
 from brainbow.transforms.rand_crop_foreground import RandSpatialCropForegroundd
 from brainbow.transforms.rand_transpose_xy import RandTransposeXYd
 from brainbow.transforms.resolution_zoom import RandResolutionZoomd
+from brainbow.transforms.missing_slice import RandMissingSliced
 
 __all__ = [
     "Labeld",
@@ -50,4 +52,5 @@ __all__ = [
     "RandSpatialCropForegroundd",
     "RandTransposeXYd",
     "RandResolutionZoomd",
+    "RandMissingSliced",
 ]

@@ -5,20 +5,23 @@ Different EM datasets have different native resolutions:
     SNEMI3D / Neurons     6 × 6 × 30 nm
     MICrONS               8 × 8 × 40 nm
 
-``RandResolutionZoomd`` randomly zooms each training patch so that,
-regardless of native resolution, the model sees the target resolution
-range (default 6–8 nm XY, 30–40 nm Z).  The 5:1 Z:XY ratio is
-maintained.
+``RandResolutionZoomd`` randomly zooms each training patch toward a
+target resolution.  Two modes (``mode=``):
 
-Zoom factors are computed as ``native / target`` per axis:
+* ``ratio`` (legacy): sample one Y target in ``target_range`` and derive
+  z / x from the native anisotropy ratio, so each volume keeps its own
+  z:xy proportions -- pure scale jitter.
+* ``union``: sample z and xy targets INDEPENDENTLY inside ``target_range``
+  (the shared "union" envelope, e.g. z 30-40, xy 4-8 nm) and resample
+  every volume onto that common space -- harmonising the voxel-defined
+  affinity offsets across datasets while also jittering the anisotropy
+  ratio.  Isotropic volumes (e.g. FIB-25 8x8x8) are passed through
+  untouched (``skip_isotropic``), since resampling their fine z up to the
+  anisotropic envelope would be a large downsample.
 
-* zoom > 1 → upsample (simulate higher resolution than native)
-* zoom < 1 → downsample (simulate lower resolution than native)
-* zoom = 1 → no change
-
-The target resolution is sampled once (Y axis) and the other axes are
-derived from the native anisotropy ratio, so ``pixel_size`` proportions
-are preserved (e.g. all datasets keep their 5:1 Z:XY ratio).
+Zoom factors are ``native / target`` per axis: > 1 upsamples, < 1
+downsamples, 1 is a no-op.  Native resolutions are looked up per-volume
+from ``resolution_map`` (longest-prefix match on the ``"volume"`` key).
 
 When training on mixed datasets with different native resolutions,
 use ``resolution_map`` to specify per-volume resolutions.  The
@@ -155,11 +158,29 @@ class RandResolutionZoomd(MapTransform, Randomizable):
         label_keys: Optional[set] = None,
         resolution_map: Optional[Dict[str, Tuple[float, float, float]]] = None,
         volume_key: str = "volume",
+        mode: str = "ratio",
+        skip_isotropic: bool = True,
     ) -> None:
         super().__init__(keys)
         self.native_resolution = np.asarray(native_resolution, dtype=np.float64)
         self.target_range = np.asarray(target_range, dtype=np.float64)  # (3, 2)
         self.prob = float(prob)
+        # ``ratio``  -- sample one Y target, derive z/x from the native
+        #               anisotropy ratio (preserves each volume's anisotropy).
+        # ``union``  -- sample z and xy targets INDEPENDENTLY inside
+        #               ``target_range`` (the shared "union" envelope) and
+        #               resample every volume onto that common space, so the
+        #               voxel affinity offsets carry a consistent physical
+        #               meaning across datasets.  Isotropic volumes are skipped
+        #               (see ``skip_isotropic``).
+        if mode not in ("ratio", "union"):
+            raise ValueError(f"mode must be 'ratio' or 'union'; got {mode!r}.")
+        self.mode = mode
+        # In ``union`` mode, pass through isotropic volumes (native z==y==x,
+        # e.g. FIB-25 8x8x8) unchanged: resampling their fine z up to the
+        # anisotropic target would be a 4-5x downsample (huge safe-crop) and
+        # destroy their isotropy.
+        self.skip_isotropic = bool(skip_isotropic)
         self.label_keys = label_keys or {"label"}
         self.resolution_map: Optional[Dict[str, np.ndarray]] = None
         if resolution_map:
@@ -186,19 +207,40 @@ class RandResolutionZoomd(MapTransform, Randomizable):
             return self.resolution_map[best_prefix]
         return self.native_resolution
 
+    def _log_uniform(self, lo_hi: np.ndarray) -> float:
+        """Sample log-uniformly from a ``(min, max)`` pair (scale-symmetric)."""
+        lo, hi = float(lo_hi[0]), float(lo_hi[1])
+        return float(np.exp(self.R.uniform(np.log(lo), np.log(hi))))
+
     def randomize(self, data=None) -> None:  # noqa: D102
         self._do_zoom = self.R.random() < self.prob
-        if self._do_zoom:
-            native = self._resolve_native(data)
-            ref_lo, ref_hi = self.target_range[1]  # Y range
-            ref_target = self.R.uniform(ref_lo, ref_hi)
-            ratios = native / native[1]
-            target = np.clip(
-                ref_target * ratios,
-                self.target_range[:, 0],
-                self.target_range[:, 1],
-            )
+        if not self._do_zoom:
+            return
+        native = self._resolve_native(data)
+
+        if self.mode == "union":
+            # Pass isotropic volumes through untouched (see __init__).
+            if self.skip_isotropic and native[0] == native[1] == native[2]:
+                self._do_zoom = False
+                return
+            # Independent z and in-plane targets inside the shared envelope;
+            # y and x share one ``xy`` target to keep in-plane isotropy.
+            z_t = self._log_uniform(self.target_range[0])
+            xy_t = self._log_uniform(self.target_range[1])
+            target = np.array([z_t, xy_t, xy_t], dtype=np.float64)
             self._zoom = native / target
+            return
+
+        # ``ratio`` (legacy): one Y target, other axes from native ratio.
+        ref_lo, ref_hi = self.target_range[1]  # Y range
+        ref_target = self.R.uniform(ref_lo, ref_hi)
+        ratios = native / native[1]
+        target = np.clip(
+            ref_target * ratios,
+            self.target_range[:, 0],
+            self.target_range[:, 1],
+        )
+        self._zoom = native / target
 
     def __call__(self, data: Dict) -> Dict:
         self.randomize(data)

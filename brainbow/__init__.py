@@ -28,6 +28,8 @@ from brainbow.datasets import (
     LazyVolDataset,
     SNEMI3DDataset,
     MICRONSDataset,
+    FIB253DDataset,
+    CREMI3DDataset,
     NeuronsDataset,
 )
 from brainbow.preprocessors import (
@@ -41,6 +43,8 @@ from brainbow.datamodules import (
     CircuitDataModule,
     SNEMI3DDataModule,
     MICRONSDataModule,
+    FIB253DDataModule,
+    CREMI3DDataModule,
     NeuronsDataModule,
 )
 from brainbow.losses import AffinityFGLoss, HEAD_CHANNELS, HEAD_LAYOUT, slice_head
@@ -67,6 +71,8 @@ __all__ = [
     "LazyVolDataset",
     "SNEMI3DDataset",
     "MICRONSDataset",
+    "FIB253DDataset",
+    "CREMI3DDataset",
     "NeuronsDataset",
     "BasePreprocessor",
     "TIFFPreprocessor",
@@ -76,6 +82,8 @@ __all__ = [
     "CircuitDataModule",
     "SNEMI3DDataModule",
     "MICRONSDataModule",
+    "FIB253DDataModule",
+    "CREMI3DDataModule",
     "NeuronsDataModule",
     # Losses
     "AffinityFGLoss",

@@ -1,9 +1,11 @@
 """
 Neurons Dataset for neuron segmentation.
 
-Kasthuri et al., Cell 2015 — mouse somatosensory cortex (S1), layer 4.
-EM imagery at mip1 (2×2×10 nm), segmentation downloaded at mip0 then
-downsampled 2× in XY to match.
+Kasthuri et al., Cell 2015 — mouse somatosensory cortex (S1).  The
+densely-annotated cylinder from the public ``kasthuri2011`` volume (EM +
+ground-truth neuron ids) at **6 × 6 × 30 nm**.  Fetched by
+``scripts/download_snemi3d.py --source neurons`` (default crop
+5000 × 2900 × 300 at start ``(x=3000, y=7200, z=950)``).
 """
 
 from pathlib import Path
@@ -44,7 +46,7 @@ class NeuronsDataset(CircuitDataset):
         "Kasthuri, N., et al. (2015). Saturated Reconstruction of a Volume of "
         "Neocortex. Cell, 162(3), 648-661. doi:10.1016/j.cell.2015.06.054"
     )
-    _resolution: Dict[str, float] = {"x": 2.0, "y": 2.0, "z": 10.0}
+    _resolution: Dict[str, float] = {"x": 6.0, "y": 6.0, "z": 30.0}
     _labels_base: List[str] = ["background", "neuron"]
 
     def __init__(

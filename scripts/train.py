@@ -216,10 +216,15 @@ def _build_datamodule_kwargs(cfg: DictConfig) -> Dict[str, Any]:
             tuple(tuple(r) for r in resolution_zoom_range)
             if resolution_zoom_range is not None else None
         ),
+        "resolution_zoom_mode": str(data_cfg.get("resolution_zoom_mode", "ratio")),
         "resolution_map": (
             {str(k): tuple(v) for k, v in resolution_map.items()}
             if resolution_map is not None else None
         ),
+        "missing_slice_prob": float(data_cfg.get("missing_slice_prob", 0.0)),
+        "missing_slice_max": int(data_cfg.get("missing_slice_max", 2)),
+        "missing_slice_fill": str(data_cfg.get("missing_slice_fill", "zero")),
+        "missing_slice_consecutive": bool(data_cfg.get("missing_slice_consecutive", False)),
         "image_size": tuple(image_size) if isinstance(image_size, list) else image_size,
         "patch_size": tuple(patch_size) if patch_size else None,
         "num_samples": data_cfg.get("num_samples"),
@@ -235,6 +240,8 @@ def build_datamodule(cfg: DictConfig) -> pl.LightningDataModule:
     avoids an import-time registry pattern.
     """
     from brainbow.datamodules import (
+        CREMI3DDataModule,
+        FIB253DDataModule,
         MICRONSDataModule,
         NeuronsDataModule,
         SNEMI3DDataModule,
@@ -243,6 +250,8 @@ def build_datamodule(cfg: DictConfig) -> pl.LightningDataModule:
     datamodule_classes = {
         "snemi3d": SNEMI3DDataModule,
         "microns": MICRONSDataModule,
+        "fib253d": FIB253DDataModule,
+        "cremi3d": CREMI3DDataModule,
         "neurons": NeuronsDataModule,
     }
 

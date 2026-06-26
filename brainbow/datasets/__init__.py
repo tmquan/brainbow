@@ -5,8 +5,10 @@ Two dataset families live here, with **different** semantics:
 
 * :class:`CircuitDataset` (eager, MONAI ``CacheDataset``-backed) and its
   leaves :class:`SNEMI3DDataset`, :class:`MICRONSDataset`,
-  :class:`NeuronsDataset` -- preload entire volumes into RAM at
-  ``__init__``, then serve crops via the MONAI transform pipeline.
+  :class:`NeuronsDataset`, :class:`CREMI3DDataset`, :class:`FIB253DDataset`
+  (the last two are thin metadata subclasses of :class:`MICRONSDataset`)
+  -- preload entire volumes into RAM at ``__init__``, then serve crops via
+  the MONAI transform pipeline.
   Best for small-to-medium datasets (single-machine, many epochs).
 * :class:`LazyVolDataset` -- a thin ``torch.utils.data.Dataset`` that
   reads patches on demand from HDF5 with a thread-local file cache and
@@ -34,6 +36,8 @@ from brainbow.datasets.base import CircuitDataset
 from brainbow.datasets.lazy import LazyVolDataset
 from brainbow.datasets.snemi3d import SNEMI3DDataset
 from brainbow.datasets.microns import MICRONSDataset
+from brainbow.datasets.fib253d import FIB253DDataset
+from brainbow.datasets.cremi3d import CREMI3DDataset
 from brainbow.datasets.neurons import NeuronsDataset
 
 __all__ = [
@@ -41,5 +45,7 @@ __all__ = [
     "LazyVolDataset",
     "SNEMI3DDataset",
     "MICRONSDataset",
+    "FIB253DDataset",
+    "CREMI3DDataset",
     "NeuronsDataset",
 ]

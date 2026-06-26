@@ -1,11 +1,12 @@
 # Brainbow Documentation Index
 
-Pick the doc that matches *your* current question.  All seven live in
+Pick the doc that matches *your* current question.  All eight live in
 `doc/`.
 
 | When you're asking ...                                           | Read                                                          |
 | ----------------------------------------------------------------- | ------------------------------------------------------------- |
 | "What is in each folder?"                                         | [`STRUCTURE.md`](./STRUCTURE.md)                              |
+| "What datasets are there, and how do I download each one?"        | [`DATASETS.md`](./DATASETS.md)                                |
 | "Why is the code organised this way?  What pattern do you reach for?" | [`ORGANIZATION.md`](./ORGANIZATION.md)                    |
 | "How does the affinity head + loss + Mutex Watershed work (channel layout, math, eval)?" | [`MUTEXWATERSHED.md`](./MUTEXWATERSHED.md)        |
 | "What are the backbone parameter budgets / data flow?"               | [`ARCHITECT.md`](./ARCHITECT.md)                          |
